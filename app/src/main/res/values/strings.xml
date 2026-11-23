@@ -1,7 +1,7 @@
 <resources>
-    <string name="app_name">MacroGG</string>
-    <string name="accessibility_service_label">MacroGG Gesture Engine</string>
-    <string name="accessibility_service_description">Menjalankan klik otomatis, swipe, rekaman sentuhan, dan klik berbasis deteksi gambar/warna tanpa root.</string>
+    <string name="app_name">Wjust macro</string>
+    <string name="accessibility_service_label">Wjust macro Engine</string>
+    <string name="accessibility_service_description">Menjalankan klik otomatis, swipe, rekaman sentuhan, serta deteksi gambar, teks/nilai, dan warna tanpa root.</string>
 
     <!-- Navigation -->
     <string name="nav_macros">Macro</string>
@@ -9,10 +9,10 @@
     <string name="nav_tools">Lua &amp; Log</string>
 
     <!-- Notifications -->
-    <string name="notif_channel_overlay">MacroGG Floating Overlay</string>
-    <string name="notif_channel_capture">MacroGG Tangkap Layar</string>
-    <string name="notif_overlay_title">MacroGG Overlay Aktif</string>
+    <string name="notif_channel_overlay">Wjust macro Overlay</string>
+    <string name="notif_channel_capture">Wjust macro Tangkap Layar</string>
+    <string name="notif_overlay_title">Wjust macro Overlay Aktif</string>
     <string name="notif_overlay_text">Bar mengambang siap menjalankan auto clicker, crop gambar, dan rekaman sentuhan.</string>
-    <string name="notif_capture_title">MacroGG Deteksi Gambar &amp; Warna Aktif</string>
-    <string name="notif_capture_text">Membaca layar secara lokal di memori untuk deteksi gambar &amp; warna.</string>
+    <string name="notif_capture_title">Wjust macro Deteksi Layar Aktif</string>
+    <string name="notif_capture_text">Membaca layar secara lokal di memori untuk deteksi gambar, teks/nilai, &amp; warna.</string>
 </resources>

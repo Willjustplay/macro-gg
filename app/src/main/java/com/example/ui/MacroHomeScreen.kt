@@ -1,6 +1,16 @@
 package com.example.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +36,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.ImageSearch
@@ -33,8 +45,10 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -47,6 +61,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,14 +70,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.automation.EngineState
 import com.example.data.ColorAction
 import com.example.data.ImageAction
 import com.example.data.Macro
 import com.example.data.RecordAction
+import com.example.data.TextAction
 import com.example.data.countActions
 import com.example.data.walk
 
@@ -88,86 +107,218 @@ fun MacroHomeScreen(
     onExportMacro: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit
 ) {
+    val activePermCount = remember(permissions) {
+        listOf(
+            permissions.accessibilityEnabled,
+            permissions.overlayEnabled,
+            permissions.screenCaptureActive,
+            permissions.batteryOptimizationIgnored
+        ).count { it }
+    }
+    val allPermsReady = activePermCount == 4
+    var permsExpanded by remember { mutableStateOf(!allPermsReady) }
+
+    // Automatically collapse when all 4 permissions become active, and expand if any drops.
+    LaunchedEffect(allPermsReady) {
+        permsExpanded = !allPermsReady
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Header + Overlay toggle
+        // Brand Header with Wjust macro Logo + Live Status + Overlay Action
         item(key = "header") {
+            val statusColor by animateColorAsState(
+                targetValue = when {
+                    engineState == EngineState.RUNNING -> Color(0xFF10B981)
+                    engineState == EngineState.PAUSED -> Color(0xFFF59E0B)
+                    isOverlayActive -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                label = "statusColor"
+            )
+            val statusText = when {
+                engineState == EngineState.RUNNING -> "Berjalan"
+                engineState == EngineState.PAUSED -> "Dijeda"
+                isOverlayActive -> "Overlay Aktif"
+                else -> "Siap • Offline"
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text("MacroGG", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Auto Clicker & Image Detection",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.wjust_logo_badge),
+                        contentDescription = "Logo Wjust macro",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(RoundedCornerShape(12.dp))
                     )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            "Wjust macro",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor)
+                            )
+                            Text(
+                                statusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = statusColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
+
+                Spacer(Modifier.width(8.dp))
+
                 if (engineState == EngineState.RUNNING || engineState == EngineState.PAUSED) {
                     Button(
                         onClick = onStopEngine,
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                         Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Stop")
+                        Text("Stop", fontWeight = FontWeight.SemiBold)
                     }
                 } else {
-                    FilledTonalButton(onClick = onToggleOverlay) {
+                    FilledTonalButton(
+                        onClick = onToggleOverlay,
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
                         Icon(Icons.Filled.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(if (isOverlayActive) "Tutup Bar" else "Buka Bar")
+                        Text(if (isOverlayActive) "Tutup Bar" else "Buka Bar", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         }
 
-        // Compact Permission Status Bar (with Keep-Alive Battery exemption)
+        // Dynamic Collapsible Permission Card (collapses neatly once 4/4 active)
         item(key = "permissions") {
+            val headerTint = if (allPermsReady) Color(0xFF10B981) else Color(0xFFF59E0B)
             Card(
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (allPermsReady) {
+                        headerTint.copy(alpha = 0.10f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    }
+                ),
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (allPermsReady) headerTint.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                )
             ) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Izin Otomasi (tetap aktif di latar belakang)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { permsExpanded = !permsExpanded }
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        PermissionPill(
-                            label = "Aksesibilitas",
-                            active = permissions.accessibilityEnabled,
-                            modifier = Modifier.weight(1f),
-                            onClick = onOpenAccessibility
-                        )
-                        PermissionPill(
-                            label = "Overlay",
-                            active = permissions.overlayEnabled,
-                            modifier = Modifier.weight(1f),
-                            onClick = onRequestOverlay
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (allPermsReady) Icons.Filled.CheckCircle else Icons.Filled.WarningAmber,
+                                contentDescription = null,
+                                tint = headerTint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = if (allPermsReady) "Semua Izin Otomasi Aktif" else "Izin Otomasi ($activePermCount/4 Aktif)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (allPermsReady) headerTint else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Icon(
+                            imageVector = if (permsExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (permsExpanded) "Tutup" else "Buka",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+
+                    AnimatedVisibility(
+                        visible = permsExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
                     ) {
-                        PermissionPill(
-                            label = "Tangkap Layar",
-                            active = permissions.screenCaptureActive,
-                            modifier = Modifier.weight(1f),
-                            onClick = onActivateScreenCapture
-                        )
-                        PermissionPill(
-                            label = "Tetap Aktif",
-                            active = permissions.batteryOptimizationIgnored,
-                            modifier = Modifier.weight(1f),
-                            onClick = onRequestBatteryUnrestricted
-                        )
+                        Column(
+                            modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                PermissionPill(
+                                    label = "Aksesibilitas",
+                                    active = permissions.accessibilityEnabled,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = onOpenAccessibility
+                                )
+                                PermissionPill(
+                                    label = "Overlay",
+                                    active = permissions.overlayEnabled,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = onRequestOverlay
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                PermissionPill(
+                                    label = "Tangkap Layar",
+                                    active = permissions.screenCaptureActive,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = onActivateScreenCapture
+                                )
+                                PermissionPill(
+                                    label = "Tetap Aktif",
+                                    active = permissions.batteryOptimizationIgnored,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = onRequestBatteryUnrestricted
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -181,30 +332,33 @@ fun MacroHomeScreen(
             ) {
                 Button(
                     onClick = onQuickAutoClicker,
-                    modifier = Modifier.weight(1.25f),
+                    modifier = Modifier.weight(1.28f),
+                    shape = RoundedCornerShape(14.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp)
                 ) {
                     Icon(Icons.Filled.AdsClick, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Auto Clicker", maxLines = 1)
+                    Text("Auto Clicker", maxLines = 1, fontWeight = FontWeight.SemiBold)
                 }
                 FilledTonalButton(
                     onClick = onCreateMacro,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.95f),
+                    shape = RoundedCornerShape(14.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp)
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Baru", maxLines = 1)
+                    Text("Baru", maxLines = 1, fontWeight = FontWeight.SemiBold)
                 }
                 OutlinedButton(
                     onClick = onImportMacro,
-                    modifier = Modifier.weight(0.9f),
+                    modifier = Modifier.weight(0.92f),
+                    shape = RoundedCornerShape(14.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp)
                 ) {
                     Icon(Icons.Filled.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Impor", maxLines = 1)
+                    Text("Impor", maxLines = 1, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -214,20 +368,27 @@ fun MacroHomeScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp),
+                    .padding(top = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Daftar Macro (${macros.size})",
+                    "Macro Tersimpan",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                Text(
-                    "Offline • Lokal",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                ) {
+                    Text(
+                        "${macros.size} item",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
             }
         }
 
@@ -235,17 +396,30 @@ fun MacroHomeScreen(
             item(key = "empty") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 ) {
                     Column(
-                        modifier = Modifier.padding(24.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(28.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Filled.ImageSearch, contentDescription = null, modifier = Modifier.size(36.dp), tint = MaterialTheme.colorScheme.primary)
-                        Text("Belum ada macro tersimpan", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Icon(
+                            Icons.Filled.ImageSearch,
+                            contentDescription = null,
+                            modifier = Modifier.size(40.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                         Text(
-                            "Tekan 'Auto Clicker' untuk mulai cepat atau 'Baru' untuk membuat macro deteksi gambar.",
+                            "Belum ada macro tersimpan",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            "Tekan 'Auto Clicker' untuk mulai cepat atau 'Baru' untuk membuat macro deteksi gambar, teks, atau warna.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -257,6 +431,7 @@ fun MacroHomeScreen(
                 MacroListCard(
                     macro = macro,
                     isActive = macro.id == activeMacroId && isOverlayActive,
+                    modifier = Modifier.animateItem(),
                     onEdit = { onEditMacro(macro) },
                     onLaunchOverlay = { onLaunchMacroOverlay(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
@@ -282,7 +457,7 @@ private fun PermissionPill(
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(10.dp),
         color = tint.copy(alpha = 0.14f),
-        border = BorderStroke(1.dp, tint.copy(alpha = 0.45f))
+        border = BorderStroke(1.dp, tint.copy(alpha = 0.42f))
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
@@ -311,6 +486,7 @@ private fun PermissionPill(
 private fun MacroListCard(
     macro: Macro,
     isActive: Boolean,
+    modifier: Modifier = Modifier,
     onEdit: () -> Unit,
     onLaunchOverlay: () -> Unit,
     onDuplicate: () -> Unit,
@@ -320,17 +496,37 @@ private fun MacroListCard(
     var menuOpen by remember { mutableStateOf(false) }
     val allActions = remember(macro) { macro.actions.walk().toList() }
     val hasImage = allActions.any { it is ImageAction }
+    val hasText = allActions.any { it is TextAction }
     val hasColor = allActions.any { it is ColorAction }
     val hasRecord = allActions.any { it is RecordAction }
 
+    val badgeColor = when {
+        hasImage -> Color(0xFF10B981)
+        hasText -> Color(0xFF22D3EE)
+        hasColor -> Color(0xFFA78BFA)
+        else -> MaterialTheme.colorScheme.primary
+    }
+    val badgeIcon = when {
+        hasImage -> Icons.Filled.ImageSearch
+        hasText -> Icons.Filled.TextFields
+        else -> Icons.Filled.AdsClick
+    }
+
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onEdit),
         shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isActive) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
+        ),
         border = BorderStroke(
             width = if (isActive) 1.5.dp else 1.dp,
-            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
+            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
         )
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -339,15 +535,14 @@ private fun MacroListCard(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            (if (hasImage) Color(0xFF10B981) else MaterialTheme.colorScheme.primary).copy(alpha = 0.16f)
-                        ),
+                        .background(badgeColor.copy(alpha = 0.15f)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = if (hasImage) Icons.Filled.ImageSearch else Icons.Filled.AdsClick,
+                        imageVector = badgeIcon,
                         contentDescription = null,
-                        tint = if (hasImage) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                        tint = badgeColor,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
                 Spacer(Modifier.width(12.dp))
@@ -377,8 +572,8 @@ private fun MacroListCard(
                     )
                 }
                 Box {
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu")
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu", modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
@@ -406,15 +601,17 @@ private fun MacroListCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     if (hasImage) FeatureTag("Gambar", Color(0xFF10B981))
-                    if (hasColor) FeatureTag("Warna", Color(0xFF8B5CF6))
+                    if (hasText) FeatureTag("Teks", Color(0xFF22D3EE))
+                    if (hasColor) FeatureTag("Warna", Color(0xFFA78BFA))
                     if (hasRecord) FeatureTag("Rekaman", Color(0xFFEF4444))
-                    if (!hasImage && !hasColor && !hasRecord) FeatureTag("Clicker", Color(0xFF0D9488))
+                    if (!hasImage && !hasText && !hasColor && !hasRecord) FeatureTag("Clicker", Color(0xFF22D3EE))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = onEdit,
+                        shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
@@ -424,6 +621,7 @@ private fun MacroListCard(
                     }
                     Button(
                         onClick = onLaunchOverlay,
+                        shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
@@ -440,7 +638,7 @@ private fun MacroListCard(
 @Composable
 private fun FeatureTag(text: String, color: Color) {
     Surface(
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(7.dp),
         color = color.copy(alpha = 0.14f)
     ) {
         Text(

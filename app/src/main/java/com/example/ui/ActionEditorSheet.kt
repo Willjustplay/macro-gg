@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.Button
@@ -79,6 +80,8 @@ import com.example.data.RestartAction
 import com.example.data.RunMacroAction
 import com.example.data.StopAction
 import com.example.data.SwipeAction
+import com.example.data.TextAction
+import com.example.data.TextCompareMode
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.create
@@ -93,11 +96,13 @@ fun ActionEditorSheet(
     currentMacroId: String,
     allMacros: List<Macro>,
     images: List<ImageAsset>,
+    imageFolders: List<String>,
     lastPickedPixel: PickedPixel?,
     screenW: Int,
     screenH: Int,
     onLaunchCropForAction: (actionId: String) -> Unit,
     onPickTargetOnScreen: (updatedDraft: Action, targetActionId: String) -> Unit,
+    onPickRegionOnScreen: (updatedDraft: Action, targetActionId: String) -> Unit,
     onRecropImage: (String, Bitmap) -> Unit,
     onSave: (Action) -> Unit,
     onDismiss: () -> Unit
@@ -274,8 +279,41 @@ fun ActionEditorSheet(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
+                        var folderFilter by remember(a.id) { mutableStateOf<String?>(null) }
+                        if (imageFolders.isNotEmpty()) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                item(key = "f_all") {
+                                    FilterChip(
+                                        selected = folderFilter == null,
+                                        onClick = { folderFilter = null },
+                                        label = { Text("Semua", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                                item(key = "f_root") {
+                                    FilterChip(
+                                        selected = folderFilter == "",
+                                        onClick = { folderFilter = "" },
+                                        label = { Text("Utama", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                                items(imageFolders, key = { "f_$it" }) { f ->
+                                    FilterChip(
+                                        selected = folderFilter == f,
+                                        onClick = { folderFilter = f },
+                                        label = { Text("📁 $f", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                        }
+                        val filteredImages = remember(images, folderFilter) {
+                            when (folderFilter) {
+                                null -> images
+                                "" -> images.filter { it.folder.isBlank() }
+                                else -> images.filter { it.folder == folderFilter }
+                            }
+                        }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            items(images, key = { it.name }) { asset ->
+                            items(filteredImages, key = { it.name }) { asset ->
                                 val selected = asset.name == a.imageName
                                 val bmp = rememberAssetThumbnail(asset.path, asset.updatedAt)
                                 Column(
@@ -302,7 +340,7 @@ fun ActionEditorSheet(
                                         if (bmp != null) {
                                             Image(
                                                 bitmap = bmp,
-                                                contentDescription = asset.name,
+                                                contentDescription = asset.displayName,
                                                 contentScale = ContentScale.Fit,
                                                 modifier = Modifier.size(60.dp)
                                             )
@@ -310,7 +348,7 @@ fun ActionEditorSheet(
                                     }
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        asset.name.removeSuffix(".png"),
+                                        asset.displayName.removeSuffix(".png"),
                                         style = MaterialTheme.typography.labelSmall,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -421,6 +459,172 @@ fun ActionEditorSheet(
                         Column(Modifier.weight(1f)) {
                             Text("Batasi area pencarian (opsional)", style = MaterialTheme.typography.bodyMedium)
                             Text("Lebih cepat jika gambar selalu muncul di area tertentu", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = useRegion,
+                            onCheckedChange = {
+                                useRegion = it
+                                draft = a.copy(region = if (it) (a.region ?: Region(0, 0, screenW, screenH)) else null)
+                            }
+                        )
+                    }
+                    if (useRegion) {
+                        FilledTonalButton(
+                            onClick = { onPickRegionOnScreen(draft, a.id) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.CropFree, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Pilih Area Pencarian di Layar")
+                        }
+                        val reg = a.region ?: Region(0, 0, screenW, screenH)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NumberField("Kiri", reg.left.toString(), Modifier.weight(1f)) {
+                                draft = a.copy(region = reg.copy(left = it.toIntOrNull() ?: reg.left))
+                            }
+                            NumberField("Atas", reg.top.toString(), Modifier.weight(1f)) {
+                                draft = a.copy(region = reg.copy(top = it.toIntOrNull() ?: reg.top))
+                            }
+                            NumberField("Kanan", reg.right.toString(), Modifier.weight(1f)) {
+                                draft = a.copy(region = reg.copy(right = it.toIntOrNull() ?: reg.right))
+                            }
+                            NumberField("Bawah", reg.bottom.toString(), Modifier.weight(1f)) {
+                                draft = a.copy(region = reg.copy(bottom = it.toIntOrNull() ?: reg.bottom))
+                            }
+                        }
+                    }
+                }
+
+                is TextAction -> {
+                    FilledTonalButton(
+                        onClick = { onPickRegionOnScreen(draft, a.id) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.CropFree, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Pilih Area Baca Teks/Nilai di Layar")
+                    }
+
+                    Text("Mode Deteksi Teks & Nilai", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextCompareMode.entries.forEach { m ->
+                            FilterChip(
+                                selected = a.compareMode == m,
+                                onClick = { draft = a.copy(compareMode = m) },
+                                label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+
+                    if (!a.compareMode.isNumeric) {
+                        OutlinedTextField(
+                            value = a.query,
+                            onValueChange = { draft = a.copy(query = it) },
+                            label = { Text("Teks target (tidak peka huruf besar/kecil)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        val initNumStr = remember(a.id) {
+                            if (a.targetNumber == a.targetNumber.toLong().toDouble()) {
+                                a.targetNumber.toLong().toString()
+                            } else {
+                                a.targetNumber.toString()
+                            }
+                        }
+                        var numText by remember(a.id) { mutableStateOf(initNumStr) }
+                        OutlinedTextField(
+                            value = numText,
+                            onValueChange = { raw ->
+                                val filtered = raw.filter { it.isDigit() || it == '.' || it == ',' || it == '-' }
+                                numText = filtered
+                                filtered.replace(',', '.').toDoubleOrNull()?.let { parsed ->
+                                    draft = a.copy(targetNumber = parsed)
+                                }
+                            },
+                            label = { Text("Nilai pembanding (mendukung desimal & negatif)") },
+                            supportingText = { Text("Contoh: 500, 12.5, atau 10000 (otomatis baca format 10K / 1,500)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        NumberField("Batas waktu cari (ms)", a.timeoutMs.toString(), Modifier.weight(1f)) {
+                            draft = a.copy(timeoutMs = (it.toLongOrNull() ?: a.timeoutMs).coerceAtLeast(0L))
+                        }
+                        NumberField("Jeda sesudah (ms)", a.delayAfterMs.toString(), Modifier.weight(1f)) {
+                            draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
+                        }
+                    }
+
+                    HorizontalDivider()
+                    BranchSectionEditor(
+                        title = "Saat Teks / Nilai Cocok (Jika Ditemukan)",
+                        accent = Color(0xFF10B981),
+                        modeLabel = "Setelah cabang Jika Cocok:",
+                        mode = a.foundMode,
+                        onModeChange = { draft = a.copy(foundMode = it) },
+                        branchActions = a.thenActions,
+                        onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(thenActions = a.thenActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
+                        onDeleteChild = { cid -> draft = a.copy(thenActions = a.thenActions.filter { it.id != cid }) },
+                        screenW = screenW,
+                        screenH = screenH,
+                        defaultImage = images.firstOrNull()?.name.orEmpty(),
+                        extraContent = {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Klik posisi teks saat cocok", style = MaterialTheme.typography.bodyMedium)
+                                Switch(checked = a.clickOnFound, onCheckedChange = { draft = a.copy(clickOnFound = it) })
+                            }
+                        }
+                    )
+
+                    BranchSectionEditor(
+                        title = "Saat Tidak Cocok (Else)",
+                        accent = Color(0xFFF59E0B),
+                        modeLabel = "Setelah cabang Tidak Cocok:",
+                        mode = a.notFound,
+                        onModeChange = { draft = a.copy(notFound = it) },
+                        branchActions = a.elseActions,
+                        onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(elseActions = a.elseActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
+                        onDeleteChild = { cid -> draft = a.copy(elseActions = a.elseActions.filter { it.id != cid }) },
+                        screenW = screenW,
+                        screenH = screenH,
+                        defaultImage = images.firstOrNull()?.name.orEmpty()
+                    )
+
+                    var useRegion by remember(a.id) { mutableStateOf(a.region != null) }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Batasi area baca OCR (disarankan)", style = MaterialTheme.typography.bodyMedium)
+                            Text("Membaca hanya di kotak angka/teks agar lebih cepat & akurat", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(
                             checked = useRegion,
@@ -749,8 +953,8 @@ private fun BranchSectionEditor(
             if (showAddRow) {
                 val quickKinds = listOf(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
-                    ActionKind.WAIT, ActionKind.IMAGE, ActionKind.RUN_MACRO,
-                    ActionKind.RESTART, ActionKind.STOP
+                    ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TEXT,
+                    ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     quickKinds.forEach { k ->

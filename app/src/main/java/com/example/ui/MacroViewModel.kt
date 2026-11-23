@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.PowerManager
+import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -44,6 +45,7 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     val macros: StateFlow<List<Macro>> = store.macros
     val scripts: StateFlow<List<LuaScript>> = store.scripts
     val images: StateFlow<List<ImageAsset>> = store.images
+    val imageFolders: StateFlow<List<String>> = store.imageFolders
     val settings: StateFlow<AppSettings> = store.settings
 
     private val _permissions = MutableStateFlow(PermissionHealth())
@@ -174,8 +176,25 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     if (!ok) error("File gambar '$imageName' tidak ditemukan.")
                 }
             }
-            if (result.isSuccess) _messages.emit("Gambar '$imageName' disimpan (.png).")
+            if (result.isSuccess) _messages.emit("Gambar '${imageName.substringAfterLast('/')}' disimpan (.png).")
             else _messages.emit("Gagal menyimpan gambar: ${result.exceptionOrNull()?.message}")
+        }
+    }
+
+    fun exportImagesZipToUri(imageNames: Collection<String>, uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    appContext.contentResolver.openOutputStream(uri)?.use { out ->
+                        store.exportImagesZip(imageNames, out)
+                    } ?: error("Tidak dapat membuka file tujuan.")
+                }
+            }
+            result.onSuccess { count ->
+                _messages.emit("$count gambar diekspor (.zip).")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor gambar: ${err.message}")
+            }
         }
     }
 
@@ -196,26 +215,55 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
-    // ---- Images ----
+    // ---- Images & Folders ----
 
-    fun importImageFromUri(uri: Uri, desiredName: String = "gambar") {
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bmp = appContext.contentResolver.openInputStream(uri)?.use { input ->
-                        BitmapFactory.decodeStream(input)
-                    } ?: error("Format gambar tidak didukung.")
-                    try {
-                        store.saveImage(desiredName, bmp)
-                    } finally {
-                        bmp.recycle()
-                    }
-                }
+    private fun syncActiveMacroFromStore() {
+        val activeId = AutomationCoordinator.activeMacro.value.id
+        store.getMacroById(activeId)?.let { AutomationCoordinator.selectMacro(it) }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        val raw = runCatching {
+            appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
             }
-            result.onSuccess { asset ->
-                _messages.emit("Gambar '${asset.name}' ditambahkan.")
-            }.onFailure { err ->
-                _messages.emit("Gagal impor gambar: ${err.message}")
+        }.getOrNull()
+        return raw?.substringBeforeLast('.')?.trim().takeIf { !it.isNullOrBlank() } ?: "gambar"
+    }
+
+    fun importImageFromUri(uri: Uri, desiredName: String = "gambar", folder: String = "") {
+        importImagesFromUris(listOf(uri), folder = folder, fallbackName = desiredName)
+    }
+
+    fun importImagesFromUris(uris: List<Uri>, folder: String = "", fallbackName: String? = null) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val (addedAssets, failedCount) = withContext(Dispatchers.IO) {
+                val added = ArrayList<ImageAsset>()
+                var failed = 0
+                for (uri in uris) {
+                    val ok = runCatching {
+                        val name = fallbackName ?: queryDisplayName(uri)
+                        val bmp = appContext.contentResolver.openInputStream(uri)?.use { input ->
+                            BitmapFactory.decodeStream(input)
+                        } ?: error("Format gambar tidak didukung.")
+                        try {
+                            store.saveImage(name, bmp, folder)
+                        } finally {
+                            bmp.recycle()
+                        }
+                    }
+                    ok.onSuccess { added += it }.onFailure { failed++ }
+                }
+                added to failed
+            }
+
+            val destLabel = folder.ifBlank { "Utama" }
+            when {
+                addedAssets.isEmpty() -> _messages.emit("Gagal mengimpor gambar (format tidak didukung).")
+                addedAssets.size == 1 && failedCount == 0 -> _messages.emit("Gambar '${addedAssets.first().displayName}' ditambahkan.")
+                failedCount == 0 -> _messages.emit("${addedAssets.size} gambar berhasil ditambahkan ke '$destLabel'.")
+                else -> _messages.emit("${addedAssets.size} gambar ditambahkan ($failedCount gagal dibaca).")
             }
         }
     }
@@ -232,22 +280,54 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 }
             }
             result.onSuccess { asset ->
-                _messages.emit("Gambar '${asset.name}' dipotong ulang (${asset.width}×${asset.height}).")
+                _messages.emit("Gambar '${asset.displayName}' dipotong ulang (${asset.width}×${asset.height}).")
             }.onFailure { err ->
                 _messages.emit("Gagal potong ulang: ${err.message}")
             }
         }
     }
 
+    fun createImageFolder(rawName: String) {
+        val created = store.createImageFolder(rawName)
+        if (created != null) _messages.tryEmit("Folder '$created' dibuat.")
+        else _messages.tryEmit("Nama folder tidak valid.")
+    }
+
+    fun deleteImageFolder(folderName: String) {
+        if (store.deleteImageFolder(folderName)) {
+            syncActiveMacroFromStore()
+            _messages.tryEmit("Folder '$folderName' dihapus (gambar dipindahkan ke Utama).")
+        } else {
+            _messages.tryEmit("Gagal menghapus folder '$folderName'.")
+        }
+    }
+
+    fun moveImages(names: Collection<String>, targetFolder: String) {
+        val moved = store.moveImages(names, targetFolder)
+        syncActiveMacroFromStore()
+        val destLabel = targetFolder.ifBlank { "Utama" }
+        if (moved > 0) _messages.tryEmit("$moved gambar dipindahkan ke '$destLabel'.")
+        else _messages.tryEmit("Gambar sudah berada di '$destLabel'.")
+    }
+
     fun renameImage(oldName: String, newName: String) {
         val renamed = store.renameImage(oldName, newName)
-        if (renamed != null) _messages.tryEmit("Diubah menjadi '$renamed'.")
-        else _messages.tryEmit("Gagal mengubah nama gambar.")
+        if (renamed != null) {
+            syncActiveMacroFromStore()
+            _messages.tryEmit("Diubah menjadi '${renamed.substringAfterLast('/')}'.")
+        } else {
+            _messages.tryEmit("Gagal mengubah nama gambar.")
+        }
     }
 
     fun deleteImage(name: String) {
         store.deleteImage(name)
-        _messages.tryEmit("Gambar '$name' dihapus.")
+        _messages.tryEmit("Gambar '${name.substringAfterLast('/')}' dihapus.")
+    }
+
+    fun deleteImages(names: Collection<String>) {
+        val count = store.deleteImages(names)
+        if (count > 0) _messages.tryEmit("$count gambar dihapus.")
     }
 
     // ---- Lua Scripts ----

@@ -15,6 +15,7 @@ import com.example.data.RecordedGesture
 import com.example.data.Region
 import com.example.data.RunMacroAction
 import com.example.data.SwipeAction
+import com.example.data.TextAction
 import com.example.data.ZoomAction
 import com.example.data.insertInto
 import com.example.data.moveAction
@@ -23,7 +24,9 @@ import com.example.data.updateAction
 import com.example.data.walk
 import com.example.vision.Frame
 import com.example.vision.MatchResult
+import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
+import com.example.vision.ScreenTextRecognizer
 import com.example.vision.TemplateMatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -140,26 +143,26 @@ object AutomationCoordinator {
         }
     }
 
-    fun addQuickClickMarker(x: Int, y: Int) {
+    fun addQuickClickMarker(x: Int, y: Int): ClickAction {
         val settings = store?.settings?.value
         val tapMs = settings?.defaultTapDurationMs ?: 50L
+        val created = ClickAction(x = x, y = y, durationMs = tapMs, delayAfterMs = 300L)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions + ClickAction(x = x, y = y, durationMs = tapMs, delayAfterMs = 300L)
-            )
+            macro.copy(actions = macro.actions + created)
         }
         ExecutionLogBus.info("Titik klik ditambahkan di ($x, $y).")
+        return created
     }
 
-    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int) {
+    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int): SwipeAction {
+        val created = SwipeAction(x1 = x1, y1 = y1, x2 = x2, y2 = y2, durationMs = 350L, delayAfterMs = 300L)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions + SwipeAction(x1 = x1, y1 = y1, x2 = x2, y2 = y2, durationMs = 350L, delayAfterMs = 300L)
-            )
+            macro.copy(actions = macro.actions + created)
         }
         ExecutionLogBus.info("Swipe ditambahkan ($x1,$y1) → ($x2,$y2).")
+        return created
     }
 
     fun addQuickImageAction(imageName: String, threshold: Float = 0.80f, region: Region? = null) {
@@ -188,6 +191,22 @@ object AutomationCoordinator {
             )
         }
         ExecutionLogBus.image("Gambar '$imageName' dipasang ke aksi Deteksi Gambar.")
+    }
+
+    fun bindRegionToAction(actionId: String, region: Region) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions.updateAction(actionId) { a ->
+                    when (a) {
+                        is TextAction -> a.copy(region = region)
+                        is ImageAction -> a.copy(region = region)
+                        else -> a
+                    }
+                }
+            )
+        }
+        ExecutionLogBus.info("Area baca (${region.left},${region.top})–(${region.right},${region.bottom}) disimpan.")
     }
 
     fun addRecordedGestures(gestures: List<RecordedGesture>) {
@@ -260,7 +279,7 @@ object AutomationCoordinator {
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
             for (a in m.actions.walk()) {
-                if (a is ImageAction || a is ColorAction) return true
+                if (a is ImageAction || a is TextAction || a is ColorAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
                     if (linked != null && check(linked)) return true
@@ -307,7 +326,7 @@ object AutomationCoordinator {
             return
         }
         if (macroNeedsScreenCapture(macro) && !ScreenCaptureService.isCapturing.value) {
-            ExecutionLogBus.warn("Tangkap layar belum aktif — deteksi gambar/warna tidak dapat melihat layar.")
+            ExecutionLogBus.warn("Tangkap layar belum aktif — deteksi gambar/teks/warna tidak dapat melihat layar.")
         }
 
         selectMacro(macro)
@@ -346,6 +365,14 @@ object AutomationCoordinator {
 
                 override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
                 override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
+                override suspend fun recognizeText(region: Region?): List<OcrBlock> {
+                    val bmp = ScreenCaptureService.captureBitmapCopy() ?: return emptyList()
+                    return try {
+                        ScreenTextRecognizer.recognize(bmp, region)
+                    } finally {
+                        bmp.recycle()
+                    }
+                }
                 override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
                 override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)
                 override fun onMatchFound(match: MatchResult, label: String) {

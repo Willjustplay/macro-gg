@@ -16,7 +16,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -93,14 +95,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MacroGGApp()
+            WjustMacroApp()
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MacroGGApp() {
+private fun WjustMacroApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -111,6 +113,7 @@ private fun MacroGGApp() {
     val macros by viewModel.macros.collectAsStateWithLifecycle()
     val scripts by viewModel.scripts.collectAsStateWithLifecycle()
     val images by viewModel.images.collectAsStateWithLifecycle()
+    val imageFolders by viewModel.imageFolders.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
     val syntaxResult by viewModel.syntaxResult.collectAsStateWithLifecycle()
@@ -128,6 +131,8 @@ private fun MacroGGApp() {
     var editingMacroId by remember { mutableStateOf<String?>(null) }
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
+    var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingImportGalleryFolder by remember { mutableStateOf("") }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -164,6 +169,16 @@ private fun MacroGGApp() {
         }
     }
 
+    val exportImagesZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val list = pendingExportImagesZip
+        pendingExportImagesZip = emptyList()
+        if (uri != null && list.isNotEmpty()) {
+            viewModel.exportImagesZipToUri(list, uri)
+        }
+    }
+
     val exportBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
@@ -177,9 +192,11 @@ private fun MacroGGApp() {
     }
 
     val galleryImageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) viewModel.importImageFromUri(uri, "gambar")
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        val folder = pendingImportGalleryFolder
+        pendingImportGalleryFolder = ""
+        if (uris.isNotEmpty()) viewModel.importImagesFromUris(uris, folder = folder)
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -251,14 +268,15 @@ private fun MacroGGApp() {
     fun launchOverlay(
         action: String = FloatingOverlayService.ACTION_START,
         addToMacro: Boolean = true,
-        targetActionId: String? = null
+        targetActionId: String? = null,
+        targetFolder: String = ""
     ) {
         if (!Settings.canDrawOverlays(context)) {
             scope.launch { snackbarHostState.showSnackbar("Aktifkan izin 'Tampilkan di atas aplikasi lain' terlebih dahulu.") }
             requestOverlayPermission()
             return
         }
-        FloatingOverlayService.start(context, action, addToMacro, targetActionId)
+        FloatingOverlayService.start(context, action, addToMacro, targetActionId, targetFolder)
     }
 
     fun screenMetrics(): Pair<Int, Int> {
@@ -284,6 +302,7 @@ private fun MacroGGApp() {
                 macro = editingMacro,
                 allMacros = macros,
                 images = images,
+                imageFolders = imageFolders,
                 lastPickedPixel = lastPickedPixel,
                 screenW = sw,
                 screenH = sh,
@@ -312,6 +331,17 @@ private fun MacroGGApp() {
                         targetActionId = targetActionId
                     )
                 },
+                onLaunchRegionPickerOverlay = { m, targetActionId ->
+                    AutomationCoordinator.selectMacro(m)
+                    if (Settings.canDrawOverlays(context)) {
+                        (context as? Activity)?.moveTaskToBack(true)
+                    }
+                    launchOverlay(
+                        action = FloatingOverlayService.ACTION_PICK_REGION,
+                        addToMacro = false,
+                        targetActionId = targetActionId
+                    )
+                },
                 onLaunchRecorderOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay(FloatingOverlayService.ACTION_OPEN_RECORDER)
@@ -323,7 +353,11 @@ private fun MacroGGApp() {
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 contentWindowInsets = WindowInsets.safeDrawing,
                 bottomBar = {
-                    NavigationBar(windowInsets = WindowInsets.navigationBars) {
+                    NavigationBar(
+                        windowInsets = WindowInsets.navigationBars,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 2.dp
+                    ) {
                         MainTab.entries.forEachIndexed { idx, tab ->
                             val selected = selectedTab == idx
                             NavigationBarItem(
@@ -341,12 +375,15 @@ private fun MacroGGApp() {
                     }
                 }
             ) { innerPadding ->
-                Box(
+                Crossfade(
+                    targetState = MainTab.entries[selectedTab],
+                    animationSpec = tween(durationMillis = 180),
+                    label = "mainTabCrossfade",
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
-                ) {
-                    when (MainTab.entries[selectedTab]) {
+                ) { activeTab ->
+                    when (activeTab) {
                         MainTab.MACROS -> MacroHomeScreen(
                             macros = macros,
                             permissions = permissions,
@@ -409,19 +446,33 @@ private fun MacroGGApp() {
 
                         MainTab.IMAGES -> ImageLibraryScreen(
                             images = images,
-                            onCropFromScreen = {
-                                launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP, addToMacro = false)
+                            folders = imageFolders,
+                            onCropFromScreen = { folder ->
+                                launchOverlay(
+                                    action = FloatingOverlayService.ACTION_OPEN_CROP,
+                                    addToMacro = false,
+                                    targetFolder = folder
+                                )
                             },
-                            onImportFromGallery = {
+                            onImportFromGallery = { folder ->
+                                pendingImportGalleryFolder = folder
                                 galleryImageLauncher.launch("image/*")
                             },
+                            onCreateFolder = viewModel::createImageFolder,
+                            onDeleteFolder = viewModel::deleteImageFolder,
+                            onMoveImages = viewModel::moveImages,
                             onRecropImage = viewModel::recropImage,
                             onExportImage = { asset ->
                                 pendingExportImageName = asset.name
-                                exportImageLauncher.launch(asset.name)
+                                exportImageLauncher.launch(asset.displayName)
+                            },
+                            onExportMultipleImages = { selected ->
+                                pendingExportImagesZip = selected.toList()
+                                exportImagesZipLauncher.launch("gambar_wjust_macro.zip")
                             },
                             onRenameImage = viewModel::renameImage,
-                            onDeleteImage = viewModel::deleteImage
+                            onDeleteImage = viewModel::deleteImage,
+                            onDeleteMultipleImages = viewModel::deleteImages
                         )
 
                         MainTab.TOOLS -> Column(modifier = Modifier.fillMaxSize()) {
@@ -457,7 +508,7 @@ private fun MacroGGApp() {
                                     },
                                     onRunScriptNow = { s ->
                                         if (!permissions.accessibilityEnabled) {
-                                            scope.launch { snackbarHostState.showSnackbar("Aktifkan MacroGG di Accessibility Settings terlebih dahulu.") }
+                                            scope.launch { snackbarHostState.showSnackbar("Aktifkan Wjust macro di Accessibility Settings terlebih dahulu.") }
                                             openAccessibilitySettings()
                                         } else {
                                             val (sw, sh) = screenMetrics()
@@ -470,7 +521,7 @@ private fun MacroGGApp() {
                                     settings = settings,
                                     onUpdateSettings = viewModel::updateSettings,
                                     onExportAllBackup = {
-                                        exportBackupLauncher.launch("macrogg_backup.zip")
+                                        exportBackupLauncher.launch("wjust_macro_backup.zip")
                                     },
                                     onImportBackup = {
                                         importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))

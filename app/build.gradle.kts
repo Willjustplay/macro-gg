@@ -12,8 +12,8 @@ android {
     applicationId = "com.aistudio.taplua.kxmzqr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "2.4.0"
+    versionCode = 8
+    versionName = "2.6.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -83,6 +83,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.luaj.jse)
+  implementation(libs.mlkit.text.recognition)
 
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)

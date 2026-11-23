@@ -1,12 +1,22 @@
 package com.example.ui
 
+import android.graphics.Bitmap
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,10 +27,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -28,11 +46,14 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -42,6 +63,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,20 +78,32 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
@@ -79,14 +113,9 @@ import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
 import com.example.data.Macro
-import android.graphics.Bitmap
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilterChip
 import com.example.data.Slot
 import com.example.data.StuckRecoveryMode
+import com.example.data.TextAction
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.duplicateAction
@@ -94,9 +123,12 @@ import com.example.data.insertInto
 import com.example.data.kind
 import com.example.data.moveAction
 import com.example.data.removeAction
+import com.example.data.reorderInContainer
 import com.example.data.slots
 import com.example.data.summary
 import com.example.data.updateAction
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -104,6 +136,7 @@ fun MacroEditorScreen(
     macro: Macro,
     allMacros: List<Macro>,
     images: List<ImageAsset>,
+    imageFolders: List<String>,
     lastPickedPixel: PickedPixel?,
     screenW: Int,
     screenH: Int,
@@ -112,17 +145,113 @@ fun MacroEditorScreen(
     onLaunchOverlay: (Macro) -> Unit,
     onLaunchCropOverlay: (Macro, String?) -> Unit,
     onLaunchTargetPickerOverlay: (Macro, String) -> Unit,
+    onLaunchRegionPickerOverlay: (Macro, String) -> Unit,
     onLaunchRecorderOverlay: (Macro) -> Unit,
     onBack: () -> Unit
 ) {
     var editingAction by remember { mutableStateOf<Action?>(null) }
+    var quickSwapImageAction by remember { mutableStateOf<ImageAction?>(null) }
     var addTargetRef by remember { mutableStateOf<ContainerRef?>(null) }
     var showMacroSettings by remember { mutableStateOf(false) }
+
+    // Smooth in-memory drag preview so drag-and-drop runs at full frame rate without disk I/O jitter.
+    val latestMacro by rememberUpdatedState(macro)
+    val latestOnUpdateMacro by rememberUpdatedState(onUpdateMacro)
+    var dragPreviewActions by remember(macro.id) { mutableStateOf<List<Action>?>(null) }
+    val displayedActions = dragPreviewActions ?: macro.actions
+
+    val listState = rememberLazyListState()
+    var draggingRootId by remember(macro.id) { mutableStateOf<String?>(null) }
+    var draggingRootOffsetY by remember(macro.id) { mutableFloatStateOf(0f) }
+    var overscrollSpeed by remember(macro.id) { mutableFloatStateOf(0f) }
+
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val edgeZonePx = with(density) { 72.dp.toPx() }
+    val scrollStepPx = with(density) { 16.dp.toPx() }
 
     val imageByName = remember(images) { images.associateBy { it.name } }
 
     fun mutateActions(block: (List<Action>) -> List<Action>) {
-        onUpdateMacro(macro.copy(actions = block(macro.actions)))
+        dragPreviewActions = null
+        val cur = latestMacro
+        latestOnUpdateMacro(cur.copy(actions = block(cur.actions)))
+    }
+
+    fun previewReorder(ref: ContainerRef, fromIndex: Int, toIndex: Int) {
+        val current = dragPreviewActions ?: latestMacro.actions
+        val reordered = current.reorderInContainer(ref, fromIndex, toIndex)
+        if (reordered !== current) {
+            dragPreviewActions = reordered
+        }
+    }
+
+    fun commitDragPreview() {
+        val pending = dragPreviewActions
+        dragPreviewActions = null
+        val cur = latestMacro
+        if (pending != null && pending != cur.actions) {
+            latestOnUpdateMacro(cur.copy(actions = pending))
+        }
+    }
+
+    fun checkRootSwap(actionId: String) {
+        val actionsList = dragPreviewActions ?: latestMacro.actions
+        val fromIdx = actionsList.indexOfFirst { it.id == actionId }
+        if (fromIdx < 0) return
+
+        val visibleItems = listState.layoutInfo.visibleItemsInfo
+        val draggedInfo = visibleItems.firstOrNull { it.key == actionId } ?: return
+        val draggedTop = draggedInfo.offset + draggingRootOffsetY
+        val draggedBottom = draggedTop + draggedInfo.size
+
+        val vpStart = listState.layoutInfo.viewportStartOffset
+        val vpEnd = listState.layoutInfo.viewportEndOffset
+        overscrollSpeed = when {
+            draggedBottom > vpEnd - edgeZonePx -> scrollStepPx
+            draggedTop < vpStart + edgeZonePx -> -scrollStepPx
+            else -> 0f
+        }
+
+        if (draggingRootOffsetY > 0f && fromIdx < actionsList.lastIndex) {
+            val nextId = actionsList[fromIdx + 1].id
+            val nextInfo = visibleItems.firstOrNull { it.key == nextId }
+            // Guard nextInfo.offset > draggedInfo.offset to avoid re-swapping before layout catches up
+            if (nextInfo != null && nextInfo.offset > draggedInfo.offset && draggedBottom > nextInfo.offset + nextInfo.size / 2f) {
+                val spacing = (nextInfo.offset - (draggedInfo.offset + draggedInfo.size)).toFloat().coerceAtLeast(0f)
+                previewReorder(ContainerRef.ROOT, fromIdx, fromIdx + 1)
+                draggingRootOffsetY -= (nextInfo.size + spacing)
+                listState.requestScrollToItem(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+        } else if (draggingRootOffsetY < 0f && fromIdx > 0) {
+            val prevId = actionsList[fromIdx - 1].id
+            val prevInfo = visibleItems.firstOrNull { it.key == prevId }
+            // Guard prevInfo.offset < draggedInfo.offset to avoid re-swapping before layout catches up
+            if (prevInfo != null && prevInfo.offset < draggedInfo.offset && draggedTop < prevInfo.offset + prevInfo.size / 2f) {
+                val spacing = (draggedInfo.offset - (prevInfo.offset + prevInfo.size)).toFloat().coerceAtLeast(0f)
+                previewReorder(ContainerRef.ROOT, fromIdx, fromIdx - 1)
+                draggingRootOffsetY += (prevInfo.size + spacing)
+                listState.requestScrollToItem(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+        }
+    }
+
+    // Smooth edge auto-scrolling when dragging near top or bottom of the LazyColumn
+    LaunchedEffect(draggingRootId) {
+        val activeId = draggingRootId ?: return@LaunchedEffect
+        while (isActive && draggingRootId == activeId) {
+            val speed = overscrollSpeed
+            if (speed != 0f) {
+                val consumed = listState.scrollBy(speed)
+                if (consumed != 0f) {
+                    draggingRootOffsetY += consumed
+                    checkRootSwap(activeId)
+                }
+            }
+            delay(16L)
+        }
     }
 
     Scaffold(
@@ -156,6 +285,7 @@ fun MacroEditorScreen(
                     }
                     FilledTonalButton(
                         onClick = { onLaunchOverlay(macro) },
+                        shape = RoundedCornerShape(12.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier.padding(end = 8.dp)
                     ) {
@@ -169,19 +299,21 @@ fun MacroEditorScreen(
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { addTargetRef = ContainerRef.ROOT },
+                shape = RoundedCornerShape(16.dp),
                 icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = { Text("Tambah Aksi") }
+                text = { Text("Tambah Aksi", fontWeight = FontWeight.SemiBold) }
             )
         }
     ) { padding ->
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Quick Macrorify overlay capture shortcuts
+            // Quick capture shortcuts
             item(key = "quick_tools") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -189,8 +321,9 @@ fun MacroEditorScreen(
                 ) {
                     OutlinedButton(
                         onClick = { onLaunchCropOverlay(macro, null) },
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
                     ) {
                         Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
@@ -198,8 +331,9 @@ fun MacroEditorScreen(
                     }
                     OutlinedButton(
                         onClick = { onLaunchRecorderOverlay(macro) },
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
                     ) {
                         Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
@@ -208,22 +342,50 @@ fun MacroEditorScreen(
                 }
             }
 
-            if (macro.actions.isEmpty()) {
+            if (displayedActions.size >= 2) {
+                item(key = "drag_hint") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.DragIndicator,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            "Seret ikon pegangan di kiri kartu untuk mengurutkan aksi",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            if (displayedActions.isEmpty()) {
                 item(key = "empty") {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     ) {
                         Column(
-                            modifier = Modifier.padding(24.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(26.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text("Belum ada aksi", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Deteksi Warna, Swipe, atau pakai tombol 'Crop Gambar' / 'Rekam Sentuhan' langsung di layar.",
+                                "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Deteksi Teks/Nilai, Deteksi Warna, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan' langsung di layar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -231,15 +393,58 @@ fun MacroEditorScreen(
                     }
                 }
             } else {
-                itemsIndexed(macro.actions, key = { _, a -> a.id }) { index, action ->
+                itemsIndexed(displayedActions, key = { _, a -> a.id }) { index, action ->
+                    val isDragging = draggingRootId == action.id
+                    val dragHandleMod = if (displayedActions.size > 1) {
+                        Modifier.pointerInput(action.id) {
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    draggingRootId = action.id
+                                    draggingRootOffsetY = 0f
+                                    overscrollSpeed = 0f
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    if (draggingRootId == action.id) {
+                                        draggingRootOffsetY += dragAmount
+                                        checkRootSwap(action.id)
+                                    }
+                                },
+                                onDragEnd = {
+                                    draggingRootId = null
+                                    draggingRootOffsetY = 0f
+                                    overscrollSpeed = 0f
+                                    commitDragPreview()
+                                },
+                                onDragCancel = {
+                                    draggingRootId = null
+                                    draggingRootOffsetY = 0f
+                                    overscrollSpeed = 0f
+                                    commitDragPreview()
+                                }
+                            )
+                        }
+                    } else {
+                        Modifier
+                    }
+
                     ActionNodeCard(
                         action = action,
                         index = index,
-                        siblingCount = macro.actions.size,
+                        siblingCount = displayedActions.size,
                         depth = 0,
                         imageByName = imageByName,
+                        modifier = Modifier.animateItem(
+                            placementSpec = if (isDragging) null else spring(stiffness = Spring.StiffnessMediumLow)
+                        ),
+                        isDragging = isDragging,
+                        dragOffsetY = if (isDragging) draggingRootOffsetY else 0f,
+                        dragHandleModifier = dragHandleMod,
                         onEdit = { editingAction = it },
+                        onQuickSwapImage = { imgAct -> quickSwapImageAction = imgAct },
                         onPickTargetOnScreen = { id -> onLaunchTargetPickerOverlay(macro, id) },
+                        onPickRegionOnScreen = { id -> onLaunchRegionPickerOverlay(macro, id) },
                         onAddBranchClickTarget = { parentId, slot ->
                             val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
                             val updatedMacro = macro.copy(actions = macro.actions.insertInto(ContainerRef(parentId, slot), newClick))
@@ -250,6 +455,8 @@ fun MacroEditorScreen(
                             mutateActions { it.updateAction(id) { a -> a.withEnabled(enabled) } }
                         },
                         onMove = { id, delta -> mutateActions { it.moveAction(id, delta) } },
+                        onPreviewReorder = ::previewReorder,
+                        onCommitReorder = ::commitDragPreview,
                         onDuplicate = { id -> mutateActions { it.duplicateAction(id) } },
                         onDelete = { id -> mutateActions { it.removeAction(id) } },
                         onAddChild = { parentId, slot -> addTargetRef = ContainerRef(parentId, slot) }
@@ -257,6 +464,29 @@ fun MacroEditorScreen(
                 }
             }
         }
+    }
+
+    // 1-Tap Quick Image Swap Sheet
+    quickSwapImageAction?.let { imgAct ->
+        QuickImagePickerSheet(
+            currentImageName = imgAct.imageName,
+            images = images,
+            imageFolders = imageFolders,
+            onSelectImage = { chosenName ->
+                mutateActions { list ->
+                    list.updateAction(imgAct.id) { cur ->
+                        if (cur is ImageAction) cur.copy(imageName = chosenName) else cur
+                    }
+                }
+                quickSwapImageAction = null
+            },
+            onCropNew = {
+                quickSwapImageAction = null
+                onLaunchCropOverlay(macro, imgAct.id)
+            },
+            onRecropImage = onRecropImage,
+            onDismiss = { quickSwapImageAction = null }
+        )
     }
 
     // Add Action Picker Sheet
@@ -283,6 +513,7 @@ fun MacroEditorScreen(
             currentMacroId = macro.id,
             allMacros = allMacros,
             images = images,
+            imageFolders = imageFolders,
             lastPickedPixel = lastPickedPixel,
             screenW = screenW,
             screenH = screenH,
@@ -295,6 +526,12 @@ fun MacroEditorScreen(
                 onUpdateMacro(updatedMacro)
                 editingAction = null
                 onLaunchTargetPickerOverlay(updatedMacro, targetActionId)
+            },
+            onPickRegionOnScreen = { updatedDraft, targetActionId ->
+                val updatedMacro = macro.copy(actions = macro.actions.updateAction(updatedDraft.id) { updatedDraft })
+                onUpdateMacro(updatedMacro)
+                editingAction = null
+                onLaunchRegionPickerOverlay(updatedMacro, targetActionId)
             },
             onRecropImage = onRecropImage,
             onSave = { updated ->
@@ -325,35 +562,80 @@ private fun ActionNodeCard(
     siblingCount: Int,
     depth: Int,
     imageByName: Map<String, ImageAsset>,
+    modifier: Modifier = Modifier,
+    isDragging: Boolean = false,
+    dragOffsetY: Float = 0f,
+    dragHandleModifier: Modifier = Modifier,
     onEdit: (Action) -> Unit,
+    onQuickSwapImage: (ImageAction) -> Unit,
     onPickTargetOnScreen: (String) -> Unit,
+    onPickRegionOnScreen: (String) -> Unit,
     onAddBranchClickTarget: (String, Slot) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
     onMove: (String, Int) -> Unit,
+    onPreviewReorder: (ContainerRef, Int, Int) -> Unit,
+    onCommitReorder: () -> Unit,
     onDuplicate: (String) -> Unit,
     onDelete: (String) -> Unit,
     onAddChild: (String, Slot) -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val accent = action.kind.accentColor()
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val scale by animateFloatAsState(targetValue = if (isDragging) 1.02f else 1f, label = "cardDragScale")
+    val elevationDp by animateDpAsState(targetValue = if (isDragging) 12.dp else 0.dp, label = "cardDragElevation")
 
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .zIndex(if (isDragging) 10f else 0f)
+            .graphicsLayer {
+                translationY = if (isDragging) dragOffsetY else 0f
+                scaleX = scale
+                scaleY = scale
+                shadowElevation = with(density) { elevationDp.toPx() }
+            }
             .alpha(if (action.enabled) 1f else 0.5f),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (depth == 0) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            containerColor = when {
+                isDragging -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f)
+                depth == 0 -> MaterialTheme.colorScheme.surface
+                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            }
         ),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+        border = BorderStroke(
+            width = if (isDragging) 2.dp else 1.dp,
+            color = if (isDragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onEdit(action) },
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Drag handle (visible whenever there are 2+ siblings to reorder)
+                if (siblingCount > 1) {
+                    Box(
+                        modifier = Modifier
+                            .width(26.dp)
+                            .height(42.dp)
+                            .then(dragHandleModifier),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.DragIndicator,
+                            contentDescription = "Seret untuk ubah urutan",
+                            tint = if (isDragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
+
                 // Leading visual: image thumbnail for ImageAction, color dot for ColorAction, icon otherwise
                 when (action) {
                     is ImageAction -> {
@@ -361,23 +643,24 @@ private fun ActionNodeCard(
                         val bmp = rememberAssetThumbnail(asset?.path, asset?.updatedAt ?: 0L)
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(42.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(1.5.dp, accent, RoundedCornerShape(10.dp)),
+                                .background(Color(0xFF0A1020))
+                                .border(1.5.dp, accent, RoundedCornerShape(10.dp))
+                                .clickable { onQuickSwapImage(action) },
                             contentAlignment = Alignment.Center
                         ) {
                             if (bmp != null) {
-                                Image(bitmap = bmp, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(36.dp))
+                                Image(bitmap = bmp, contentDescription = "Ganti Gambar", contentScale = ContentScale.Fit, modifier = Modifier.size(36.dp))
                             } else {
-                                Icon(action.kind.icon(), contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+                                Icon(action.kind.icon(), contentDescription = "Pilih Gambar", tint = accent, modifier = Modifier.size(20.dp))
                             }
                         }
                     }
                     is ColorAction -> {
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(38.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(accent.copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center
@@ -394,7 +677,7 @@ private fun ActionNodeCard(
                     else -> {
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(38.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(accent.copy(alpha = 0.15f)),
                             contentAlignment = Alignment.Center
@@ -404,7 +687,7 @@ private fun ActionNodeCard(
                     }
                 }
 
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(10.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -423,22 +706,58 @@ private fun ActionNodeCard(
                     )
                 }
 
-                if (isPositionableAction(action)) {
-                    IconButton(onClick = { onPickTargetOnScreen(action.id) }) {
-                        Icon(
-                            Icons.Filled.MyLocation,
-                            contentDescription = "Atur Posisi di Layar",
-                            tint = accent,
-                            modifier = Modifier.size(20.dp)
-                        )
+                when {
+                    action is ImageAction -> {
+                        IconButton(onClick = { onQuickSwapImage(action) }, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Filled.SwapHoriz,
+                                contentDescription = "Ganti Gambar Target",
+                                tint = accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    action is TextAction -> {
+                        IconButton(onClick = { onPickRegionOnScreen(action.id) }, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Filled.CropFree,
+                                contentDescription = "Pilih Area Baca di Layar",
+                                tint = accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    isPositionableAction(action) -> {
+                        IconButton(onClick = { onPickTargetOnScreen(action.id) }, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Filled.MyLocation,
+                                contentDescription = "Atur Posisi di Layar",
+                                tint = accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
 
                 Box {
-                    IconButton(onClick = { menuExpanded = true }) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "Opsi")
+                    IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Opsi", modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        if (action is ImageAction) {
+                            DropdownMenuItem(
+                                text = { Text("Ganti Gambar Target") },
+                                leadingIcon = { Icon(Icons.Filled.SwapHoriz, null) },
+                                onClick = { menuExpanded = false; onQuickSwapImage(action) }
+                            )
+                        }
+                        if (action is TextAction) {
+                            DropdownMenuItem(
+                                text = { Text("Pilih Area Baca di Layar") },
+                                leadingIcon = { Icon(Icons.Filled.CropFree, null) },
+                                onClick = { menuExpanded = false; onPickRegionOnScreen(action.id) }
+                            )
+                        }
                         if (isPositionableAction(action)) {
                             DropdownMenuItem(
                                 text = { Text("Atur Posisi di Layar") },
@@ -478,22 +797,32 @@ private fun ActionNodeCard(
                 }
             }
 
-            // Nested branches (Then / Else / Loop Body)
+            // Nested branches (Then / Else / Loop Body) with their own drag-and-drop support
             val slots = action.slots()
             if (slots.isNotEmpty() && depth < 3) {
+                val childSpacingPx = with(density) { 6.dp.toPx() }
+                val latestOnPreviewReorder by rememberUpdatedState(onPreviewReorder)
+                val latestOnCommitReorder by rememberUpdatedState(onCommitReorder)
                 Spacer(Modifier.height(8.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     slots.forEach { slot ->
                         val children = action.childList(slot)
+                        val latestChildren by rememberUpdatedState(children)
+                        var draggedChildId by remember(action.id, slot) { mutableStateOf<String?>(null) }
+                        var draggedChildOffsetY by remember(action.id, slot) { mutableFloatStateOf(0f) }
+                        val childHeights = remember(action.id, slot) { mutableStateMapOf<String, Int>() }
+                        val awaitingChildLayout = remember(action.id, slot) { mutableStateOf(false) }
+                        androidx.compose.runtime.SideEffect { awaitingChildLayout.value = false }
+
                         val branchColor = when (slot) {
                             Slot.THEN -> Color(0xFF10B981)
                             Slot.ELSE -> Color(0xFFF59E0B)
-                            Slot.BODY -> Color(0xFF6366F1)
+                            Slot.BODY -> Color(0xFFA78BFA)
                         }
                         Surface(
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(12.dp),
                             color = branchColor.copy(alpha = 0.08f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, branchColor.copy(alpha = 0.35f))
+                            border = BorderStroke(1.dp, branchColor.copy(alpha = 0.35f))
                         ) {
                             Column(
                                 modifier = Modifier
@@ -533,21 +862,88 @@ private fun ActionNodeCard(
                                     }
                                 }
                                 children.forEachIndexed { childIdx, child ->
-                                    ActionNodeCard(
-                                        action = child,
-                                        index = childIdx,
-                                        siblingCount = children.size,
-                                        depth = depth + 1,
-                                        imageByName = imageByName,
-                                        onEdit = onEdit,
-                                        onPickTargetOnScreen = onPickTargetOnScreen,
-                                        onAddBranchClickTarget = onAddBranchClickTarget,
-                                        onToggleEnabled = onToggleEnabled,
-                                        onMove = onMove,
-                                        onDuplicate = onDuplicate,
-                                        onDelete = onDelete,
-                                        onAddChild = onAddChild
-                                    )
+                                    key(child.id) {
+                                        val isChildDragging = draggedChildId == child.id
+                                        val childHandleMod = if (children.size > 1) {
+                                            Modifier.pointerInput(child.id) {
+                                                detectVerticalDragGestures(
+                                                    onDragStart = {
+                                                        draggedChildId = child.id
+                                                        draggedChildOffsetY = 0f
+                                                        awaitingChildLayout.value = false
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    },
+                                                    onVerticalDrag = { change, dragAmount ->
+                                                        change.consume()
+                                                        if (draggedChildId != child.id) return@detectVerticalDragGestures
+                                                        draggedChildOffsetY += dragAmount
+                                                        if (awaitingChildLayout.value) return@detectVerticalDragGestures
+                                                        val list = latestChildren
+                                                        val fromIdx = list.indexOfFirst { it.id == child.id }
+                                                        if (fromIdx >= 0) {
+                                                            if (draggedChildOffsetY > 0f && fromIdx < list.lastIndex) {
+                                                                val nextH = (childHeights[list[fromIdx + 1].id] ?: 120).toFloat()
+                                                                if (draggedChildOffsetY > childSpacingPx + nextH / 2f) {
+                                                                    awaitingChildLayout.value = true
+                                                                    latestOnPreviewReorder(ContainerRef(action.id, slot), fromIdx, fromIdx + 1)
+                                                                    draggedChildOffsetY -= (nextH + childSpacingPx)
+                                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                }
+                                                            } else if (draggedChildOffsetY < 0f && fromIdx > 0) {
+                                                                val prevH = (childHeights[list[fromIdx - 1].id] ?: 120).toFloat()
+                                                                if (draggedChildOffsetY < -(childSpacingPx + prevH / 2f)) {
+                                                                    awaitingChildLayout.value = true
+                                                                    latestOnPreviewReorder(ContainerRef(action.id, slot), fromIdx, fromIdx - 1)
+                                                                    draggedChildOffsetY += (prevH + childSpacingPx)
+                                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                    onDragEnd = {
+                                                        draggedChildId = null
+                                                        draggedChildOffsetY = 0f
+                                                        awaitingChildLayout.value = false
+                                                        latestOnCommitReorder()
+                                                    },
+                                                    onDragCancel = {
+                                                        draggedChildId = null
+                                                        draggedChildOffsetY = 0f
+                                                        awaitingChildLayout.value = false
+                                                        latestOnCommitReorder()
+                                                    }
+                                                )
+                                            }
+                                        } else {
+                                            Modifier
+                                        }
+
+                                        ActionNodeCard(
+                                            action = child,
+                                            index = childIdx,
+                                            siblingCount = children.size,
+                                            depth = depth + 1,
+                                            imageByName = imageByName,
+                                            modifier = Modifier.onGloballyPositioned { coords ->
+                                                childHeights[child.id] = coords.size.height
+                                            },
+                                            isDragging = isChildDragging,
+                                            dragOffsetY = if (isChildDragging) draggedChildOffsetY else 0f,
+                                            dragHandleModifier = childHandleMod,
+                                            onEdit = onEdit,
+                                            onQuickSwapImage = onQuickSwapImage,
+                                            onPickTargetOnScreen = onPickTargetOnScreen,
+                                            onPickRegionOnScreen = onPickRegionOnScreen,
+                                            onAddBranchClickTarget = onAddBranchClickTarget,
+                                            onToggleEnabled = onToggleEnabled,
+                                            onMove = onMove,
+                                            onPreviewReorder = onPreviewReorder,
+                                            onCommitReorder = onCommitReorder,
+                                            onDuplicate = onDuplicate,
+                                            onDelete = onDelete,
+                                            onAddChild = onAddChild
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -560,13 +956,164 @@ private fun ActionNodeCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun QuickImagePickerSheet(
+    currentImageName: String,
+    images: List<ImageAsset>,
+    imageFolders: List<String>,
+    onSelectImage: (String) -> Unit,
+    onCropNew: () -> Unit,
+    onRecropImage: (String, Bitmap) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var folderFilter by remember { mutableStateOf<String?>(null) }
+    var recropAsset by remember { mutableStateOf<ImageAsset?>(null) }
+    val currentAsset = remember(images, currentImageName) { images.firstOrNull { it.name == currentImageName } }
+    val filtered = remember(images, folderFilter) {
+        when (folderFilter) {
+            null -> images
+            "" -> images.filter { it.folder.isBlank() }
+            else -> images.filter { it.folder == folderFilter }
+        }
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Ganti Gambar Target", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onCropNew, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Crop Baru dari Layar", maxLines = 1)
+                }
+                if (currentAsset != null) {
+                    FilledTonalButton(onClick = { recropAsset = currentAsset }) {
+                        Text("Potong Ulang")
+                    }
+                }
+            }
+
+            if (imageFolders.isNotEmpty()) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    item(key = "q_all") {
+                        FilterChip(
+                            selected = folderFilter == null,
+                            onClick = { folderFilter = null },
+                            label = { Text("Semua (${images.size})", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                    item(key = "q_root") {
+                        FilterChip(
+                            selected = folderFilter == "",
+                            onClick = { folderFilter = "" },
+                            label = { Text("Utama", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                    items(imageFolders, key = { "q_$it" }) { f ->
+                        FilterChip(
+                            selected = folderFilter == f,
+                            onClick = { folderFilter = f },
+                            label = { Text("📁 $f", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+
+            if (filtered.isEmpty()) {
+                Text(
+                    "Belum ada gambar di folder ini. Ketuk 'Crop Baru dari Layar' untuk mengambil target baru.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 12.dp)
+                )
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                ) {
+                    items(filtered, key = { it.name }) { asset ->
+                        val selected = asset.name == currentImageName
+                        val bmp = rememberAssetThumbnail(asset.path, asset.updatedAt)
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .border(
+                                    width = if (selected) 2.dp else 1.dp,
+                                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                )
+                                .clickable { onSelectImage(asset.name) }
+                                .padding(6.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(64.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF0F172A)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (bmp != null) {
+                                    Image(
+                                        bitmap = bmp,
+                                        contentDescription = asset.displayName,
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(4.dp)
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                asset.displayName.removeSuffix(".png"),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    recropAsset?.let { asset ->
+        InAppRecropDialog(
+            asset = asset,
+            onSave = { cropped ->
+                onRecropImage(asset.name, cropped)
+                recropAsset = null
+            },
+            onDismiss = { recropAsset = null }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun AddActionPickerSheet(
     isNested: Boolean,
     onPick: (ActionKind) -> Unit,
     onDismiss: () -> Unit
 ) {
     val groups = listOf(
-        "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.COLOR),
+        "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
         "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP)
     )

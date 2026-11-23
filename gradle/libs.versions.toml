@@ -42,6 +42,7 @@ credentials = "1.5.0"
 googleid = "1.1.1"
 luaj = "3.0.1"
 kotlinxSerializationJson = "1.13.0"
+mlkitTextRecognition = "16.0.1"
 
 
 [libraries]
@@ -98,6 +99,7 @@ androidx-credentials-play-services = { group = "androidx.credentials", name = "c
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 luaj-jse = { group = "org.luaj", name = "luaj-jse", version.ref = "luaj" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
+mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
 
 
 [plugins]

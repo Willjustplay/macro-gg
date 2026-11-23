@@ -50,6 +50,9 @@ class LocalStore(context: Context) {
     private val _images = MutableStateFlow<List<ImageAsset>>(emptyList())
     val images: StateFlow<List<ImageAsset>> = _images.asStateFlow()
 
+    private val _imageFolders = MutableStateFlow<List<String>>(emptyList())
+    val imageFolders: StateFlow<List<String>> = _imageFolders.asStateFlow()
+
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
@@ -61,6 +64,7 @@ class LocalStore(context: Context) {
     fun reloadAll() {
         _macros.value = loadMacros()
         _scripts.value = loadScripts()
+        _imageFolders.value = loadImageFolders()
         _images.value = loadImages()
         _settings.value = loadSettings()
     }
@@ -142,25 +146,75 @@ class LocalStore(context: Context) {
         _scripts.value = loadScripts()
     }
 
-    // ---- Target Image Library ----
+    // ---- Target Image Library & Folders ----
 
-    private fun loadImages(): List<ImageAsset> {
-        return imagesDir.listFiles { f -> f.isFile && f.extension.equals("png", ignoreCase = true) }
+    private fun loadImageFolders(): List<String> {
+        return imagesDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+            .orEmpty()
+            .map { it.name }
+            .sortedBy { it.lowercase() }
+    }
+
+    private fun refreshImagesAndFolders() {
+        _imageFolders.value = loadImageFolders()
+        _images.value = loadImages()
+    }
+
+    private fun scanPngsIn(dir: File, folderName: String): List<ImageAsset> {
+        return dir.listFiles { f -> f.isFile && f.extension.equals("png", ignoreCase = true) }
             .orEmpty()
             .mapNotNull { file ->
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(file.absolutePath, bounds)
                 if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@mapNotNull null
+                val relName = if (folderName.isBlank()) file.name else "$folderName/${file.name}"
                 ImageAsset(
-                    name = file.name,
+                    name = relName,
                     path = file.absolutePath,
                     width = bounds.outWidth,
                     height = bounds.outHeight,
                     sizeBytes = file.length(),
-                    updatedAt = file.lastModified()
+                    updatedAt = file.lastModified(),
+                    folder = folderName
                 )
             }
-            .sortedByDescending { it.updatedAt }
+    }
+
+    private fun loadImages(): List<ImageAsset> {
+        val all = ArrayList<ImageAsset>()
+        all += scanPngsIn(imagesDir, "")
+        imagesDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+            .orEmpty()
+            .forEach { sub ->
+                all += scanPngsIn(sub, sub.name)
+            }
+        return all.sortedByDescending { it.updatedAt }
+    }
+
+    fun createImageFolder(rawName: String): String? {
+        val clean = sanitizeFolderName(rawName)
+        if (clean.isBlank()) return null
+        val dir = File(imagesDir, clean)
+        if (!dir.exists() && !dir.mkdirs()) return null
+        _imageFolders.value = loadImageFolders()
+        return clean
+    }
+
+    /**
+     * Deletes a folder. Any images inside are safely moved back to root ("") and macro references updated.
+     */
+    fun deleteImageFolder(folderName: String): Boolean {
+        val clean = sanitizeFolderName(folderName)
+        if (clean.isBlank()) return false
+        val dir = File(imagesDir, clean)
+        if (!dir.exists() || !dir.isDirectory) return false
+        val inside = scanPngsIn(dir, clean).map { it.name }
+        if (inside.isNotEmpty()) {
+            moveImages(inside, "")
+        }
+        val deleted = dir.delete()
+        refreshImagesAndFolders()
+        return deleted
     }
 
     fun imageFile(name: String): File {
@@ -168,12 +222,22 @@ class LocalStore(context: Context) {
         return File(imagesDir, normalized)
     }
 
-    fun saveImage(desiredName: String, bitmap: Bitmap): ImageAsset {
-        val name = uniqueImageName(desiredName)
+    private fun relativeImageName(file: File): String {
+        val parent = file.parentFile
+        return if (parent != null && parent != imagesDir && parent.parentFile == imagesDir) {
+            "${parent.name}/${file.name}"
+        } else {
+            file.name
+        }
+    }
+
+    fun saveImage(desiredName: String, bitmap: Bitmap, folder: String = ""): ImageAsset {
+        val name = uniqueImageName(desiredName, folder)
         val file = File(imagesDir, name)
+        file.parentFile?.mkdirs()
         bitmap.savePng(file)
         templateCache.remove(name)
-        _images.value = loadImages()
+        refreshImagesAndFolders()
         return _images.value.first { it.name == name }
     }
 
@@ -181,14 +245,16 @@ class LocalStore(context: Context) {
     fun overwriteImage(existingName: String, bitmap: Bitmap): ImageAsset {
         val normalized = normalizeImageName(existingName)
         val file = File(imagesDir, normalized)
+        file.parentFile?.mkdirs()
         bitmap.savePng(file)
         templateCache.remove(normalized)
-        _images.value = loadImages()
+        refreshImagesAndFolders()
         return _images.value.first { it.name == normalized }
     }
 
     fun saveImageBytes(desiredName: String, pngBytes: ByteArray): String {
-        val file = imageFile(desiredName)
+        val normalized = normalizeImageName(desiredName)
+        val file = File(imagesDir, normalized)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
@@ -206,42 +272,89 @@ class LocalStore(context: Context) {
                 bmp.recycle()
             }
         }
-        templateCache.remove(file.name)
-        _images.value = loadImages()
-        return file.name
+        templateCache.remove(normalized)
+        refreshImagesAndFolders()
+        return normalized
     }
 
-    fun renameImage(oldName: String, newRawName: String): String? {
-        val oldFile = imageFile(oldName)
-        if (!oldFile.exists()) return null
-        val newName = uniqueImageName(newRawName)
-        val newFile = File(imagesDir, newName)
-        if (!oldFile.renameTo(newFile)) return null
-        templateCache.remove(oldFile.name)
-        templateCache.remove(newFile.name)
-        // Update any macro referencing the renamed image so export & detection stay intact
-        val oldNormalized = oldFile.name
+    private fun rewriteMacroImageReference(oldNormalized: String, newNormalized: String) {
+        if (oldNormalized == newNormalized) return
         for (m in _macros.value) {
             if (m.imageNames().any { normalizeImageName(it) == oldNormalized }) {
                 val updated = m.copy(
                     actions = m.actions.mapAllActions { a ->
                         if (a is ImageAction && normalizeImageName(a.imageName) == oldNormalized) {
-                            a.copy(imageName = newName)
+                            a.copy(imageName = newNormalized)
                         } else a
                     }
                 )
                 saveMacro(updated)
             }
         }
-        _images.value = loadImages()
+    }
+
+    fun renameImage(oldName: String, newRawName: String): String? {
+        val oldNormalized = normalizeImageName(oldName)
+        val oldFile = File(imagesDir, oldNormalized)
+        if (!oldFile.exists()) return null
+        val currentFolder = oldNormalized.substringBefore('/', missingDelimiterValue = "")
+        val newName = uniqueImageName(newRawName.substringAfterLast('/'), currentFolder)
+        val newFile = File(imagesDir, newName)
+        newFile.parentFile?.mkdirs()
+        if (!oldFile.renameTo(newFile)) return null
+        templateCache.remove(oldNormalized)
+        templateCache.remove(newName)
+        rewriteMacroImageReference(oldNormalized, newName)
+        refreshImagesAndFolders()
         return newName
     }
 
+    /** Moves one or more images into [targetFolder] (empty string = Utama/root), updating macro references. */
+    fun moveImages(names: Collection<String>, targetFolder: String): Int {
+        val cleanFolder = sanitizeFolderName(targetFolder)
+        if (cleanFolder.isNotBlank()) {
+            File(imagesDir, cleanFolder).mkdirs()
+        }
+        var moved = 0
+        for (raw in names) {
+            val oldNorm = normalizeImageName(raw)
+            val oldFile = File(imagesDir, oldNorm)
+            if (!oldFile.exists()) continue
+            val currentFolder = oldNorm.substringBefore('/', missingDelimiterValue = "")
+            if (currentFolder == cleanFolder) continue
+            val baseName = oldFile.name.removeSuffix(".png").removeSuffix(".PNG")
+            val newNorm = uniqueImageName(baseName, cleanFolder)
+            val newFile = File(imagesDir, newNorm)
+            newFile.parentFile?.mkdirs()
+            if (oldFile.renameTo(newFile)) {
+                templateCache.remove(oldNorm)
+                templateCache.remove(newNorm)
+                rewriteMacroImageReference(oldNorm, newNorm)
+                moved++
+            }
+        }
+        if (moved > 0) refreshImagesAndFolders()
+        return moved
+    }
+
     fun deleteImage(name: String) {
-        val file = imageFile(name)
-        file.delete()
-        templateCache.remove(file.name)
-        _images.value = loadImages()
+        val normalized = normalizeImageName(name)
+        File(imagesDir, normalized).delete()
+        templateCache.remove(normalized)
+        refreshImagesAndFolders()
+    }
+
+    fun deleteImages(names: Collection<String>): Int {
+        var deleted = 0
+        for (name in names) {
+            val normalized = normalizeImageName(name)
+            if (File(imagesDir, normalized).delete()) {
+                templateCache.remove(normalized)
+                deleted++
+            }
+        }
+        if (deleted > 0) refreshImagesAndFolders()
+        return deleted
     }
 
     fun exportImagePng(name: String, output: OutputStream): Boolean {
@@ -250,6 +363,25 @@ class LocalStore(context: Context) {
             out.write(file.readBytes())
         }
         return true
+    }
+
+    /** Exports multiple selected images into a single portable .zip archive. */
+    fun exportImagesZip(names: Collection<String>, output: OutputStream): Int {
+        var count = 0
+        val written = HashSet<String>()
+        ZipOutputStream(output).use { zip ->
+            for (name in names) {
+                val file = resolveExistingImageFile(name) ?: continue
+                val rel = relativeImageName(file)
+                if (written.add(rel)) {
+                    zip.putNextEntry(ZipEntry("images/$rel"))
+                    zip.write(file.readBytes())
+                    zip.closeEntry()
+                    count++
+                }
+            }
+        }
+        return count
     }
 
     private fun resolveExistingImageFile(name: String): File? {
@@ -262,21 +394,22 @@ class LocalStore(context: Context) {
     fun loadTemplate(name: String): PreparedTemplate? {
         val normalized = normalizeImageName(name)
         templateCache[normalized]?.let { return it }
-        val file = File(imagesDir, normalized)
-        if (!file.exists()) return null
+        val file = resolveExistingImageFile(normalized) ?: return null
         val frame = file.decodeFrame() ?: return null
         val prepared = PreparedTemplate(normalized, frame)
         templateCache[normalized] = prepared
         return prepared
     }
 
-    fun uniqueImageName(baseRaw: String): String {
-        val cleanBase = sanitizeFileName(baseRaw.removeSuffix(".png").removeSuffix(".PNG"))
+    fun uniqueImageName(baseRaw: String, folder: String = ""): String {
+        val cleanFolder = sanitizeFolderName(folder)
+        val cleanBase = sanitizeFileName(baseRaw.substringAfterLast('/').removeSuffix(".png").removeSuffix(".PNG"))
             .ifBlank { "target_${System.currentTimeMillis() % 10000}" }
-        var candidate = "$cleanBase.png"
+        val prefix = if (cleanFolder.isBlank()) "" else "$cleanFolder/"
+        var candidate = "$prefix$cleanBase.png"
         var counter = 2
         while (File(imagesDir, candidate).exists()) {
-            candidate = "${cleanBase}_$counter.png"
+            candidate = "$prefix${cleanBase}_$counter.png"
             counter++
         }
         return candidate
@@ -299,7 +432,7 @@ class LocalStore(context: Context) {
             root = latest,
             lookupMacro = ::getMacroById,
             loadImage = { imgName ->
-                resolveExistingImageFile(imgName)?.let { f -> f.name to f.readBytes() }
+                resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
             },
             output = output
         )
@@ -323,7 +456,7 @@ class LocalStore(context: Context) {
             for (img in _images.value) {
                 val f = File(img.path)
                 if (f.exists()) {
-                    zip.putNextEntry(ZipEntry("images/${f.name}"))
+                    zip.putNextEntry(ZipEntry("images/${img.name}"))
                     zip.write(f.readBytes())
                     zip.closeEntry()
                     imagesWritten++
@@ -405,10 +538,22 @@ class LocalStore(context: Context) {
                 instance ?: LocalStore(context.applicationContext).also { instance = it }
             }
 
+        fun sanitizeFolderName(raw: String): String =
+            raw.trim().replace(Regex("[^A-Za-z0-9_\\- ]"), "").trim().replace(Regex("\\s+"), "_").take(36)
+
         fun normalizeImageName(raw: String): String {
-            val trimmed = raw.trim().substringAfterLast('/').substringAfterLast('\\')
-            val base = sanitizeFileName(trimmed.removeSuffix(".png").removeSuffix(".PNG"))
-            return if (base.isBlank()) "target.png" else "$base.png"
+            val cleaned = raw.trim().replace('\\', '/').trimStart('/')
+            val slashIdx = cleaned.indexOf('/')
+            val folderPart = if (slashIdx > 0) sanitizeFolderName(cleaned.substring(0, slashIdx)) else ""
+            val filePart = cleaned.substringAfterLast('/')
+            val base = sanitizeFileName(
+                filePart
+                    .removeSuffix(".png").removeSuffix(".PNG")
+                    .removeSuffix(".jpg").removeSuffix(".JPG")
+                    .removeSuffix(".jpeg").removeSuffix(".JPEG")
+                    .removeSuffix(".webp").removeSuffix(".WEBP")
+            ).ifBlank { "target" }
+            return if (folderPart.isBlank()) "$base.png" else "$folderPart/$base.png"
         }
 
         fun sanitizeFileName(raw: String): String =

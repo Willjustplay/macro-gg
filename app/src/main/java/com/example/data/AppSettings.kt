@@ -24,5 +24,8 @@ data class ImageAsset(
     val width: Int,
     val height: Int,
     val sizeBytes: Long,
-    val updatedAt: Long
-)
+    val updatedAt: Long,
+    val folder: String = ""
+) {
+    val displayName: String get() = name.substringAfterLast('/')
+}

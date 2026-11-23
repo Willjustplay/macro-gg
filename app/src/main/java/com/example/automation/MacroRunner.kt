@@ -15,13 +15,17 @@ import com.example.data.RunMacroAction
 import com.example.data.StopAction
 import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
+import com.example.data.TextAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
+import com.example.data.Region
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
 import com.example.vision.MatchResult
+import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
 import com.example.vision.TemplateMatcher
+import com.example.vision.TextConditionEvaluator
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
@@ -38,6 +42,7 @@ interface MacroRuntime {
     suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean
     fun captureFrame(): Frame?
     fun samplePixelArgb(x: Int, y: Int): Int?
+    suspend fun recognizeText(region: Region?): List<OcrBlock> = emptyList()
     fun loadTemplate(name: String): PreparedTemplate?
     fun loadMacro(id: String): Macro? = null
     fun onMatchFound(match: MatchResult, label: String) {}
@@ -227,6 +232,8 @@ class MacroRunner(
 
             is ImageAction -> executeImageAction(action, macro, startedAt, maxDurationMs, depth)
 
+            is TextAction -> executeTextAction(action, macro, startedAt, maxDurationMs, depth)
+
             is ColorAction -> executeColorAction(action, macro, startedAt, maxDurationMs, depth)
 
             is LoopAction -> {
@@ -391,6 +398,65 @@ class MacroRunner(
             return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
         } else {
             runtime.log(LogLevel.COLOR, "Warna ${action.color} tidak cocok.")
+            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+        }
+    }
+
+    private suspend fun executeTextAction(
+        action: TextAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
+        var lastOutcome = TextConditionEvaluator.evaluate(action, emptyList())
+        var sawBlocks = false
+
+        while (!runtime.isStopped()) {
+            runtime.waitIfPaused()
+            checkStuckRecovery(macro)?.let { return it }
+            val blocks = runtime.recognizeText(action.region)
+            if (blocks.isNotEmpty()) sawBlocks = true
+            val outcome = TextConditionEvaluator.evaluate(action, blocks)
+            lastOutcome = outcome
+            if (outcome.matched) break
+            if (runtime.nowMs() >= deadline) break
+            runtime.sleep(220L)
+        }
+
+        if (lastOutcome.matched) {
+            val detail = if (action.compareMode.isNumeric && lastOutcome.parsedNumber != null) {
+                "nilai=${lastOutcome.parsedNumber} (${action.compareMode.shortLabel} ${action.targetNumber})"
+            } else {
+                "\"${lastOutcome.matchedText}\""
+            }
+            runtime.log(LogLevel.INFO, "Teks/Nilai cocok: $detail")
+            lastOutcome.matchedBlock?.let { blk ->
+                runtime.onMatchFound(
+                    MatchResult(blk.left, blk.top, blk.width, blk.height, 1.0),
+                    detail.take(28)
+                )
+            }
+            markProgress()
+            if (action.clickOnFound) {
+                val cx = lastOutcome.matchedBlock?.centerX
+                    ?: action.region?.let { it.left + it.width / 2 }
+                    ?: (runtime.screenWidth / 2)
+                val cy = lastOutcome.matchedBlock?.centerY
+                    ?: action.region?.let { it.top + it.height / 2 }
+                    ?: (runtime.screenHeight / 2)
+                val (tx, ty) = applyJitter(cx, cy, macro.jitterPx)
+                if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
+            }
+            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
+        } else {
+            val readInfo = when {
+                !sawBlocks -> "tidak ada teks terbaca"
+                action.compareMode.isNumeric -> "angka terbaca=${lastOutcome.allNumbers.take(4)}"
+                else -> "terbaca=\"${lastOutcome.allText.take(40)}\""
+            }
+            runtime.log(LogLevel.INFO, "Teks/Nilai belum cocok ($readInfo).")
             return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
         }
     }

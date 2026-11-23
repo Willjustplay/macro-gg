@@ -142,9 +142,13 @@ object MacroBundleCodec {
                         name.endsWith(".jpg", ignoreCase = true) ||
                         name.endsWith(".jpeg", ignoreCase = true) ||
                         name.endsWith(".webp", ignoreCase = true) -> {
-                        val fileName = name.substringAfterLast('/')
-                        if (fileName.isNotBlank() && bytes.isNotEmpty()) {
-                            images[fileName] = bytes
+                        val relName = if (name.startsWith("images/")) {
+                            name.removePrefix("images/")
+                        } else {
+                            name.substringAfterLast('/')
+                        }.trimStart('/')
+                        if (relName.isNotBlank() && bytes.isNotEmpty()) {
+                            images[relName] = bytes
                         }
                     }
                 }

@@ -15,13 +15,14 @@ data class ContainerRef(val parentId: String? = null, val slot: Slot? = null) {
 }
 
 fun Action.slots(): List<Slot> = when (this) {
-    is ImageAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
+    is ImageAction, is TextAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
     is LoopAction -> listOf(Slot.BODY)
     else -> emptyList()
 }
 
 fun Action.childList(slot: Slot): List<Action> = when (this) {
     is ImageAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is TextAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is ColorAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is LoopAction -> if (slot == Slot.BODY) actions else emptyList()
     else -> emptyList()
@@ -29,6 +30,11 @@ fun Action.childList(slot: Slot): List<Action> = when (this) {
 
 fun Action.withChildList(slot: Slot, list: List<Action>): Action = when (this) {
     is ImageAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is TextAction -> when (slot) {
         Slot.THEN -> copy(thenActions = list)
         Slot.ELSE -> copy(elseActions = list)
         else -> this
@@ -79,6 +85,21 @@ fun List<Action>.moveAction(id: String, delta: Int): List<Action> {
         return list
     }
     return map { a -> a.mapChildLists { it.moveAction(id, delta) } }
+}
+
+/** Moves an action from [fromIndex] to [toIndex] inside the specified container (root or nested branch). */
+fun List<Action>.reorderInContainer(ref: ContainerRef, fromIndex: Int, toIndex: Int): List<Action> {
+    fun reorderList(list: List<Action>): List<Action> {
+        if (fromIndex !in list.indices || toIndex !in list.indices || fromIndex == toIndex) return list
+        val mutable = list.toMutableList()
+        val item = mutable.removeAt(fromIndex)
+        mutable.add(toIndex, item)
+        return mutable
+    }
+    if (ref.parentId == null || ref.slot == null) return reorderList(this)
+    return updateAction(ref.parentId) { parent ->
+        parent.withChildList(ref.slot, reorderList(parent.childList(ref.slot)))
+    }
 }
 
 fun List<Action>.duplicateAction(id: String): List<Action> {

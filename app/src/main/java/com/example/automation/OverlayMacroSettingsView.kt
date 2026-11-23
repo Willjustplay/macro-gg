@@ -36,6 +36,8 @@ import com.example.data.Slot
 import com.example.data.StopAction
 import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
+import com.example.data.TextAction
+import com.example.data.TextCompareMode
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.childList
@@ -49,9 +51,9 @@ import kotlin.math.roundToInt
 /**
  * Full-featured in-overlay Macro Studio matching the in-app Macro Editor:
  * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
- *   Auto-Recover Stuck Macro watchdog, and marker visibility toggle.
+ *   Auto-Recover Stuck Macro watchdog, and optional marker preview toggle.
  * - Tab "Aksi": full action tree (including Then/Else/Loop branches), add any action kind,
- *   reorder, enable/disable, delete, and full inline Action Editor (with Crop & Re-Crop).
+ *   1-tap visual image swapping, OCR Text & Numeric action editor, and visual target placement.
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
@@ -60,11 +62,11 @@ class OverlayMacroSettingsView(
     private val store: LocalStore,
     private val screenW: Int,
     private val screenH: Int,
-    private var markersHidden: Boolean,
+    private var showAllMarkersPreview: Boolean,
     initialTab: Int = 0,
     initialEditActionId: String? = null,
     private val onSwitchMacro: (Macro) -> Unit,
-    private val onToggleMarkersHidden: (Boolean) -> Unit,
+    private val onToggleShowAllMarkers: (Boolean) -> Unit,
     private val onUpdateMacro: (Macro) -> Unit,
     private val onAddAction: (ContainerRef, Action) -> Unit,
     private val onUpdateAction: (String, (Action) -> Action) -> Unit,
@@ -74,6 +76,7 @@ class OverlayMacroSettingsView(
     private val onRecropExistingImage: (imageName: String) -> Unit,
     private val onAddNewCropImageAction: () -> Unit,
     private val onPickTargetOnScreen: (actionId: String) -> Unit,
+    private val onPickRegionOnScreen: (actionId: String) -> Unit,
     private val onAddBranchClickTargetOnScreen: (parentId: String, slot: Slot) -> Unit,
     private val onClose: () -> Unit
 ) : LinearLayout(context) {
@@ -83,6 +86,7 @@ class OverlayMacroSettingsView(
 
     private var activeTab = initialTab // 0 = Setelan, 1 = Aksi
     private var editingActionId: String? = initialEditActionId
+    private var quickImageSwapActionId: String? = null
     private var addPickerRef: ContainerRef? = null
 
     private val bodyContainer = LinearLayout(context).apply { orientation = VERTICAL }
@@ -141,12 +145,14 @@ class OverlayMacroSettingsView(
         tabSettingsBtn = makeTabBtn("Setelan Macro") {
             activeTab = 0
             editingActionId = null
+            quickImageSwapActionId = null
             addPickerRef = null
             rebuildBody()
         }
         tabActionsBtn = makeTabBtn("Daftar Aksi") {
             activeTab = 1
             editingActionId = null
+            quickImageSwapActionId = null
             addPickerRef = null
             rebuildBody()
         }
@@ -191,9 +197,18 @@ class OverlayMacroSettingsView(
         bodyContainer.removeAllViews()
 
         val pickerRef = addPickerRef
+        val swapId = quickImageSwapActionId
         val editId = editingActionId
         when {
             pickerRef != null -> buildAddActionPicker(pickerRef)
+            swapId != null -> {
+                val target = macro.actions.findAction(swapId) as? ImageAction
+                if (target != null) buildQuickImageSwapView(target)
+                else {
+                    quickImageSwapActionId = null
+                    buildActionList()
+                }
+            }
             editId != null -> {
                 val target = macro.actions.findAction(editId)
                 if (target != null) buildActionEditor(target)
@@ -286,17 +301,17 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(recRow)
 
         bodyContainer.addView(dividerLine())
-        val hideMarkersCheck = CheckBox(context).apply {
-            text = "Sembunyikan penanda titik di layar"
-            isChecked = markersHidden
+        val showMarkersCheck = CheckBox(context).apply {
+            text = "Tampilkan semua penanda titik di layar (Preview)"
+            isChecked = showAllMarkersPreview
             setTextColor(Color.parseColor("#E2E8F0"))
             textSize = 11.5f
             setOnCheckedChangeListener { _, checked ->
-                markersHidden = checked
-                onToggleMarkersHidden(checked)
+                showAllMarkersPreview = checked
+                onToggleShowAllMarkers(checked)
             }
         }
-        bodyContainer.addView(hideMarkersCheck)
+        bodyContainer.addView(showMarkersCheck)
 
         // Save Settings button
         val saveRow = LinearLayout(context).apply {
@@ -386,7 +401,11 @@ class OverlayMacroSettingsView(
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setBackgroundColor(Color.parseColor("#0B1220"))
                         setPadding(dp(2), dp(2), dp(2), dp(2))
-                        layoutParams = LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(6) }
+                        layoutParams = LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(6) }
+                        setOnClickListener {
+                            quickImageSwapActionId = action.id
+                            rebuildBody()
+                        }
                     })
                 }
             }
@@ -423,7 +442,16 @@ class OverlayMacroSettingsView(
         if (idx < siblingCount - 1) {
             row.addView(makeSmallIconBtn("↓", "#334155") { onMoveAction(action.id, 1) })
         }
-        if (isPositionable(action)) {
+        if (action is ImageAction) {
+            row.addView(makeSmallIconBtn("🖼", "#0F766E") {
+                quickImageSwapActionId = action.id
+                rebuildBody()
+            })
+        } else if (action is TextAction) {
+            row.addView(makeSmallIconBtn("📐", "#0369A1") {
+                onPickRegionOnScreen(action.id)
+            })
+        } else if (isPositionable(action)) {
             row.addView(makeSmallIconBtn("🎯", "#0F766E") {
                 onPickTargetOnScreen(action.id)
             })
@@ -517,7 +545,7 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(bar)
 
         val kinds = listOf(
-            ActionKind.IMAGE, ActionKind.COLOR, ActionKind.CLICK, ActionKind.LONG_PRESS,
+            ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR, ActionKind.CLICK, ActionKind.LONG_PRESS,
             ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
             ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
         )
@@ -719,28 +747,11 @@ class OverlayMacroSettingsView(
                 }
                 bodyContainer.addView(cropRow)
 
-                // Image picker strip
-                val imgs = store.images.value
-                if (imgs.isNotEmpty()) {
-                    bodyContainer.addView(sectionLabel("Pilih dari Pustaka (${imgs.size})"))
-                    val hScroll = HorizontalScrollView(context).apply {
-                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
-                    }
-                    val imgRow = LinearLayout(context).apply { orientation = HORIZONTAL }
-                    val imgBtns = mutableListOf<Pair<String, TextView>>()
-                    imgs.forEach { asset ->
-                        val b = makeBtn(asset.name.removeSuffix(".png").take(12), if (asset.name == selectedImg) "#0D9488" else "#1E293B", marginEndDp = 4) {
-                            selectedImg = asset.name
-                            imgBtns.forEach { (n, tv) ->
-                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (n == selectedImg) "#0D9488" else "#1E293B"))
-                            }
-                        }
-                        imgBtns += asset.name to b
-                        imgRow.addView(b)
-                    }
-                    hScroll.addView(imgRow)
-                    bodyContainer.addView(hScroll)
-                }
+                // Visual folder-aware thumbnail picker
+                addVisualImageSelector(
+                    initialSelected = selectedImg,
+                    onSelect = { selectedImg = it }
+                )
 
                 // Threshold stepper
                 val thrRow = LinearLayout(context).apply {
@@ -796,6 +807,9 @@ class OverlayMacroSettingsView(
                     textSize = 11.5f
                 }
                 bodyContainer.addView(regCheck)
+                bodyContainer.addView(makeBtn("📐 Pilih Area di Layar", "#0369A1") {
+                    onPickRegionOnScreen(action.id)
+                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
                 val reg = action.region ?: Region(0, 0, screenW, screenH)
                 val rL = addNumberRow(bodyContainer, "Area Kiri", reg.left.toString())
                 val rT = addNumberRow(bodyContainer, "Area Atas", reg.top.toString())
@@ -821,6 +835,147 @@ class OverlayMacroSettingsView(
                             clickOnFound = clickCheck.isChecked,
                             offsetX = oxF.text.toString().toIntOrNull() ?: imgCur.offsetX,
                             offsetY = oyF.text.toString().toIntOrNull() ?: imgCur.offsetY,
+                            foundMode = foundMode,
+                            notFound = notFoundMode,
+                            region = newRegion
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is TextAction -> {
+                var compareMode = action.compareMode
+                var foundMode = action.foundMode
+                var notFoundMode = action.notFound
+                var useRegion = action.region != null
+
+                addPickTargetBtn("📐 Pilih Area Baca Teks/Nilai di Layar") {
+                    onPickRegionOnScreen(action.id)
+                }
+
+                // Compare mode selector (Text vs Numeric < / <= / > / >= / =)
+                bodyContainer.addView(sectionLabel("Kondisi Deteksi"))
+                val modeBtns = mutableListOf<Pair<TextCompareMode, TextView>>()
+                val queryBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val queryField = addTextRow(queryBox, "Teks yang dicari", action.query)
+                val numBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val numStr = if (action.targetNumber == action.targetNumber.toLong().toDouble()) {
+                    action.targetNumber.toLong().toString()
+                } else {
+                    action.targetNumber.toString()
+                }
+                val numField = addDecimalRow(numBox, "Nilai pembanding", numStr)
+
+                fun refreshModeInputs() {
+                    queryBox.visibility = if (compareMode.isNumeric) View.GONE else View.VISIBLE
+                    numBox.visibility = if (compareMode.isNumeric) View.VISIBLE else View.GONE
+                    modeBtns.forEach { (m, tv) ->
+                        (tv.background as? GradientDrawable)?.setColor(
+                            Color.parseColor(if (m == compareMode) "#0284C7" else "#1E293B")
+                        )
+                    }
+                }
+
+                // Row 1: Text modes
+                val textModeRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                listOf(TextCompareMode.CONTAINS, TextCompareMode.EQUALS).forEachIndexed { idx, m ->
+                    val b = makeBtn(m.label, if (m == compareMode) "#0284C7" else "#1E293B") {
+                        compareMode = m
+                        refreshModeInputs()
+                    }
+                    modeBtns += m to b
+                    textModeRow.addView(b, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx == 0) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(textModeRow)
+
+                // Row 2: Numeric modes (<, <=, >, >=, =)
+                val numModeRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val numericModes = listOf(
+                    TextCompareMode.LESS_THAN,
+                    TextCompareMode.LESS_OR_EQUAL,
+                    TextCompareMode.GREATER_THAN,
+                    TextCompareMode.GREATER_OR_EQUAL,
+                    TextCompareMode.NUMBER_EQUALS
+                )
+                numericModes.forEachIndexed { idx, m ->
+                    val b = makeBtn(m.shortLabel, if (m == compareMode) "#0284C7" else "#1E293B") {
+                        compareMode = m
+                        refreshModeInputs()
+                    }
+                    modeBtns += m to b
+                    numModeRow.addView(b, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < numericModes.lastIndex) dp(3) else 0
+                    })
+                }
+                bodyContainer.addView(numModeRow)
+
+                bodyContainer.addView(queryBox)
+                bodyContainer.addView(numBox)
+                refreshModeInputs()
+
+                val timeoutF = addNumberRow(bodyContainer, "Batas waktu cari (ms)", action.timeoutMs.toString())
+                val delayF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Cocok (Then)"))
+                val clickCheck = CheckBox(context).apply {
+                    text = "Klik posisi teks saat cocok"
+                    isChecked = action.clickOnFound
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(clickCheck)
+                addBranchModePicker("Setelah cabang Jika Cocok:", foundMode) { foundMode = it }
+                addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Tidak Cocok (Else)"))
+                addBranchModePicker("Setelah cabang Jika Tidak:", notFoundMode) { notFoundMode = it }
+                addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
+
+                bodyContainer.addView(dividerLine())
+                val regCheck = CheckBox(context).apply {
+                    text = "Batasi area baca (Region)"
+                    isChecked = useRegion
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11.5f
+                    setOnCheckedChangeListener { _, checked -> useRegion = checked }
+                }
+                bodyContainer.addView(regCheck)
+                val reg = action.region ?: Region(0, 0, screenW, screenH)
+                val rL = addNumberRow(bodyContainer, "Area Kiri", reg.left.toString())
+                val rT = addNumberRow(bodyContainer, "Area Atas", reg.top.toString())
+                val rR = addNumberRow(bodyContainer, "Area Kanan", reg.right.toString())
+                val rB = addNumberRow(bodyContainer, "Area Bawah", reg.bottom.toString())
+
+                addSaveActionBtn {
+                    val newRegion = if (useRegion) {
+                        Region(
+                            rL.text.toString().toIntOrNull() ?: reg.left,
+                            rT.text.toString().toIntOrNull() ?: reg.top,
+                            rR.text.toString().toIntOrNull() ?: reg.right,
+                            rB.text.toString().toIntOrNull() ?: reg.bottom
+                        )
+                    } else null
+                    val parsedNum = numField.text.toString().replace(',', '.').toDoubleOrNull() ?: action.targetNumber
+                    onUpdateAction(action.id) { cur ->
+                        val txtCur = (cur as? TextAction) ?: action
+                        txtCur.copy(
+                            compareMode = compareMode,
+                            query = queryField.text.toString(),
+                            targetNumber = parsedNum,
+                            timeoutMs = (timeoutF.text.toString().toLongOrNull() ?: txtCur.timeoutMs).coerceAtLeast(0L),
+                            delayAfterMs = (delayF.text.toString().toLongOrNull() ?: txtCur.delayAfterMs).coerceAtLeast(0L),
+                            clickOnFound = clickCheck.isChecked,
                             foundMode = foundMode,
                             notFound = notFoundMode,
                             region = newRegion
@@ -1092,6 +1247,173 @@ class OverlayMacroSettingsView(
         })
     }
 
+    private fun buildQuickImageSwapView(action: ImageAction) {
+        val nav = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        nav.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            quickImageSwapActionId = null
+            rebuildBody()
+        })
+        nav.addView(TextView(context).apply {
+            text = "Ganti Gambar Target"
+            setTextColor(Color.WHITE)
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        bodyContainer.addView(nav)
+
+        val quickBtns = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        quickBtns.addView(makeBtn("✂ Crop Baru", "#0F766E", marginEndDp = 6) {
+            quickImageSwapActionId = null
+            onCropForImageAction(action.id)
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        if (action.imageName.isNotBlank() && store.imageFile(action.imageName).exists()) {
+            quickBtns.addView(makeBtn("✂ Potong Ulang", "#0284C7") {
+                quickImageSwapActionId = null
+                onRecropExistingImage(action.imageName)
+            }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        }
+        bodyContainer.addView(quickBtns)
+
+        addVisualImageSelector(
+            initialSelected = action.imageName,
+            onSelect = { chosen ->
+                onUpdateAction(action.id) { cur ->
+                    if (cur is ImageAction) cur.copy(imageName = chosen) else cur
+                }
+                quickImageSwapActionId = null
+            }
+        )
+    }
+
+    private fun addVisualImageSelector(
+        initialSelected: String,
+        onSelect: (String) -> Unit
+    ) {
+        val allImages = store.images.value
+        val folders = store.imageFolders.value
+        if (allImages.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Pustaka gambar masih kosong. Ketuk '✂ Crop Baru' untuk mengambil gambar target."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 11f
+                setPadding(0, dp(4), 0, dp(6))
+            })
+            return
+        }
+
+        var selectedImg = initialSelected
+        var activeFolderFilter: String? = null // null = Semua, "" = Utama, else folder name
+
+        val folderContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+        }
+        val thumbStripContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+        }
+
+        fun renderThumbStrip() {
+            thumbStripContainer.removeAllViews()
+            val filtered = when (activeFolderFilter) {
+                null -> allImages
+                "" -> allImages.filter { it.folder.isBlank() }
+                else -> allImages.filter { it.folder == activeFolderFilter }
+            }
+            if (filtered.isEmpty()) {
+                thumbStripContainer.addView(TextView(context).apply {
+                    text = "Tidak ada gambar di folder ini."
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 10.5f
+                    setPadding(0, dp(4), 0, dp(4))
+                })
+                return
+            }
+            val hScroll = HorizontalScrollView(context)
+            val row = LinearLayout(context).apply { orientation = HORIZONTAL }
+            val cardViews = mutableListOf<Pair<String, LinearLayout>>()
+            filtered.forEach { asset ->
+                val isSel = asset.name == selectedImg
+                val tile = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    setPadding(dp(5), dp(5), dp(5), dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor(if (isSel) "#134E4A" else "#1E293B"))
+                        cornerRadius = dp(10).toFloat()
+                        setStroke(dp(if (isSel) 2 else 1), Color.parseColor(if (isSel) "#2DD4BF" else "#334155"))
+                    }
+                    layoutParams = LayoutParams(dp(72), LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) }
+                    setOnClickListener {
+                        selectedImg = asset.name
+                        cardViews.forEach { (n, v) ->
+                            val sel = n == selectedImg
+                            (v.background as? GradientDrawable)?.apply {
+                                setColor(Color.parseColor(if (sel) "#134E4A" else "#1E293B"))
+                                setStroke(dp(if (sel) 2 else 1), Color.parseColor(if (sel) "#2DD4BF" else "#334155"))
+                            }
+                        }
+                        onSelect(asset.name)
+                    }
+                }
+                val bmp = runCatching { BitmapFactory.decodeFile(asset.path) }.getOrNull()
+                tile.addView(ImageView(context).apply {
+                    if (bmp != null) setImageBitmap(bmp)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setBackgroundColor(Color.parseColor("#0B1220"))
+                    layoutParams = LayoutParams(dp(58), dp(46)).apply { bottomMargin = dp(3) }
+                })
+                tile.addView(TextView(context).apply {
+                    text = asset.displayName.removeSuffix(".png")
+                    setTextColor(Color.WHITE)
+                    textSize = 9.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                cardViews += asset.name to tile
+                row.addView(tile)
+            }
+            hScroll.addView(row)
+            thumbStripContainer.addView(hScroll)
+        }
+
+        bodyContainer.addView(sectionLabel("Pilih Gambar (${allImages.size})"))
+        if (folders.isNotEmpty()) {
+            val fScroll = HorizontalScrollView(context).apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(5) }
+            }
+            val fRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+            val fBtns = mutableListOf<Pair<String?, TextView>>()
+            val filterOptions: List<Pair<String?, String>> =
+                listOf(null to "Semua", "" to "Utama") + folders.map { it to "📁 $it" }
+            filterOptions.forEach { (key, label) ->
+                val b = makeBtn(label, if (key == activeFolderFilter) "#0284C7" else "#1E293B", marginEndDp = 4) {
+                    activeFolderFilter = key
+                    fBtns.forEach { (k, tv) ->
+                        (tv.background as? GradientDrawable)?.setColor(
+                            Color.parseColor(if (k == activeFolderFilter) "#0284C7" else "#1E293B")
+                        )
+                    }
+                    renderThumbStrip()
+                }
+                fBtns += key to b
+                fRow.addView(b)
+            }
+            fScroll.addView(fRow)
+            folderContainer.addView(fScroll)
+            bodyContainer.addView(folderContainer)
+        }
+        bodyContainer.addView(thumbStripContainer)
+        renderThumbStrip()
+    }
+
     private fun sectionLabel(text: String): TextView = TextView(context).apply {
         this.text = text
         setTextColor(Color.parseColor("#2DD4BF"))
@@ -1139,6 +1461,14 @@ class OverlayMacroSettingsView(
 
     private fun addSignedNumberRow(parent: LinearLayout, label: String, initial: String): EditText =
         addNumericRow(parent, label, initial, InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED)
+
+    private fun addDecimalRow(parent: LinearLayout, label: String, initial: String): EditText =
+        addNumericRow(
+            parent,
+            label,
+            initial,
+            InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
+        )
 
     private fun addNumericRow(parent: LinearLayout, label: String, initial: String, type: Int): EditText {
         val row = LinearLayout(context).apply {

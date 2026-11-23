@@ -180,6 +180,46 @@ data class ColorAction(
     )
 }
 
+/** Comparison mode for [TextAction] (text match or numeric less-than / greater-than comparison). */
+@Serializable
+enum class TextCompareMode(val label: String, val shortLabel: String, val isNumeric: Boolean) {
+    CONTAINS("Mengandung Teks", "Mengandung", false),
+    EQUALS("Teks Sama Persis", "Sama persis", false),
+    LESS_THAN("Nilai Kurang Dari (<)", "<", true),
+    LESS_OR_EQUAL("Nilai ≤ (Kurang/Sama)", "≤", true),
+    GREATER_THAN("Nilai Lebih Dari (>)", ">", true),
+    GREATER_OR_EQUAL("Nilai ≥ (Lebih/Sama)", "≥", true),
+    NUMBER_EQUALS("Nilai Sama Dengan (=)", "=", true)
+}
+
+@Serializable
+@SerialName("text")
+data class TextAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    /** Expected text substring/exact value when [compareMode] is text-based. */
+    val query: String = "",
+    /** Threshold number when [compareMode] is numeric (<, <=, >, >=, =). */
+    val targetNumber: Double = 0.0,
+    val compareMode: TextCompareMode = TextCompareMode.CONTAINS,
+    /** Screen area to read OCR text from. null = whole screen. */
+    val region: Region? = null,
+    val timeoutMs: Long = 3000,
+    val clickOnFound: Boolean = false,
+    val thenActions: List<Action> = emptyList(),
+    val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val elseActions: List<Action> = emptyList(),
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
+    )
+}
+
 @Serializable
 @SerialName("loop")
 data class LoopAction(
@@ -298,6 +338,7 @@ enum class ActionKind(val label: String, val description: String) {
     ZOOM("Zoom In/Out", "Cubit / perbesar 2 jari di layar"),
     WAIT("Tunggu", "Jeda beberapa saat"),
     IMAGE("Deteksi Gambar", "Cari gambar di layar + aksi If/Else"),
+    TEXT("Deteksi Teks & Nilai", "Baca teks / nilai (<, >, =) di layar + If/Else"),
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
@@ -314,6 +355,7 @@ val Action.kind: ActionKind
         is ZoomAction -> ActionKind.ZOOM
         is WaitAction -> ActionKind.WAIT
         is ImageAction -> ActionKind.IMAGE
+        is TextAction -> ActionKind.TEXT
         is ColorAction -> ActionKind.COLOR
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
@@ -322,6 +364,9 @@ val Action.kind: ActionKind
         is StopAction -> ActionKind.STOP
     }
 
+private fun formatTargetNum(v: Double): String =
+    if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+
 /** Short human summary shown in lists and on the overlay log. */
 fun Action.summary(): String = when (this) {
     is ClickAction -> "($x, $y)" + if (repeat > 1) " ×$repeat" else ""
@@ -329,7 +374,16 @@ fun Action.summary(): String = when (this) {
     is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
     is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
     is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
-    is ImageAction -> "${imageName.ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+    is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+    is TextAction -> {
+        val cond = if (compareMode.isNumeric) {
+            "Nilai ${compareMode.shortLabel} ${formatTargetNum(targetNumber)}"
+        } else {
+            "${compareMode.shortLabel} \"${query.ifBlank { "..." }}\""
+        }
+        val area = if (region != null) " • area" else ""
+        "$cond$area" + if (clickOnFound) " • klik" else ""
+    }
     is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
     is LoopAction -> "${count}× (${actions.size} aksi)"
     is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
@@ -349,6 +403,14 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.ZOOM -> ZoomAction(cx = cx, cy = cy, zoomIn = true)
         ActionKind.WAIT -> WaitAction()
         ActionKind.IMAGE -> ImageAction(imageName = imageName)
+        ActionKind.TEXT -> TextAction(
+            region = Region(
+                left = (screenW * 0.20f).toInt(),
+                top = (screenH * 0.35f).toInt(),
+                right = (screenW * 0.80f).toInt(),
+                bottom = (screenH * 0.50f).toInt()
+            )
+        )
         ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()

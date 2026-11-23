@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Swipe
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.runtime.Composable
@@ -36,6 +37,7 @@ fun ActionKind.icon(): ImageVector = when (this) {
     ActionKind.ZOOM -> Icons.Filled.ZoomIn
     ActionKind.WAIT -> Icons.Filled.HourglassEmpty
     ActionKind.IMAGE -> Icons.Filled.ImageSearch
+    ActionKind.TEXT -> Icons.Filled.TextFields
     ActionKind.COLOR -> Icons.Filled.Colorize
     ActionKind.LOOP -> Icons.Filled.Loop
     ActionKind.RUN_MACRO -> Icons.Filled.Link
@@ -51,6 +53,7 @@ fun ActionKind.accentColor(): Color = when (this) {
     ActionKind.ZOOM -> Color(0xFF0891B2)
     ActionKind.WAIT -> Color(0xFF64748B)
     ActionKind.IMAGE -> Color(0xFF10B981)
+    ActionKind.TEXT -> Color(0xFF0EA5E9)
     ActionKind.COLOR -> Color(0xFF8B5CF6)
     ActionKind.LOOP -> Color(0xFFF59E0B)
     ActionKind.RUN_MACRO -> Color(0xFFEC4899)
