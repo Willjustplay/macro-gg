@@ -79,7 +79,11 @@ class ScreenCaptureService : Service() {
 
         startForegroundNotification()
         startCapture(resultCode, dataIntent)
-        return START_NOT_STICKY
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Keep foreground MediaProjection service alive when user swipes app from Recents.
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

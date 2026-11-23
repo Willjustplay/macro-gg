@@ -75,7 +75,8 @@ fun MacroHomeScreen(
     activeMacroId: String,
     onOpenAccessibility: () -> Unit,
     onRequestOverlay: () -> Unit,
-    onToggleScreenCapture: () -> Unit,
+    onActivateScreenCapture: () -> Unit,
+    onRequestBatteryUnrestricted: () -> Unit,
     onToggleOverlay: () -> Unit,
     onStopEngine: () -> Unit,
     onQuickAutoClicker: () -> Unit,
@@ -126,14 +127,14 @@ fun MacroHomeScreen(
             }
         }
 
-        // Compact 3-pill Permission Status Bar
+        // Compact Permission Status Bar (with Keep-Alive Battery exemption)
         item(key = "permissions") {
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Izin Otomasi (ketuk untuk aktifkan)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Izin Otomasi (tetap aktif di latar belakang)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -150,11 +151,22 @@ fun MacroHomeScreen(
                             modifier = Modifier.weight(1f),
                             onClick = onRequestOverlay
                         )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         PermissionPill(
-                            label = "Layar",
+                            label = "Tangkap Layar",
                             active = permissions.screenCaptureActive,
                             modifier = Modifier.weight(1f),
-                            onClick = onToggleScreenCapture
+                            onClick = onActivateScreenCapture
+                        )
+                        PermissionPill(
+                            label = "Tetap Aktif",
+                            active = permissions.batteryOptimizationIgnored,
+                            modifier = Modifier.weight(1f),
+                            onClick = onRequestBatteryUnrestricted
                         )
                     }
                 }

@@ -65,6 +65,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.automation.AutomationCoordinator
 import com.example.automation.ExecutionLogBus
 import com.example.automation.FloatingOverlayService
+import com.example.automation.MacroAccessibilityService
 import com.example.automation.ScreenCaptureService
 import com.example.data.Macro
 import com.example.ui.ImageLibraryScreen
@@ -120,6 +121,7 @@ private fun MacroGGApp() {
     val lastPickedPixel by AutomationCoordinator.lastPickedPixel.collectAsStateWithLifecycle()
     val liveLogs by ExecutionLogBus.logs.collectAsStateWithLifecycle()
     val isCapturing by ScreenCaptureService.isCapturing.collectAsStateWithLifecycle()
+    val isAccessibilityConnected by MacroAccessibilityService.isConnected.collectAsStateWithLifecycle()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var toolsSubTab by remember { mutableIntStateOf(0) } // 0=Lua, 1=Log, 2=Pengaturan
@@ -135,7 +137,7 @@ private fun MacroGGApp() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             ScreenCaptureService.start(context, result.resultCode, result.data!!)
-            scope.launch { snackbarHostState.showSnackbar("Tangkap layar diaktifkan (siap deteksi gambar & warna).") }
+            scope.launch { snackbarHostState.showSnackbar("Tangkap layar aktif & tetap menyala di latar belakang.") }
         } else {
             scope.launch { snackbarHostState.showSnackbar("Izin tangkap layar dibatalkan.") }
         }
@@ -179,7 +181,7 @@ private fun MacroGGApp() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(isCapturing) {
+    LaunchedEffect(isCapturing, isAccessibilityConnected) {
         viewModel.refreshPermissions(context)
     }
 
@@ -217,13 +219,31 @@ private fun MacroGGApp() {
         mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
     }
 
-    fun launchOverlay(action: String = FloatingOverlayService.ACTION_START) {
+    fun requestBatteryUnrestricted() {
+        if (permissions.batteryOptimizationIgnored) {
+            scope.launch { snackbarHostState.showSnackbar("Mode Tetap Aktif (bebas optimasi baterai) sudah menyala.") }
+            return
+        }
+        val intent = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${context.packageName}")
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        runCatching { context.startActivity(intent) }.onFailure {
+            context.startActivity(
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }
+    }
+
+    fun launchOverlay(action: String = FloatingOverlayService.ACTION_START, addToMacro: Boolean = true) {
         if (!Settings.canDrawOverlays(context)) {
             scope.launch { snackbarHostState.showSnackbar("Aktifkan izin 'Tampilkan di atas aplikasi lain' terlebih dahulu.") }
             requestOverlayPermission()
             return
         }
-        FloatingOverlayService.start(context, action)
+        FloatingOverlayService.start(context, action, addToMacro)
     }
 
     fun screenMetrics(): Pair<Int, Int> {
@@ -258,7 +278,7 @@ private fun MacroGGApp() {
                 },
                 onLaunchCropOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)
-                    launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP)
+                    launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP, addToMacro = true)
                 },
                 onLaunchRecorderOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)
@@ -301,12 +321,28 @@ private fun MacroGGApp() {
                             engineState = engineState,
                             isOverlayActive = isOverlayActive,
                             activeMacroId = activeMacro.id,
-                            onOpenAccessibility = ::openAccessibilitySettings,
-                            onRequestOverlay = ::requestOverlayPermission,
-                            onToggleScreenCapture = {
-                                if (permissions.screenCaptureActive) ScreenCaptureService.stop(context)
-                                else requestScreenCapture()
+                            onOpenAccessibility = {
+                                if (permissions.accessibilityEnabled) {
+                                    scope.launch { snackbarHostState.showSnackbar("Aksesibilitas sudah aktif.") }
+                                } else {
+                                    openAccessibilitySettings()
+                                }
                             },
+                            onRequestOverlay = {
+                                if (permissions.overlayEnabled) {
+                                    scope.launch { snackbarHostState.showSnackbar("Izin Overlay sudah aktif.") }
+                                } else {
+                                    requestOverlayPermission()
+                                }
+                            },
+                            onActivateScreenCapture = {
+                                if (permissions.screenCaptureActive) {
+                                    scope.launch { snackbarHostState.showSnackbar("Tangkap layar sudah aktif & tetap menyala.") }
+                                } else {
+                                    requestScreenCapture()
+                                }
+                            },
+                            onRequestBatteryUnrestricted = ::requestBatteryUnrestricted,
                             onToggleOverlay = {
                                 if (isOverlayActive) FloatingOverlayService.stop(context)
                                 else launchOverlay()
@@ -342,7 +378,7 @@ private fun MacroGGApp() {
                         MainTab.IMAGES -> ImageLibraryScreen(
                             images = images,
                             onCropFromScreen = {
-                                launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP)
+                                launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP, addToMacro = false)
                             },
                             onImportFromGallery = {
                                 galleryImageLauncher.launch("image/*")

@@ -3,6 +3,7 @@ package com.example.ui
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -32,7 +33,8 @@ import kotlinx.coroutines.withContext
 data class PermissionHealth(
     val accessibilityEnabled: Boolean = false,
     val overlayEnabled: Boolean = false,
-    val screenCaptureActive: Boolean = false
+    val screenCaptureActive: Boolean = false,
+    val batteryOptimizationIgnored: Boolean = false
 )
 
 class MacroViewModel(private val appContext: Context) : ViewModel() {
@@ -59,11 +61,14 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     }
 
     fun refreshPermissions(context: Context = appContext) {
+        val pm = context.getSystemService(PowerManager::class.java)
+        val ignoringBattery = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
         _permissions.value = PermissionHealth(
             accessibilityEnabled = MacroAccessibilityService.isServiceEnabled(context) ||
                 MacroAccessibilityService.isConnected.value,
             overlayEnabled = Settings.canDrawOverlays(context),
-            screenCaptureActive = ScreenCaptureService.isCapturing.value
+            screenCaptureActive = ScreenCaptureService.isCapturing.value,
+            batteryOptimizationIgnored = ignoringBattery
         )
     }
 

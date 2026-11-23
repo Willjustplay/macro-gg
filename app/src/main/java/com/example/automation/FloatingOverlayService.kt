@@ -14,6 +14,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -44,7 +45,6 @@ import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.Macro
 import com.example.data.RecordedGesture
-import com.example.data.Region
 import com.example.data.SwipeAction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,12 +54,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.sin
 
 /**
- * Macrorify-style Floating Control Bar & Overlay Tools:
- * - Collapsible control bar (Play/Pause, Stop, +Klik, +Swipe, Screenshot+Crop, Record, Color Spy, Log, App, Close)
- * - Draggable visual target markers (tap to edit delay/repeat/delete, auto pass-through while running)
- * - Live green match highlight box when Image Detection finds a template
+ * Compact Macrorify-style Floating Control Bar & Overlay Tools:
+ * - Slim collapsible control bar with quick +Click button
+ * - Visible swipe lines & directional arrows (live-updated while dragging markers)
+ * - Compact 2-button (Batal / Simpan) screenshot cropper
+ * - Touch recorder, Color Spy, live match highlight box, and live log
  */
 class FloatingOverlayService : Service() {
 
@@ -74,7 +79,6 @@ class FloatingOverlayService : Service() {
     private var collapseBtn: TextView? = null
     private var playPauseBtn: TextView? = null
     private var statusDotView: View? = null
-    private var targetBadgeText: TextView? = null
     private var isCollapsed = false
 
     private var logOverlayView: View? = null
@@ -97,6 +101,7 @@ class FloatingOverlayService : Service() {
     private var markerEditorView: View? = null
 
     private var matchBoxView: MatchHighlightView? = null
+    private var swipePathView: SwipePathOverlayView? = null
     private val markerViews = mutableListOf<Pair<View, WindowManager.LayoutParams>>()
 
     private var screenWidth = 1080
@@ -127,8 +132,9 @@ class FloatingOverlayService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_OPEN_CROP -> {
+                val addToMacro = intent.getBooleanExtra(EXTRA_ADD_TO_MACRO, true)
                 ensureOverlayRunning()
-                mainHandler.postDelayed({ launchScreenshotCrop() }, 200L)
+                mainHandler.postDelayed({ launchScreenshotCrop(addToMacro) }, 200L)
                 return START_STICKY
             }
             ACTION_OPEN_RECORDER -> {
@@ -139,6 +145,10 @@ class FloatingOverlayService : Service() {
         }
         ensureOverlayRunning()
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Keep floating overlay running when user swipes MacroGG away from Recents.
     }
 
     private fun ensureOverlayRunning() {
@@ -195,29 +205,32 @@ class FloatingOverlayService : Service() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    // ---- Main Floating Control Bar ----
+    // ---- Compact Floating Control Bar ----
 
     @SuppressLint("ClickableViewAccessibility")
     private fun showControlBar() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setPadding(dp(5), dp(4), dp(5), dp(4))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#EB0F172A"))
-                cornerRadius = dp(20).toFloat()
+                setColor(Color.parseColor("#E80F172A"))
+                cornerRadius = dp(16).toFloat()
                 setStroke(dp(1), Color.parseColor("#2DD4BF"))
             }
-            elevation = dp(8).toFloat()
+            elevation = dp(6).toFloat()
         }
 
-        // Row 1: Primary controls (always visible when expanded, compact pill when collapsed)
+        // Row 1 (always visible, ultra-compact): [•] [▶] [■] [+] [▾] [✕]
         val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
         val dot = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginEnd = dp(5) }
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply {
+                marginStart = dp(2)
+                marginEnd = dp(4)
+            }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor("#2DD4BF"))
@@ -226,61 +239,46 @@ class FloatingOverlayService : Service() {
         statusDotView = dot
         topRow.addView(dot)
 
-        val badge = TextView(this).apply {
-            text = "MacroGG"
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(6) }
-        }
-        targetBadgeText = badge
-        topRow.addView(badge)
-
-        val btnPlay = makeControlButton("▶", "#0D9488") {
+        val btnPlay = makeCompactButton("▶", "#0D9488") {
             handlePlayPauseClick()
         }
         playPauseBtn = btnPlay
         topRow.addView(btnPlay)
 
-        topRow.addView(makeControlButton("■", "#991B1B") {
+        topRow.addView(makeCompactButton("■", "#991B1B") {
             AutomationCoordinator.stop()
         })
 
-        val btnCollapse = makeControlButton("▾", "#334155") {
+        // Quick Add Click marker button right on the small top bar
+        topRow.addView(makeCompactButton("+", "#1D4ED8") {
+            refreshScreenSize()
+            AutomationCoordinator.addQuickClickMarker(screenWidth / 2, screenHeight / 2)
+        })
+
+        val btnCollapse = makeCompactButton("▾", "#334155") {
             toggleCollapse()
         }
         collapseBtn = btnCollapse
         topRow.addView(btnCollapse)
 
-        topRow.addView(makeControlButton("✕", "#1E293B") {
+        topRow.addView(makeCompactButton("✕", "#1E293B", marginEndDp = 0) {
             AutomationCoordinator.stop()
             stopSelf()
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
         })
 
         root.addView(topRow)
 
-        // Row 2: Macrorify creation & inspection tools (hidden when collapsed)
+        // Row 2 (collapsible compact tool icons): [⇄] [✂] [●] [◎] [≡] [⌂]
         val toolsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(6) }
+            ).apply { topMargin = dp(4) }
         }
 
-        toolsRow.addView(makeControlButton("+Klik", "#1D4ED8") {
-            refreshScreenSize()
-            AutomationCoordinator.addQuickClickMarker(screenWidth / 2, screenHeight / 2)
-        })
-
-        toolsRow.addView(makeControlButton("+Swp", "#0369A1") {
+        toolsRow.addView(makeCompactButton("⇄", "#0369A1") {
             refreshScreenSize()
             AutomationCoordinator.addQuickSwipeMarker(
                 screenWidth / 2,
@@ -290,29 +288,27 @@ class FloatingOverlayService : Service() {
             )
         })
 
-        toolsRow.addView(makeControlButton("✂Img", "#0F766E") {
-            launchScreenshotCrop()
+        toolsRow.addView(makeCompactButton("✂", "#0F766E") {
+            launchScreenshotCrop(addToMacro = true)
         })
 
-        toolsRow.addView(makeControlButton("●Rec", "#B91C1C") {
+        toolsRow.addView(makeCompactButton("●", "#B91C1C") {
             openTouchRecorder()
         })
 
-        toolsRow.addView(makeControlButton("◎", "#6D28D9") {
+        toolsRow.addView(makeCompactButton("◎", "#6D28D9") {
             toggleColorSpy()
         })
 
-        toolsRow.addView(makeControlButton("LOG", "#334155") {
+        toolsRow.addView(makeCompactButton("≡", "#334155") {
             toggleLogConsole()
         })
 
-        toolsRow.addView(makeControlButton("APP", "#475569") {
+        toolsRow.addView(makeCompactButton("⌂", "#475569", marginEndDp = 0) {
             val intent = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
             startActivity(intent)
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
         })
 
         expandedToolsRow = toolsRow
@@ -326,14 +322,43 @@ class FloatingOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(12)
-            y = dp(90)
+            x = dp(10)
+            y = dp(86)
         }
 
         attachDragBehavior(root, params)
         windowManager.addView(root, params)
         controlBarView = root
         controlBarParams = params
+    }
+
+    private fun makeCompactButton(
+        label: String,
+        bgHex: String,
+        marginEndDp: Int = 3,
+        onClick: () -> Unit
+    ): TextView {
+        return TextView(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            minWidth = dp(26)
+            minHeight = dp(26)
+            setPadding(dp(5), dp(2), dp(5), dp(2))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(bgHex))
+                cornerRadius = dp(13).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(26)
+            ).apply {
+                marginEnd = dp(marginEndDp)
+            }
+            setOnClickListener { onClick() }
+        }
     }
 
     private fun handlePlayPauseClick() {
@@ -359,30 +384,6 @@ class FloatingOverlayService : Service() {
         isCollapsed = !isCollapsed
         expandedToolsRow?.visibility = if (isCollapsed) View.GONE else View.VISIBLE
         collapseBtn?.text = if (isCollapsed) "▸" else "▾"
-    }
-
-    private fun makeControlButton(label: String, bgHex: String, onClick: () -> Unit): TextView {
-        return TextView(this).apply {
-            text = label
-            setTextColor(Color.WHITE)
-            textSize = if (label.length > 2) 10f else 12.5f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            minWidth = dp(32)
-            minHeight = dp(32)
-            setPadding(dp(7), dp(4), dp(7), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor(bgHex))
-                cornerRadius = dp(14).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                dp(32)
-            ).apply {
-                marginEnd = dp(4)
-            }
-            setOnClickListener { onClick() }
-        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -412,8 +413,8 @@ class FloatingOverlayService : Service() {
                     val dy = (event.rawY - initialTouchY).toInt()
                     if (abs(dx) > 5 || abs(dy) > 5) {
                         moved = true
-                        params.x = (initialX + dx).coerceIn(0, (screenWidth - dp(40)).coerceAtLeast(0))
-                        params.y = (initialY + dy).coerceIn(0, (screenHeight - dp(40)).coerceAtLeast(0))
+                        params.x = (initialX + dx).coerceIn(0, (screenWidth - dp(32)).coerceAtLeast(0))
+                        params.y = (initialY + dy).coerceIn(0, (screenHeight - dp(32)).coerceAtLeast(0))
                         try {
                             windowManager.updateViewLayout(view, params)
                             onMoved?.invoke(params.x, params.y)
@@ -426,19 +427,19 @@ class FloatingOverlayService : Service() {
         }
     }
 
-    // ---- Screenshot & Crop Overlay ----
+    // ---- Screenshot & Crop Overlay (Compact Batal / Simpan Bar) ----
 
-    private fun launchScreenshotCrop() {
+    private fun launchScreenshotCrop(addToMacro: Boolean) {
         if (cropOverlayView != null) return
         if (!ScreenCaptureService.isCapturing.value) {
             Toast.makeText(this, "Izinkan tangkap layar untuk crop gambar target", Toast.LENGTH_SHORT).show()
             ScreenCapturePermissionActivity.request(this) {
-                mainHandler.post { launchScreenshotCrop() }
+                mainHandler.post { launchScreenshotCrop(addToMacro) }
             }
             return
         }
 
-        // Briefly hide overlay chrome so the captured screenshot is clean!
+        // Briefly hide overlay chrome so the captured screenshot is clean
         setOverlayChromeVisibility(View.INVISIBLE)
         mainHandler.postDelayed({
             val snapshot = ScreenCaptureService.captureBitmapCopy()
@@ -447,31 +448,28 @@ class FloatingOverlayService : Service() {
                 Toast.makeText(this, "Gagal mengambil tangkapan layar. Coba lagi.", Toast.LENGTH_SHORT).show()
                 return@postDelayed
             }
-            showCropOverlay(snapshot)
+            showCropOverlay(snapshot, addToMacro)
         }, 160L)
     }
 
-    private fun showCropOverlay(snapshot: Bitmap) {
+    private fun showCropOverlay(snapshot: Bitmap, addToMacro: Boolean) {
         dismissCropOverlay()
         cropScreenshot = snapshot
-        val defaultName = store.uniqueImageName("target")
         val view = OverlayCropView(
             context = this,
             screenshot = snapshot,
-            defaultName = defaultName,
-            onSaveOnly = { name, cropped ->
-                val saved = store.saveImage(name, cropped)
+            onSave = { cropped, _ ->
+                val defaultName = store.uniqueImageName("target")
+                val saved = store.saveImage(defaultName, cropped)
                 cropped.recycle()
+                if (addToMacro) {
+                    AutomationCoordinator.addQuickImageAction(saved.name)
+                    Toast.makeText(this, "Disimpan & ditambahkan: ${saved.name}", Toast.LENGTH_SHORT).show()
+                } else {
+                    ExecutionLogBus.image("Gambar '${saved.name}' (${saved.width}×${saved.height}) disimpan.")
+                    Toast.makeText(this, "Disimpan: ${saved.name}", Toast.LENGTH_SHORT).show()
+                }
                 dismissCropOverlay()
-                ExecutionLogBus.image("Gambar '${saved.name}' (${saved.width}×${saved.height}) disimpan.")
-                Toast.makeText(this, "Disimpan: ${saved.name}", Toast.LENGTH_SHORT).show()
-            },
-            onSaveAndAddAction = { name, cropped, _, _, _, _ ->
-                val saved = store.saveImage(name, cropped)
-                cropped.recycle()
-                AutomationCoordinator.addQuickImageAction(saved.name)
-                dismissCropOverlay()
-                Toast.makeText(this, "Ditambahkan deteksi: ${saved.name}", Toast.LENGTH_SHORT).show()
             },
             onCancel = { dismissCropOverlay() }
         )
@@ -480,12 +478,11 @@ class FloatingOverlayService : Service() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-        }
+        )
 
         windowManager.addView(view, params)
         cropOverlayView = view
@@ -565,6 +562,7 @@ class FloatingOverlayService : Service() {
         controlBarView?.visibility = visibility
         logOverlayView?.visibility = visibility
         colorSpyView?.visibility = visibility
+        swipePathView?.visibility = visibility
         markerViews.forEach { (v, _) -> v.visibility = visibility }
     }
 
@@ -577,15 +575,10 @@ class FloatingOverlayService : Service() {
                 AutomationCoordinator.activeMode,
                 AutomationCoordinator.activeMacro,
                 AutomationCoordinator.activeLuaScript
-            ) { state, mode, macro, script ->
-                OverlaySnapshot(
-                    state = state,
-                    mode = mode,
-                    targetName = if (mode == AutomationMode.MACRO) macro.name else (script?.name ?: "Lua"),
-                    macro = macro
-                )
+            ) { state, mode, macro, _ ->
+                OverlaySnapshot(state = state, mode = mode, macro = macro)
             }.collect { snap ->
-                updateControlBarUi(snap.state, snap.targetName)
+                updateControlBarUi(snap.state)
                 if (snap.mode == AutomationMode.MACRO) {
                     rebuildTargetMarkers(snap.macro.actions, isRunning = snap.state == EngineState.RUNNING)
                 } else {
@@ -613,8 +606,7 @@ class FloatingOverlayService : Service() {
         }
     }
 
-    private fun updateControlBarUi(state: EngineState, targetName: String) {
-        targetBadgeText?.text = targetName.ifBlank { "MacroGG" }.take(12)
+    private fun updateControlBarUi(state: EngineState) {
         val (playSymbol, dotColor) = when (state) {
             EngineState.RUNNING -> "❚❚" to "#10B981"
             EngineState.PAUSED -> "▶" to "#F59E0B"
@@ -623,6 +615,148 @@ class FloatingOverlayService : Service() {
         }
         playPauseBtn?.text = playSymbol
         (statusDotView?.background as? GradientDrawable)?.setColor(Color.parseColor(dotColor))
+    }
+
+    // ---- Swipe Path Lines & Direction Arrows Overlay ----
+
+    private data class SwipeSegment(
+        val id: String,
+        val x1: Float,
+        val y1: Float,
+        val x2: Float,
+        val y2: Float
+    )
+
+    private class SwipePathOverlayView(
+        context: Context,
+        private val markerRadiusPx: Float
+    ) : View(context) {
+
+        private val d = resources.displayMetrics.density
+        private val segments = LinkedHashMap<String, SwipeSegment>()
+
+        private val glowPaint = Paint().apply {
+            color = Color.parseColor("#660284C7")
+            style = Paint.Style.STROKE
+            strokeWidth = 7f * d
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+        private val linePaint = Paint().apply {
+            color = Color.parseColor("#38BDF8")
+            style = Paint.Style.STROKE
+            strokeWidth = 3f * d
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+        private val arrowFill = Paint().apply {
+            color = Color.parseColor("#99F6E4")
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        private val arrowStroke = Paint().apply {
+            color = Color.parseColor("#0F172A")
+            style = Paint.Style.STROKE
+            strokeWidth = 1.2f * d
+            isAntiAlias = true
+        }
+        private val arrowPath = Path()
+
+        fun setSegments(list: List<SwipeSegment>, isRunning: Boolean) {
+            segments.clear()
+            for (s in list) segments[s.id] = s
+            alpha = if (isRunning) 0.35f else 0.95f
+            invalidate()
+        }
+
+        fun updateEndpoint(id: String, x: Float, y: Float, isEndNode: Boolean) {
+            val cur = segments[id] ?: return
+            segments[id] = if (isEndNode) cur.copy(x2 = x, y2 = y) else cur.copy(x1 = x, y1 = y)
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            for (seg in segments.values) {
+                val dx = seg.x2 - seg.x1
+                val dy = seg.y2 - seg.y1
+                val dist = hypot(dx, dy)
+                if (dist < 4f) continue
+
+                val ux = dx / dist
+                val uy = dy / dist
+                val startOffset = (markerRadiusPx * 0.85f).coerceAtMost(dist * 0.25f)
+                val endOffset = (markerRadiusPx * 0.95f).coerceAtMost(dist * 0.35f)
+
+                val sx = seg.x1 + ux * startOffset
+                val sy = seg.y1 + uy * startOffset
+                val ex = seg.x2 - ux * endOffset
+                val ey = seg.y2 - uy * endOffset
+
+                // Line connecting A -> B
+                canvas.drawLine(sx, sy, ex, ey, glowPaint)
+                canvas.drawLine(sx, sy, ex, ey, linePaint)
+
+                val angle = atan2(dy, dx)
+                // Primary arrowhead right before marker B
+                drawArrowHead(canvas, ex, ey, angle, 12f * d)
+
+                // Midpoint directional arrow when swipe is long enough
+                if (dist > markerRadiusPx * 3.5f) {
+                    val mx = (sx + ex) * 0.5f
+                    val my = (sy + ey) * 0.5f
+                    drawArrowHead(canvas, mx, my, angle, 9f * d)
+                }
+            }
+        }
+
+        private fun drawArrowHead(canvas: Canvas, tipX: Float, tipY: Float, angleRad: Float, size: Float) {
+            val spread = Math.toRadians(28.0).toFloat()
+            val x1 = tipX - size * cos(angleRad - spread)
+            val y1 = tipY - size * sin(angleRad - spread)
+            val x2 = tipX - size * cos(angleRad + spread)
+            val y2 = tipY - size * sin(angleRad + spread)
+            arrowPath.reset()
+            arrowPath.moveTo(tipX, tipY)
+            arrowPath.lineTo(x1, y1)
+            arrowPath.lineTo(x2, y2)
+            arrowPath.close()
+            canvas.drawPath(arrowPath, arrowFill)
+            canvas.drawPath(arrowPath, arrowStroke)
+        }
+    }
+
+    private fun updateSwipePathOverlay(segments: List<SwipeSegment>, isRunning: Boolean, markerHalfPx: Float) {
+        if (segments.isEmpty()) {
+            removeSwipePathOverlay()
+            return
+        }
+        if (swipePathView == null) {
+            val v = SwipePathOverlayView(this, markerHalfPx)
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            try {
+                windowManager.addView(v, params)
+                swipePathView = v
+            } catch (_: Exception) {
+                return
+            }
+        }
+        swipePathView?.setSegments(segments, isRunning)
+    }
+
+    private fun removeSwipePathOverlay() {
+        swipePathView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
+        }
+        swipePathView = null
     }
 
     // ---- Live Match Bounding Box ----
@@ -702,13 +836,20 @@ class FloatingOverlayService : Service() {
 
     private fun rebuildTargetMarkers(actions: List<Action>, isRunning: Boolean) {
         clearTargetMarkers()
-        val markerSize = dp(40)
+        val markerSize = dp(36)
         val half = markerSize / 2
         val baseFlags = if (isRunning) {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
+
+        // Draw swipe connecting lines & direction arrows underneath the markers
+        val swipeSegments = actions
+            .filter { it.enabled }
+            .filterIsInstance<SwipeAction>()
+            .map { SwipeSegment(it.id, it.x1.toFloat(), it.y1.toFloat(), it.x2.toFloat(), it.y2.toFloat()) }
+        updateSwipePathOverlay(swipeSegments, isRunning, half.toFloat())
 
         var markerNumber = 0
         actions.forEach { action ->
@@ -756,6 +897,7 @@ class FloatingOverlayService : Service() {
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
+                        onDragging = { nx, ny -> swipePathView?.updateEndpoint(action.id, nx.toFloat(), ny.toFloat(), isEndNode = false) },
                         onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = false) }
                     )
                     addMarker(
@@ -768,6 +910,7 @@ class FloatingOverlayService : Service() {
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
+                        onDragging = { nx, ny -> swipePathView?.updateEndpoint(action.id, nx.toFloat(), ny.toFloat(), isEndNode = true) },
                         onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = true) }
                     )
                 }
@@ -801,12 +944,13 @@ class FloatingOverlayService : Service() {
         flags: Int,
         isRunning: Boolean,
         onTap: () -> Unit,
+        onDragging: ((Int, Int) -> Unit)? = null,
         onDragCommit: (Int, Int) -> Unit
     ) {
         val view = TextView(this).apply {
             text = label
             setTextColor(Color.WHITE)
-            textSize = 11.5f
+            textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             alpha = if (isRunning) 0.4f else 0.92f
@@ -824,7 +968,7 @@ class FloatingOverlayService : Service() {
             y = (cy - half).coerceIn(0, (screenHeight - size).coerceAtLeast(0))
         }
         if (!isRunning) {
-            attachMarkerTouch(view, params, half, onTap, onDragCommit)
+            attachMarkerTouch(view, params, half, onTap, onDragging, onDragCommit)
         }
         windowManager.addView(view, params)
         markerViews.add(view to params)
@@ -836,6 +980,7 @@ class FloatingOverlayService : Service() {
         params: WindowManager.LayoutParams,
         half: Int,
         onTap: () -> Unit,
+        onDragging: ((Int, Int) -> Unit)?,
         onCommit: (Int, Int) -> Unit
     ) {
         var initialX = 0
@@ -861,6 +1006,7 @@ class FloatingOverlayService : Service() {
                         params.x = (initialX + dx).coerceIn(0, (screenWidth - half * 2).coerceAtLeast(0))
                         params.y = (initialY + dy).coerceIn(0, (screenHeight - half * 2).coerceAtLeast(0))
                         try { windowManager.updateViewLayout(view, params) } catch (_: Exception) {}
+                        onDragging?.invoke(params.x + half, params.y + half)
                     }
                     true
                 }
@@ -949,14 +1095,14 @@ class FloatingOverlayService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(8) }
         }
-        btnRow.addView(makeControlButton("Hapus", "#991B1B") {
+        btnRow.addView(makeCompactButton("Hapus", "#991B1B", marginEndDp = 6) {
             AutomationCoordinator.removeActionFromOverlay(action.id)
             dismissMarkerEditor()
         })
-        btnRow.addView(makeControlButton("Batal", "#475569") {
+        btnRow.addView(makeCompactButton("Batal", "#475569", marginEndDp = 6) {
             dismissMarkerEditor()
         })
-        btnRow.addView(makeControlButton("Simpan", "#0D9488") {
+        btnRow.addView(makeCompactButton("Simpan", "#0D9488", marginEndDp = 0) {
             val newDelay = delayField.text.toString().toLongOrNull()?.coerceAtLeast(0L) ?: action.delayAfterMs
             val newDur = durationField?.text?.toString()?.toLongOrNull()?.coerceIn(15L, 60_000L)
             val newRep = repeatField?.text?.toString()?.toIntOrNull()?.coerceIn(1, 999)
@@ -1003,6 +1149,7 @@ class FloatingOverlayService : Service() {
             try { windowManager.removeView(view) } catch (_: Exception) {}
         }
         markerViews.clear()
+        removeSwipePathOverlay()
     }
 
     // ---- Live Log Console ----
@@ -1051,7 +1198,7 @@ class FloatingOverlayService : Service() {
             }.ifBlank { "Menunggu log eksekusi..." }
         }
         val scroll = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(260), dp(130)).apply { topMargin = dp(4) }
+            layoutParams = LinearLayout.LayoutParams(dp(250), dp(125)).apply { topMargin = dp(4) }
             addView(tv)
         }
         root.addView(scroll)
@@ -1064,8 +1211,8 @@ class FloatingOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(14)
-            y = dp(190)
+            x = dp(12)
+            y = dp(168)
         }
 
         attachDragBehavior(root, params)
@@ -1096,16 +1243,16 @@ class FloatingOverlayService : Service() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setPadding(dp(7), dp(5), dp(7), dp(5))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#EB111827"))
-                cornerRadius = dp(16).toFloat()
-                setStroke(dp(2), Color.parseColor("#F59E0B"))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.parseColor("#F59E0B"))
             }
         }
 
         val swatch = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(6) }
+            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(5) }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor("#2DD4BF"))
@@ -1116,20 +1263,20 @@ class FloatingOverlayService : Service() {
         root.addView(swatch)
 
         val label = TextView(this).apply {
-            text = "Geser untuk bidik warna"
+            text = "Bidik warna"
             setTextColor(Color.WHITE)
-            textSize = 10.5f
+            textSize = 10f
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(6) }
+            ).apply { marginEnd = dp(5) }
         }
         colorSpyLabel = label
         root.addView(label)
 
-        root.addView(makeControlButton("Ambil", "#0D9488") {
-            val p = colorSpyParams ?: return@makeControlButton
+        root.addView(makeCompactButton("Salin", "#0D9488", marginEndDp = 4) {
+            val p = colorSpyParams ?: return@makeCompactButton
             val hex = ScreenCaptureService.samplePixelHex(p.x, p.y) ?: "#000000"
             AutomationCoordinator.publishPickedPixel(p.x, p.y, hex)
             val clip = getSystemService(ClipboardManager::class.java)
@@ -1137,16 +1284,14 @@ class FloatingOverlayService : Service() {
             Toast.makeText(this, "Disalin: (${p.x},${p.y}) $hex", Toast.LENGTH_SHORT).show()
         })
 
-        root.addView(makeControlButton("+Aksi", "#7C3AED") {
-            val p = colorSpyParams ?: return@makeControlButton
+        root.addView(makeCompactButton("+Aksi", "#7C3AED", marginEndDp = 0) {
+            val p = colorSpyParams ?: return@makeCompactButton
             val hex = ScreenCaptureService.samplePixelHex(p.x, p.y) ?: "#FFFFFF"
             AutomationCoordinator.publishPickedPixel(p.x, p.y, hex)
             AutomationCoordinator.updateActiveMacro(persist = true) { macro ->
                 macro.copy(actions = macro.actions + ColorAction(x = p.x, y = p.y, color = hex))
             }
-            Toast.makeText(this, "Aksi Deteksi Warna $hex ditambahkan", Toast.LENGTH_SHORT).show()
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
+            Toast.makeText(this, "Deteksi Warna $hex ditambahkan", Toast.LENGTH_SHORT).show()
         })
 
         val params = WindowManager.LayoutParams(
@@ -1169,7 +1314,7 @@ class FloatingOverlayService : Service() {
                     (colorSpySwatch?.background as? GradientDrawable)?.setColor(Color.parseColor(sampled))
                 } catch (_: Exception) {}
             } else {
-                colorSpyLabel?.text = "($nx,$ny) Aktifkan Tangkap Layar"
+                colorSpyLabel?.text = "($nx,$ny) Aktifkan Layar"
             }
         }
 
@@ -1210,7 +1355,6 @@ class FloatingOverlayService : Service() {
     private data class OverlaySnapshot(
         val state: EngineState,
         val mode: AutomationMode,
-        val targetName: String,
         val macro: Macro
     )
 
@@ -1221,10 +1365,12 @@ class FloatingOverlayService : Service() {
         const val ACTION_STOP = "com.example.action.STOP_OVERLAY"
         const val ACTION_OPEN_CROP = "com.example.action.OPEN_CROP"
         const val ACTION_OPEN_RECORDER = "com.example.action.OPEN_RECORDER"
+        const val EXTRA_ADD_TO_MACRO = "add_to_macro"
 
-        fun start(context: Context, action: String = ACTION_START) {
+        fun start(context: Context, action: String = ACTION_START, addToMacro: Boolean = true) {
             val intent = Intent(context, FloatingOverlayService::class.java).apply {
                 this.action = action
+                putExtra(EXTRA_ADD_TO_MACRO, addToMacro)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

@@ -10,11 +10,9 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -24,21 +22,17 @@ import kotlin.math.min
 
 /**
  * Full-screen interactive screenshot cropper shown directly inside the Floating Overlay.
- * Users drag corners/edges/box to select a target icon and either save it to the Image Library
- * or save + add an Image Detection Click action to the active macro in one tap.
+ * Features a compact bottom pill bar with only Cancel ("Batal") and Save ("Simpan") buttons.
  */
 @SuppressLint("ViewConstructor")
 class OverlayCropView(
     context: Context,
     private val screenshot: Bitmap,
-    defaultName: String,
-    private val onSaveOnly: (name: String, cropped: Bitmap) -> Unit,
-    private val onSaveAndAddAction: (name: String, cropped: Bitmap, regionLeft: Int, regionTop: Int, regionRight: Int, regionBottom: Int) -> Unit,
+    private val onSave: (cropped: Bitmap, rect: Rect) -> Unit,
     private val onCancel: () -> Unit
 ) : FrameLayout(context) {
 
     private val canvasView: CropCanvasView
-    private val nameInput: EditText
 
     init {
         canvasView = CropCanvasView(context, screenshot)
@@ -50,115 +44,54 @@ class OverlayCropView(
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
 
-        // Top instruction pill
-        val hintPill = TextView(context).apply {
-            text = "Seret kotak untuk memilih gambar target"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#DD0F172A"))
-                cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), Color.parseColor("#38BDF8"))
-            }
-        }
-        addView(
-            hintPill,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-                topMargin = dp(42)
-            }
-        )
-
-        // Bottom control card
-        val bottomBar = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(14))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#EE0F172A"))
-                cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), Color.parseColor("#475569"))
-            }
-        }
-
-        nameInput = EditText(context).apply {
-            setText(defaultName.removeSuffix(".png"))
-            hint = "Nama gambar (mis: tombol_play)"
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#94A3B8"))
-            textSize = 13f
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1E293B"))
-                cornerRadius = dp(10).toFloat()
-                setStroke(dp(1), Color.parseColor("#334155"))
-            }
-        }
-        bottomBar.addView(
-            nameInput,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(10)
-            }
-        )
-
-        val btnRow = LinearLayout(context).apply {
+        // Compact floating navigation bar with only Batal & Simpan
+        val navBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(5), dp(6), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#EB0F172A"))
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), Color.parseColor("#2DD4BF"))
+            }
+            elevation = dp(8).toFloat()
         }
 
-        fun makeBtn(label: String, bgHex: String, weight: Float = 1f, onClick: () -> Unit): TextView {
+        fun makeSmallBtn(label: String, bgHex: String, marginEndDp: Int, onClick: () -> Unit): TextView {
             return TextView(context).apply {
                 text = label
                 setTextColor(Color.WHITE)
-                textSize = 12f
+                textSize = 11.5f
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setPadding(dp(14), dp(6), dp(14), dp(6))
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor(bgHex))
-                    cornerRadius = dp(10).toFloat()
+                    cornerRadius = dp(15).toFloat()
                 }
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
-                    marginEnd = dp(6)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    marginEnd = dp(marginEndDp)
                 }
                 setOnClickListener { onClick() }
             }
         }
 
-        btnRow.addView(makeBtn("Batal", "#475569", 0.7f) { onCancel() })
-        btnRow.addView(makeBtn("Simpan", "#0284C7", 0.9f) {
-            val crop = canvasView.extractCrop()
-            if (crop != null) {
-                onSaveOnly(nameInput.text.toString().ifBlank { defaultName }, crop)
-            }
-        })
-        btnRow.addView(makeBtn("Simpan + Klik", "#0D9488", 1.2f) {
+        navBar.addView(makeSmallBtn("Batal", "#475569", 6) { onCancel() })
+        navBar.addView(makeSmallBtn("Simpan", "#0D9488", 0) {
             val crop = canvasView.extractCrop()
             val rect = canvasView.imageCropRect()
             if (crop != null && rect != null) {
-                onSaveAndAddAction(
-                    nameInput.text.toString().ifBlank { defaultName },
-                    crop,
-                    rect.left,
-                    rect.top,
-                    rect.right,
-                    rect.bottom
-                )
+                onSave(crop, rect)
             }
-        }.apply {
-            (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
         })
 
-        bottomBar.addView(btnRow)
-
         addView(
-            bottomBar,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-                marginStart = dp(14)
-                marginEnd = dp(14)
-                bottomMargin = dp(24)
+            navBar,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(28)
             }
         )
     }
@@ -203,7 +136,7 @@ class OverlayCropView(
         }
         private val labelText = Paint().apply {
             color = Color.WHITE
-            textSize = 11.5f * d
+            textSize = 11f * d
             typeface = Typeface.MONOSPACE
             isAntiAlias = true
         }
@@ -213,8 +146,8 @@ class OverlayCropView(
             super.onSizeChanged(w, h, oldw, oldh)
             dstRect.set(0f, 0f, w.toFloat(), h.toFloat())
             if (!initialized && w > 0 && h > 0) {
-                val bw = min(w * 0.42f, 200f * d)
-                val bh = min(h * 0.18f, 120f * d)
+                val bw = min(w * 0.40f, 180f * d)
+                val bh = min(h * 0.16f, 110f * d)
                 sel.set((w - bw) / 2f, (h - bh) / 2f, (w + bw) / 2f, (h + bh) / 2f)
                 initialized = true
             }
@@ -225,7 +158,6 @@ class OverlayCropView(
             if (bitmap.isRecycled) return
             canvas.drawBitmap(bitmap, null, dstRect, null)
 
-            // Draw dimmed scrim around the selection rectangle
             val vw = width.toFloat()
             val vh = height.toFloat()
             canvas.drawRect(0f, 0f, vw, sel.top, scrimPaint)
@@ -233,9 +165,8 @@ class OverlayCropView(
             canvas.drawRect(0f, sel.top, sel.left, sel.bottom, scrimPaint)
             canvas.drawRect(sel.right, sel.top, vw, sel.bottom, scrimPaint)
 
-            // Selection border & corner handles
             canvas.drawRect(sel, borderPaint)
-            val r = 7f * d
+            val r = 6.5f * d
             val corners = arrayOf(
                 sel.left to sel.top,
                 sel.right to sel.top,
@@ -247,19 +178,18 @@ class OverlayCropView(
                 canvas.drawCircle(cx, cy, r, handleStroke)
             }
 
-            // Size badge
             val cropRect = imageCropRect()
             if (cropRect != null) {
                 val info = "${cropRect.width()}×${cropRect.height()} px"
                 val tw = labelText.measureText(info)
-                val pad = 6f * d
+                val pad = 5f * d
                 val bx = sel.left.coerceIn(8f * d, max(8f * d, vw - tw - pad * 2 - 8f * d))
-                val by = (sel.top - 28f * d).coerceAtLeast(8f * d)
+                val by = (sel.top - 26f * d).coerceAtLeast(8f * d)
                 canvas.drawRoundRect(
-                    RectF(bx, by, bx + tw + pad * 2, by + 22f * d),
+                    RectF(bx, by, bx + tw + pad * 2, by + 20f * d),
                     6f * d, 6f * d, labelBg
                 )
-                canvas.drawText(info, bx + pad, by + 15.5f * d, labelText)
+                canvas.drawText(info, bx + pad, by + 14f * d, labelText)
             }
         }
 
@@ -300,7 +230,6 @@ class OverlayCropView(
             if (abs(y - sel.top) <= handleRadius && x in sel.left..sel.right) return Handle.TOP
             if (abs(y - sel.bottom) <= handleRadius && x in sel.left..sel.right) return Handle.BOTTOM
             if (sel.contains(x, y)) return Handle.MOVE
-            // Allow starting a brand-new box if touching outside
             sel.set(x - minBoxPx / 2, y - minBoxPx / 2, x + minBoxPx / 2, y + minBoxPx / 2)
             clampBox()
             return Handle.BR
