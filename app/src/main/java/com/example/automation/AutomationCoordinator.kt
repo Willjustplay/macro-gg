@@ -298,9 +298,9 @@ object AutomationCoordinator {
                 MacroRunner(runtime).run(macro)
             } catch (_: CancellationException) {
                 ExecutionLogBus.info("Macro dihentikan.")
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 _engineState.value = EngineState.ERROR
-                ExecutionLogBus.error("Error: ${e.message ?: "tidak diketahui"}")
+                ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
             } finally {
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 if (_engineState.value != EngineState.ERROR) {

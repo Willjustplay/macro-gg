@@ -28,8 +28,14 @@ class ScreenCapturePermissionActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val mgr = getSystemService(MediaProjectionManager::class.java)
-        launcher.launch(mgr.createScreenCaptureIntent())
+        try {
+            val mgr = getSystemService(MediaProjectionManager::class.java)
+            launcher.launch(mgr.createScreenCaptureIntent())
+        } catch (t: Throwable) {
+            ScreenCaptureService.pendingOnReady = null
+            ExecutionLogBus.error("Gagal membuka dialog tangkap layar: ${t.message}")
+            finish()
+        }
     }
 
     companion object {

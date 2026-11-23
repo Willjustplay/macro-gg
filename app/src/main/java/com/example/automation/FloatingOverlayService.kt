@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -151,47 +152,91 @@ class FloatingOverlayService : Service() {
         // Keep floating overlay running when user swipes MacroGG away from Recents.
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        refreshScreenSize()
+        // Keep floating bar inside the new screen bounds after portrait <-> landscape rotation
+        val bar = controlBarView
+        val params = controlBarParams
+        if (bar != null && params != null) {
+            params.x = params.x.coerceIn(0, (screenWidth - dp(40)).coerceAtLeast(0))
+            params.y = params.y.coerceIn(0, (screenHeight - dp(40)).coerceAtLeast(0))
+            try { windowManager.updateViewLayout(bar, params) } catch (_: Throwable) {}
+        }
+        val spy = colorSpyView
+        val spyParams = colorSpyParams
+        if (spy != null && spyParams != null) {
+            spyParams.x = spyParams.x.coerceIn(0, (screenWidth - dp(40)).coerceAtLeast(0))
+            spyParams.y = spyParams.y.coerceIn(0, (screenHeight - dp(40)).coerceAtLeast(0))
+            try { windowManager.updateViewLayout(spy, spyParams) } catch (_: Throwable) {}
+        }
+    }
+
     private fun ensureOverlayRunning() {
+        // Promote to foreground immediately to prevent ForegroundServiceDidNotStartInTimeException
+        if (!startForegroundNotificationSafe()) {
+            stopSelf()
+            return
+        }
         if (!Settings.canDrawOverlays(this)) {
             ExecutionLogBus.error("Izin Tampilkan di Atas Aplikasi belum diberikan.")
             stopSelf()
             return
         }
-        startForegroundNotification()
         if (controlBarView == null) {
             showControlBar()
-            observeEngineAndLogs()
-            AutomationCoordinator.setOverlayActive(true)
-            ExecutionLogBus.info("Floating Overlay MacroGG aktif.")
+            if (controlBarView != null) {
+                observeEngineAndLogs()
+                AutomationCoordinator.setOverlayActive(true)
+                ExecutionLogBus.info("Floating Overlay MacroGG aktif.")
+            } else {
+                stopSelf()
+            }
         }
     }
 
-    private fun startForegroundNotification() {
-        val manager = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.notif_channel_overlay),
-                NotificationManager.IMPORTANCE_LOW
-            )
-            manager.createNotificationChannel(channel)
-        }
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(getString(R.string.notif_overlay_title))
-            .setContentText(getString(R.string.notif_overlay_text))
-            .setOngoing(true)
-            .setSilent(true)
-            .build()
+    private fun startForegroundNotificationSafe(): Boolean {
+        return try {
+            val manager = getSystemService(NotificationManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    getString(R.string.notif_channel_overlay),
+                    NotificationManager.IMPORTANCE_LOW
+                )
+                manager.createNotificationChannel(channel)
+            }
+            val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(getString(R.string.notif_overlay_title))
+                .setContentText(getString(R.string.notif_overlay_text))
+                .setOngoing(true)
+                .setSilent(true)
+                .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (t: Throwable) {
+            ExecutionLogBus.error("Gagal memulai foreground service overlay: ${t.message}")
+            false
+        }
+    }
+
+    private fun safeAddView(view: View, params: WindowManager.LayoutParams): Boolean {
+        return try {
+            windowManager.addView(view, params)
+            true
+        } catch (t: Throwable) {
+            ExecutionLogBus.error("Gagal menampilkan overlay: ${t.message}")
+            false
         }
     }
 
@@ -327,9 +372,10 @@ class FloatingOverlayService : Service() {
         }
 
         attachDragBehavior(root, params)
-        windowManager.addView(root, params)
-        controlBarView = root
-        controlBarParams = params
+        if (safeAddView(root, params)) {
+            controlBarView = root
+            controlBarParams = params
+        }
     }
 
     private fun makeCompactButton(
@@ -484,7 +530,7 @@ class FloatingOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         )
 
-        windowManager.addView(view, params)
+        safeAddView(view, params)
         cropOverlayView = view
     }
 
@@ -527,7 +573,7 @@ class FloatingOverlayService : Service() {
             onCancel = { dismissTouchRecorder() }
         )
 
-        windowManager.addView(view, params)
+        safeAddView(view, params)
         recorderOverlayView = view
         recorderParams = params
     }
@@ -743,7 +789,7 @@ class FloatingOverlayService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             try {
-                windowManager.addView(v, params)
+                safeAddView(v, params)
                 swipePathView = v
             } catch (_: Exception) {
                 return
@@ -781,7 +827,7 @@ class FloatingOverlayService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             try {
-                windowManager.addView(v, params)
+                safeAddView(v, params)
                 matchBoxView = v
             } catch (_: Exception) {
                 return
@@ -970,7 +1016,7 @@ class FloatingOverlayService : Service() {
         if (!isRunning) {
             attachMarkerTouch(view, params, half, onTap, onDragging, onDragCommit)
         }
-        windowManager.addView(view, params)
+        safeAddView(view, params)
         markerViews.add(view to params)
     }
 
@@ -1133,7 +1179,7 @@ class FloatingOverlayService : Service() {
             gravity = Gravity.CENTER
             dimAmount = 0.4f
         }
-        windowManager.addView(card, params)
+        safeAddView(card, params)
         markerEditorView = card
     }
 
@@ -1216,7 +1262,7 @@ class FloatingOverlayService : Service() {
         }
 
         attachDragBehavior(root, params)
-        windowManager.addView(root, params)
+        safeAddView(root, params)
         logOverlayView = root
         logTextView = tv
         logScrollView = scroll
@@ -1318,7 +1364,7 @@ class FloatingOverlayService : Service() {
             }
         }
 
-        windowManager.addView(root, params)
+        safeAddView(root, params)
         colorSpyView = root
         colorSpyParams = params
         isColorSpyVisible = true
@@ -1372,18 +1418,21 @@ class FloatingOverlayService : Service() {
                 this.action = action
                 putExtra(EXTRA_ADD_TO_MACRO, addToMacro)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (t: Throwable) {
+                ExecutionLogBus.error("Gagal membuka Floating Overlay: ${t.message}")
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, FloatingOverlayService::class.java).apply {
-                action = ACTION_STOP
+            runCatching {
+                context.stopService(Intent(context, FloatingOverlayService::class.java))
             }
-            context.startService(intent)
         }
     }
 }
