@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.data.Action
 import com.example.data.ClickAction
 import com.example.data.ColorAction
+import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
@@ -12,7 +13,11 @@ import com.example.data.Macro
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.RunMacroAction
 import com.example.data.SwipeAction
+import com.example.data.ZoomAction
+import com.example.data.insertInto
+import com.example.data.moveAction
 import com.example.data.removeAction
 import com.example.data.updateAction
 import com.example.data.walk
@@ -194,6 +199,27 @@ object AutomationCoordinator {
         ExecutionLogBus.action("Rekaman (${gestures.size} gestur) ditambahkan ke '${_activeMacro.value.name}'.")
     }
 
+    fun addQuickZoomMarker(cx: Int, cy: Int, zoomIn: Boolean = true) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions + ZoomAction(cx = cx, cy = cy, zoomIn = zoomIn))
+        }
+        ExecutionLogBus.info("${if (zoomIn) "Zoom In" else "Zoom Out"} ditambahkan di ($cx, $cy).")
+    }
+
+    fun addActionFromOverlay(ref: ContainerRef, action: Action) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions.insertInto(ref, action))
+        }
+    }
+
+    fun moveActionFromOverlay(actionId: String, delta: Int) {
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions.moveAction(actionId, delta))
+        }
+    }
+
     fun updateMarkerPosition(actionId: String, newX: Int, newY: Int, isEndNode: Boolean = false) {
         updateActiveMacro(persist = true) { macro ->
             macro.copy(
@@ -202,6 +228,7 @@ object AutomationCoordinator {
                         is ClickAction -> a.copy(x = newX, y = newY)
                         is LongPressAction -> a.copy(x = newX, y = newY)
                         is SwipeAction -> if (isEndNode) a.copy(x2 = newX, y2 = newY) else a.copy(x1 = newX, y1 = newY)
+                        is ZoomAction -> a.copy(cx = newX, cy = newY)
                         is ColorAction -> a.copy(x = newX, y = newY)
                         else -> a
                     }
@@ -227,8 +254,22 @@ object AutomationCoordinator {
         ExecutionLogBus.color("Color Spy: ($x, $y) → $hex")
     }
 
-    fun macroNeedsScreenCapture(macro: Macro): Boolean =
-        macro.actions.walk().any { it is ImageAction || it is ColorAction }
+    fun macroNeedsScreenCapture(macro: Macro): Boolean {
+        val localStore = store
+        val visited = HashSet<String>()
+        fun check(m: Macro): Boolean {
+            if (!visited.add(m.id)) return false
+            for (a in m.actions.walk()) {
+                if (a is ImageAction || a is ColorAction) return true
+                if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
+                    val linked = localStore?.getMacroById(a.targetMacroId)
+                    if (linked != null && check(linked)) return true
+                }
+            }
+            return false
+        }
+        return check(macro)
+    }
 
     fun togglePlayPause(screenWidth: Int, screenHeight: Int) {
         when (_engineState.value) {
@@ -248,13 +289,17 @@ object AutomationCoordinator {
                         ExecutionLogBus.warn("Tambahkan minimal 1 aksi (Klik / Gambar / Rekam) terlebih dahulu.")
                         return
                     }
-                    runMacro(macro)
+                    runMacro(macro, screenWidth, screenHeight)
                 }
             }
         }
     }
 
-    fun runMacro(macro: Macro) {
+    fun runMacro(
+        macro: Macro,
+        screenWidth: Int = ScreenCaptureService.captureWidth,
+        screenHeight: Int = ScreenCaptureService.captureHeight
+    ) {
         stop()
         if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
@@ -271,6 +316,7 @@ object AutomationCoordinator {
         _currentLoop.value = 0
         _actionsExecuted.value = 0
         _engineState.value = EngineState.RUNNING
+        ScreenCaptureService.highFrequencyCapture = true
 
         val startedAt = System.currentTimeMillis()
         val counter = AtomicInteger(0)
@@ -281,6 +327,8 @@ object AutomationCoordinator {
                 "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
             )
             val runtime = object : MacroRuntime {
+                override val screenWidth: Int = screenWidth
+                override val screenHeight: Int = screenHeight
                 override fun isStopped(): Boolean = stopRequested.get() || !isActive
                 override suspend fun waitIfPaused() = this@AutomationCoordinator.waitIfPaused()
                 override suspend fun sleep(ms: Long) = cooperativeDelay(ms)
@@ -290,12 +338,16 @@ object AutomationCoordinator {
                 override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
                     MacroAccessibilityService.dispatchSwipe(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs)
 
+                override suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean =
+                    MacroAccessibilityService.dispatchZoom(cx.toFloat(), cy.toFloat(), zoomIn, distancePx, durationMs)
+
                 override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean =
                     MacroAccessibilityService.dispatchRecordedGesture(gesture, speed)
 
                 override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
                 override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
                 override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
+                override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)
                 override fun onMatchFound(match: MatchResult, label: String) {
                     if (localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)
@@ -314,6 +366,7 @@ object AutomationCoordinator {
                 _engineState.value = EngineState.ERROR
                 ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
             } finally {
+                ScreenCaptureService.highFrequencyCapture = false
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 if (_engineState.value != EngineState.ERROR) {
                     _engineState.value = EngineState.IDLE
@@ -337,6 +390,7 @@ object AutomationCoordinator {
         pausedFlag.set(false)
         _actionsExecuted.value = 0
         _engineState.value = EngineState.RUNNING
+        ScreenCaptureService.highFrequencyCapture = true
 
         val startedAt = System.currentTimeMillis()
         val counter = AtomicInteger(0)
@@ -368,6 +422,15 @@ object AutomationCoordinator {
                         MacroAccessibilityService.dispatchSwipe(
                             x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs.toLong()
                         )
+                    }
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
+                    return ok
+                }
+
+                override fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Int): Boolean {
+                    ExecutionLogBus.action("Lua ${if (zoomIn) "zoomIn" else "zoomOut"}($cx,$cy, ${distancePx}px)")
+                    val ok = runBlocking {
+                        MacroAccessibilityService.dispatchZoom(cx.toFloat(), cy.toFloat(), zoomIn, distancePx, durationMs.toLong())
                     }
                     if (ok) _actionsExecuted.value = counter.incrementAndGet()
                     return ok
@@ -431,6 +494,7 @@ object AutomationCoordinator {
             if (isError) {
                 ExecutionLogBus.error("Lua Error: ${result.exceptionOrNull()?.message}")
             }
+            ScreenCaptureService.highFrequencyCapture = false
             _engineState.value = if (isError) EngineState.ERROR else EngineState.IDLE
             pausedFlag.set(false)
             ExecutionLogBus.info("Lua selesai (${counter.get()} aksi dalam ${elapsed}ms).")
@@ -465,6 +529,7 @@ object AutomationCoordinator {
     fun stop() {
         stopRequested.set(true)
         pausedFlag.set(false)
+        ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null
         if (_engineState.value != EngineState.IDLE) {

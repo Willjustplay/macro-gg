@@ -37,6 +37,7 @@ interface LuaBridge {
     fun isPaused(): Boolean
     fun click(x: Int, y: Int, durationMs: Int): Boolean
     fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean
+    fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Int): Boolean = true
     fun sleepCooperative(ms: Long)
     fun getColorArgb(x: Int, y: Int): Int?
     fun findImage(name: String, threshold: Double, region: Region?): MatchResult? = null
@@ -172,6 +173,30 @@ object SandboxedLuaEngine {
                 val y2 = args.checkint(4)
                 val duration = args.optint(5, 350)
                 return LuaBoolean.valueOf(bridge.swipe(x1, y1, x2, y2, duration))
+            }
+        })
+
+        // zoomIn(cx, cy, [distancePx=260], [durationMs=400])
+        globals.set("zoomIn", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val cx = args.checkint(1)
+                val cy = args.checkint(2)
+                val dist = args.optint(3, 260)
+                val dur = args.optint(4, 400)
+                return LuaBoolean.valueOf(bridge.zoom(cx, cy, true, dist, dur))
+            }
+        })
+
+        // zoomOut(cx, cy, [distancePx=260], [durationMs=400])
+        globals.set("zoomOut", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val cx = args.checkint(1)
+                val cy = args.checkint(2)
+                val dist = args.optint(3, 260)
+                val dur = args.optint(4, 400)
+                return LuaBoolean.valueOf(bridge.zoom(cx, cy, false, dist, dur))
             }
         })
 

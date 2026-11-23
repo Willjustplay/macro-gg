@@ -271,11 +271,13 @@ private fun MacroGGApp() {
             val (sw, sh) = screenMetrics()
             MacroEditorScreen(
                 macro = editingMacro,
+                allMacros = macros,
                 images = images,
                 lastPickedPixel = lastPickedPixel,
                 screenW = sw,
                 screenH = sh,
                 onUpdateMacro = { updated -> viewModel.saveMacro(updated) },
+                onRecropImage = viewModel::recropImage,
                 onLaunchOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay()
@@ -391,6 +393,7 @@ private fun MacroGGApp() {
                             onImportFromGallery = {
                                 galleryImageLauncher.launch("image/*")
                             },
+                            onRecropImage = viewModel::recropImage,
                             onRenameImage = viewModel::renameImage,
                             onDeleteImage = viewModel::deleteImage
                         )

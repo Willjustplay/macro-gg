@@ -13,7 +13,7 @@ data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) 
     val height: Int get() = (bottom - top).coerceAtLeast(0)
 }
 
-/** What to do after the "not found" branch has been executed. */
+/** Flow action taken after a condition branch (Found / Not Found) finishes its child actions. */
 @Serializable
 enum class NotFoundMode(val label: String) {
     CONTINUE("Lanjut ke aksi berikutnya"),
@@ -21,8 +21,16 @@ enum class NotFoundMode(val label: String) {
     STOP("Hentikan macro")
 }
 
+/** Strategy used when the stuck-macro watchdog triggers. */
+@Serializable
+enum class StuckRecoveryMode(val label: String) {
+    RESTART_MACRO("Ulangi macro dari awal"),
+    TAP_CENTER_AND_RESTART("Klik tengah layar lalu ulangi"),
+    STOP_MACRO("Hentikan macro")
+}
+
 /**
- * A single building block of a macro (Macrorify calls these "components").
+ * A single building block of a macro (Macrorify-style component).
  * Condition actions ([ImageAction], [ColorAction]) and [LoopAction] contain nested actions.
  */
 @Serializable
@@ -84,6 +92,23 @@ data class SwipeAction(
     override fun withNewIds() = copy(id = newId())
 }
 
+/** Two-finger pinch gesture: [zoomIn] = true spreads fingers apart, false pinches together. */
+@Serializable
+@SerialName("zoom")
+data class ZoomAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val cx: Int,
+    val cy: Int,
+    val zoomIn: Boolean = true,
+    val distancePx: Int = 260,
+    val durationMs: Long = 400
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
 @Serializable
 @SerialName("wait")
 data class WaitAction(
@@ -117,6 +142,7 @@ data class ImageAction(
     val offsetX: Int = 0,
     val offsetY: Int = 0,
     val thenActions: List<Action> = emptyList(),
+    val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
     val elseActions: List<Action> = emptyList(),
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
@@ -142,6 +168,7 @@ data class ColorAction(
     val timeoutMs: Long = 3000,
     val clickOnFound: Boolean = true,
     val thenActions: List<Action> = emptyList(),
+    val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
     val elseActions: List<Action> = emptyList(),
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
@@ -164,6 +191,22 @@ data class LoopAction(
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withNewIds() = copy(id = newId(), actions = actions.map { it.withNewIds() })
+}
+
+/** Links/chains execution to another saved macro. */
+@Serializable
+@SerialName("run_macro")
+data class RunMacroAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val targetMacroId: String = "",
+    val targetMacroName: String = "",
+    /** If true, returns to continue the caller macro after target completes; if false, switches permanently. */
+    val returnAfter: Boolean = true
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
 }
 
 /** One recorded touch stroke. [points] is a flat list x0,y0,x1,y1,... sampled evenly over [durationMs]. */
@@ -231,6 +274,9 @@ data class Macro(
     val randomDelayMs: Long = 0,
     /** Auto stop after N minutes (0 = off). */
     val maxDurationMin: Int = 0,
+    /** Auto-recover if no progress/action succeeds for N seconds (0 = off). */
+    val autoRecoverStuckSec: Int = 0,
+    val stuckRecoveryMode: StuckRecoveryMode = StuckRecoveryMode.RESTART_MACRO,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -249,10 +295,12 @@ enum class ActionKind(val label: String, val description: String) {
     CLICK("Klik", "Ketuk satu titik"),
     LONG_PRESS("Tahan", "Tekan lama satu titik"),
     SWIPE("Swipe", "Geser dari A ke B"),
+    ZOOM("Zoom In/Out", "Cubit / perbesar 2 jari di layar"),
     WAIT("Tunggu", "Jeda beberapa saat"),
-    IMAGE("Deteksi Gambar", "Cari gambar di layar lalu klik"),
-    COLOR("Deteksi Warna", "Cek warna piksel lalu klik"),
+    IMAGE("Deteksi Gambar", "Cari gambar di layar + aksi If/Else"),
+    COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
+    RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
     RECORD("Rekaman", "Putar ulang sentuhan yang direkam"),
     RESTART("Ulang dari Awal", "Lompat ke awal macro"),
     STOP("Hentikan", "Hentikan macro")
@@ -263,10 +311,12 @@ val Action.kind: ActionKind
         is ClickAction -> ActionKind.CLICK
         is LongPressAction -> ActionKind.LONG_PRESS
         is SwipeAction -> ActionKind.SWIPE
+        is ZoomAction -> ActionKind.ZOOM
         is WaitAction -> ActionKind.WAIT
         is ImageAction -> ActionKind.IMAGE
         is ColorAction -> ActionKind.COLOR
         is LoopAction -> ActionKind.LOOP
+        is RunMacroAction -> ActionKind.RUN_MACRO
         is RecordAction -> ActionKind.RECORD
         is RestartAction -> ActionKind.RESTART
         is StopAction -> ActionKind.STOP
@@ -277,10 +327,12 @@ fun Action.summary(): String = when (this) {
     is ClickAction -> "($x, $y)" + if (repeat > 1) " ×$repeat" else ""
     is LongPressAction -> "($x, $y) ${durationMs}ms"
     is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
+    is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
     is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
-    is ImageAction -> "$imageName • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+    is ImageAction -> "${imageName.ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
     is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
     is LoopAction -> "${count}× (${actions.size} aksi)"
+    is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
     is RecordAction -> "${gestures.size} gestur" + if (speed != 1f) " • ${speed}x" else ""
     is RestartAction -> "Kembali ke aksi pertama"
     is StopAction -> "Akhiri macro"
@@ -294,10 +346,12 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.CLICK -> ClickAction(x = cx, y = cy)
         ActionKind.LONG_PRESS -> LongPressAction(x = cx, y = cy)
         ActionKind.SWIPE -> SwipeAction(x1 = cx, y1 = cy + screenH / 6, x2 = cx, y2 = cy - screenH / 6)
+        ActionKind.ZOOM -> ZoomAction(cx = cx, cy = cy, zoomIn = true)
         ActionKind.WAIT -> WaitAction()
         ActionKind.IMAGE -> ImageAction(imageName = imageName)
         ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
         ActionKind.LOOP -> LoopAction()
+        ActionKind.RUN_MACRO -> RunMacroAction()
         ActionKind.RECORD -> RecordAction()
         ActionKind.RESTART -> RestartAction()
         ActionKind.STOP -> StopAction()

@@ -189,6 +189,25 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun recropImage(existingName: String, cropped: android.graphics.Bitmap) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    try {
+                        store.overwriteImage(existingName, cropped)
+                    } finally {
+                        cropped.recycle()
+                    }
+                }
+            }
+            result.onSuccess { asset ->
+                _messages.emit("Gambar '${asset.name}' dipotong ulang (${asset.width}×${asset.height}).")
+            }.onFailure { err ->
+                _messages.emit("Gagal potong ulang: ${err.message}")
+            }
+        }
+    }
+
     fun renameImage(oldName: String, newName: String) {
         val renamed = store.renameImage(oldName, newName)
         if (renamed != null) _messages.tryEmit("Diubah menjadi '$renamed'.")

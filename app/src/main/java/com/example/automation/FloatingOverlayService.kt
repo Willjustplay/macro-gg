@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -48,6 +49,7 @@ import com.example.data.LongPressAction
 import com.example.data.Macro
 import com.example.data.RecordedGesture
 import com.example.data.SwipeAction
+import com.example.data.ZoomAction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,6 +57,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -64,10 +67,10 @@ import kotlin.math.sin
 /**
  * Compact Macrorify-style Floating Control Bar & Overlay Tools:
  * - Slim collapsible control bar with quick +Click and Hide Buttons mode
- * - Floating Macro Settings & Action List panel (view/edit loop, jitter, image threshold & crop)
- * - Zoomable 2-button (Batal / Simpan) screenshot cropper bound directly to Image Detection
- * - Visible swipe lines & directional arrows with live drag updates
- * - Touch recorder, Color Spy, live match highlight box, and live log
+ * - Full in-overlay Macro Studio (macro settings, watchdog, macro switcher, full action tree & editor)
+ * - Zoomable 2-button (Batal / Simpan) screenshot cropper & re-cropper bound to Image Detection
+ * - Visible swipe lines & directional arrows with live drag updates + Zoom markers
+ * - Freeze-proof touch recorder, Color Spy, live match highlight box, and live log
  */
 class FloatingOverlayService : Service() {
 
@@ -92,7 +95,7 @@ class FloatingOverlayService : Service() {
     // Optional toggle inside Overlay Settings to hide only target markers while keeping bar visible
     private var hideMarkersOnly = false
 
-    private var macroSettingsView: View? = null
+    private var macroSettingsView: OverlayMacroSettingsView? = null
 
     private var logOverlayView: View? = null
     private var logTextView: TextView? = null
@@ -108,7 +111,7 @@ class FloatingOverlayService : Service() {
     private var cropOverlayView: View? = null
     private var cropScreenshot: Bitmap? = null
 
-    private var recorderOverlayView: View? = null
+    private var recorderOverlayView: OverlayRecorderView? = null
     private var recorderParams: WindowManager.LayoutParams? = null
 
     private var markerEditorView: View? = null
@@ -495,51 +498,64 @@ class FloatingOverlayService : Service() {
         if (macroSettingsView != null) dismissMacroSettingsPanel() else showMacroSettingsPanel()
     }
 
-    private fun showMacroSettingsPanel() {
+    private fun showMacroSettingsPanel(initialTab: Int = 0, initialEditActionId: String? = null) {
         dismissMacroSettingsPanel()
         dismissMarkerEditor()
+        refreshScreenSize()
         val macro = AutomationCoordinator.activeMacro.value
         val panel = OverlayMacroSettingsView(
             context = this,
             macro = macro,
             store = store,
+            screenW = screenWidth,
+            screenH = screenHeight,
             markersHidden = hideMarkersOnly,
+            initialTab = initialTab,
+            initialEditActionId = initialEditActionId,
+            onSwitchMacro = { selected ->
+                AutomationCoordinator.selectMacro(selected)
+                Toast.makeText(this, "Macro aktif: ${selected.name}", Toast.LENGTH_SHORT).show()
+            },
             onToggleMarkersHidden = { hidden ->
                 hideMarkersOnly = hidden
                 applyMarkerVisibility()
             },
-            onSaveSettings = { loopCount, loopDelayMs, jitterPx ->
-                AutomationCoordinator.updateActiveMacro(persist = true) { m ->
-                    m.copy(loopCount = loopCount, loopDelayMs = loopDelayMs, jitterPx = jitterPx)
-                }
-                Toast.makeText(this, "Pengaturan macro disimpan", Toast.LENGTH_SHORT).show()
+            onUpdateMacro = { updated ->
+                AutomationCoordinator.updateActiveMacro(persist = true) { updated }
+                Toast.makeText(this, "Setelan macro disimpan", Toast.LENGTH_SHORT).show()
             },
-            onToggleActionEnabled = { actionId, enabled ->
-                AutomationCoordinator.updateActionFromOverlay(actionId) { it.withEnabled(enabled) }
-                refreshMacroSettingsIfOpen()
+            onAddAction = { ref, newAction ->
+                AutomationCoordinator.addActionFromOverlay(ref, newAction)
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
-            onAdjustImageThreshold = { actionId, newThreshold ->
-                AutomationCoordinator.updateActionFromOverlay(actionId) { a ->
-                    if (a is ImageAction) a.copy(threshold = newThreshold) else a
-                }
-                refreshMacroSettingsIfOpen()
+            onUpdateAction = { actionId, transform ->
+                AutomationCoordinator.updateActionFromOverlay(actionId, transform)
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
+            },
+            onMoveAction = { actionId, delta ->
+                AutomationCoordinator.moveActionFromOverlay(actionId, delta)
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
+            },
+            onDeleteAction = { actionId ->
+                AutomationCoordinator.removeActionFromOverlay(actionId)
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
             onCropForImageAction = { actionId ->
                 dismissMacroSettingsPanel()
                 launchScreenshotCrop(addToMacro = false, targetActionId = actionId)
             },
+            onRecropExistingImage = { imageName ->
+                dismissMacroSettingsPanel()
+                launchRecropExistingImage(imageName)
+            },
             onAddNewCropImageAction = {
                 dismissMacroSettingsPanel()
                 launchScreenshotCrop(addToMacro = true, targetActionId = null)
             },
-            onDeleteAction = { actionId ->
-                AutomationCoordinator.removeActionFromOverlay(actionId)
-                refreshMacroSettingsIfOpen()
-            },
             onClose = { dismissMacroSettingsPanel() }
         )
 
-        val panelWidth = minOf(dp(310), (screenWidth - dp(24)).coerceAtLeast(dp(220)))
+        val panelWidth = minOf(dp(328), (screenWidth - dp(20)).coerceAtLeast(dp(240)))
         val params = WindowManager.LayoutParams(
             panelWidth,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -548,17 +564,11 @@ class FloatingOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
-            dimAmount = 0.45f
+            dimAmount = 0.48f
         }
 
         if (safeAddView(panel, params)) {
             macroSettingsView = panel
-        }
-    }
-
-    private fun refreshMacroSettingsIfOpen() {
-        if (macroSettingsView != null) {
-            mainHandler.post { showMacroSettingsPanel() }
         }
     }
 
@@ -664,7 +674,7 @@ class FloatingOverlayService : Service() {
         }
     }
 
-    // ---- Screenshot & Crop Overlay (Zoomable + Compact Batal/Simpan Bar) ----
+    // ---- Screenshot & Crop / Re-Crop Overlay (Zoomable + Compact Batal/Simpan Bar) ----
 
     private fun launchScreenshotCrop(addToMacro: Boolean, targetActionId: String?) {
         if (cropOverlayView != null) return
@@ -677,40 +687,73 @@ class FloatingOverlayService : Service() {
             return
         }
 
-        // Briefly hide overlay chrome so the captured screenshot is clean
+        // Briefly hide overlay chrome, capture snapshot off the UI thread so it never stalls
         setOverlayChromeVisibility(View.INVISIBLE)
-        mainHandler.postDelayed({
-            val snapshot = ScreenCaptureService.captureBitmapCopy()
+        serviceScope.launch {
+            delay(160L)
+            val snapshot = withContext(Dispatchers.Default) {
+                ScreenCaptureService.captureBitmapCopy()
+            }
             setOverlayChromeVisibility(View.VISIBLE)
             applyMarkerVisibility()
             if (snapshot == null) {
-                Toast.makeText(this, "Gagal mengambil tangkapan layar. Coba lagi.", Toast.LENGTH_SHORT).show()
-                return@postDelayed
+                Toast.makeText(this@FloatingOverlayService, "Gagal mengambil tangkapan layar. Coba lagi.", Toast.LENGTH_SHORT).show()
+                return@launch
             }
-            showCropOverlay(snapshot, addToMacro, targetActionId)
-        }, 180L)
+            showCropOverlay(snapshot, addToMacro, targetActionId, overwriteImageName = null)
+        }
     }
 
-    private fun showCropOverlay(snapshot: Bitmap, addToMacro: Boolean, targetActionId: String?) {
+    private fun launchRecropExistingImage(imageName: String) {
+        if (cropOverlayView != null) return
+        if (isOverlayHidden) exitHideButtonsMode()
+        serviceScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                val f = store.imageFile(imageName)
+                if (!f.exists()) null else runCatching { BitmapFactory.decodeFile(f.absolutePath) }.getOrNull()
+            }
+            if (bmp == null) {
+                Toast.makeText(this@FloatingOverlayService, "Gambar '$imageName' tidak ditemukan.", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            showCropOverlay(bmp, addToMacro = false, targetActionId = null, overwriteImageName = imageName)
+        }
+    }
+
+    private fun showCropOverlay(
+        snapshot: Bitmap,
+        addToMacro: Boolean,
+        targetActionId: String?,
+        overwriteImageName: String?
+    ) {
         dismissCropOverlay()
         cropScreenshot = snapshot
         val view = OverlayCropView(
             context = this,
             screenshot = snapshot,
             onSave = { cropped, _ ->
-                val defaultName = store.uniqueImageName("target")
-                val saved = store.saveImage(defaultName, cropped)
-                cropped.recycle()
                 when {
+                    !overwriteImageName.isNullOrBlank() -> {
+                        val saved = store.overwriteImage(overwriteImageName, cropped)
+                        cropped.recycle()
+                        ExecutionLogBus.image("Gambar '${saved.name}' dipotong ulang (${saved.width}×${saved.height}).")
+                        Toast.makeText(this, "Dipangkas ulang: ${saved.name}", Toast.LENGTH_SHORT).show()
+                    }
                     !targetActionId.isNullOrBlank() -> {
+                        val saved = store.saveImage(store.uniqueImageName("target"), cropped)
+                        cropped.recycle()
                         AutomationCoordinator.bindImageToAction(targetActionId, saved.name)
                         Toast.makeText(this, "Gambar dipasang: ${saved.name}", Toast.LENGTH_SHORT).show()
                     }
                     addToMacro -> {
+                        val saved = store.saveImage(store.uniqueImageName("target"), cropped)
+                        cropped.recycle()
                         AutomationCoordinator.addQuickImageAction(saved.name)
                         Toast.makeText(this, "Deteksi Gambar ditambahkan: ${saved.name}", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
+                        val saved = store.saveImage(store.uniqueImageName("target"), cropped)
+                        cropped.recycle()
                         ExecutionLogBus.image("Gambar '${saved.name}' (${saved.width}×${saved.height}) disimpan.")
                         Toast.makeText(this, "Disimpan: ${saved.name}", Toast.LENGTH_SHORT).show()
                     }
@@ -747,7 +790,7 @@ class FloatingOverlayService : Service() {
         cropScreenshot = null
     }
 
-    // ---- Touch Recorder Overlay ----
+    // ---- Freeze-Proof Touch Recorder Overlay ----
 
     private fun openTouchRecorder() {
         if (recorderOverlayView != null) return
@@ -791,16 +834,21 @@ class FloatingOverlayService : Service() {
     private fun forwardRecordedGesture(gesture: RecordedGesture) {
         val view = recorderOverlayView ?: return
         val params = recorderParams ?: return
-        if (!MacroAccessibilityService.isConnected.value) return
+        if (view.isForwardingGesture || !MacroAccessibilityService.isConnected.value) return
+        view.isForwardingGesture = true
         serviceScope.launch {
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            try { windowManager.updateViewLayout(view, params) } catch (_: Throwable) {}
-            delay(30L)
-            MacroAccessibilityService.dispatchRecordedGesture(gesture, 1f)
-            delay(40L)
-            if (recorderOverlayView === view) {
-                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            try {
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 try { windowManager.updateViewLayout(view, params) } catch (_: Throwable) {}
+                delay(25L)
+                MacroAccessibilityService.dispatchRecordedGesture(gesture, 1f)
+                delay(35L)
+            } finally {
+                view.isForwardingGesture = false
+                if (recorderOverlayView === view) {
+                    params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    try { windowManager.updateViewLayout(view, params) } catch (_: Throwable) {}
+                }
             }
         }
     }
@@ -1171,6 +1219,21 @@ class FloatingOverlayService : Service() {
                         onTap = { showMarkerQuickEditor(action) },
                         onDragging = { nx, ny -> swipePathView?.updateEndpoint(action.id, nx.toFloat(), ny.toFloat(), isEndNode = true) },
                         onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = true) }
+                    )
+                }
+                is ZoomAction -> {
+                    markerNumber++
+                    addMarker(
+                        label = if (action.zoomIn) "Z+" else "Z−",
+                        colorHex = "#CC0891B2",
+                        cx = action.cx,
+                        cy = action.cy,
+                        size = markerSize,
+                        half = half,
+                        flags = baseFlags,
+                        isRunning = isRunning,
+                        onTap = { showMacroSettingsPanel(initialTab = 1, initialEditActionId = action.id) },
+                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny) }
                     )
                 }
                 is ColorAction -> {
@@ -1585,6 +1648,7 @@ class FloatingOverlayService : Service() {
             colorSpyView = root
             colorSpyParams = params
             isColorSpyVisible = true
+            ScreenCaptureService.highFrequencyCapture = true
         }
     }
 
@@ -1597,6 +1661,9 @@ class FloatingOverlayService : Service() {
         colorSpySwatch = null
         colorSpyLabel = null
         isColorSpyVisible = false
+        if (AutomationCoordinator.engineState.value != EngineState.RUNNING) {
+            ScreenCaptureService.highFrequencyCapture = false
+        }
     }
 
     override fun onDestroy() {

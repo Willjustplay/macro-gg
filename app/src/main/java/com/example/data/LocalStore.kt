@@ -99,6 +99,12 @@ class LocalStore(context: Context) {
         return updated
     }
 
+    fun getMacroById(id: String): Macro? =
+        _macros.value.firstOrNull { it.id == id }
+            ?: File(macrosDir, "${sanitizeFileName(id)}.json")
+                .takeIf { it.exists() }
+                ?.let { f -> runCatching { json.decodeFromString<Macro>(f.readText()) }.getOrNull() }
+
     fun deleteMacro(id: String) {
         File(macrosDir, "${sanitizeFileName(id)}.json").delete()
         _macros.value = loadMacros()
@@ -172,6 +178,16 @@ class LocalStore(context: Context) {
         templateCache.remove(name)
         _images.value = loadImages()
         return _images.value.first { it.name == name }
+    }
+
+    /** Overwrites an existing library image in-place (used when re-cropping an already-cropped image). */
+    fun overwriteImage(existingName: String, bitmap: Bitmap): ImageAsset {
+        val normalized = normalizeImageName(existingName)
+        val file = File(imagesDir, normalized)
+        bitmap.savePng(file)
+        templateCache.remove(normalized)
+        _images.value = loadImages()
+        return _images.value.first { it.name == normalized }
     }
 
     fun saveImageBytes(desiredName: String, pngBytes: ByteArray): String {

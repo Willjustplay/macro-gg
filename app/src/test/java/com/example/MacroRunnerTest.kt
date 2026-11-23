@@ -13,8 +13,12 @@ import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.RecordedStroke
+import com.example.data.RunMacroAction
 import com.example.data.Slot
 import com.example.data.StopAction
+import com.example.data.StuckRecoveryMode
+import com.example.data.WaitAction
+import com.example.data.ZoomAction
 import com.example.data.insertInto
 import com.example.data.removeAction
 import com.example.data.updateAction
@@ -30,12 +34,15 @@ class MacroRunnerTest {
     private class FakeRuntime(
         private var frameProvider: () -> Frame? = { null },
         private val templates: Map<String, PreparedTemplate> = emptyMap(),
+        private val macrosById: Map<String, Macro> = emptyMap(),
         private var pixelArgb: Int? = null
     ) : MacroRuntime {
         val events = mutableListOf<String>()
         var stopped = false
         var fakeClockMs = 1000L
 
+        override val screenWidth: Int = 1080
+        override val screenHeight: Int = 2400
         override fun isStopped(): Boolean = stopped
         override suspend fun waitIfPaused() {}
         override suspend fun sleep(ms: Long) { fakeClockMs += ms }
@@ -47,6 +54,10 @@ class MacroRunnerTest {
             events += "swipe($x1,$y1->$x2,$y2)"
             return true
         }
+        override suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean {
+            events += "zoom(${if (zoomIn) "in" else "out"},$cx,$cy,$distancePx)"
+            return true
+        }
         override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean {
             events += "rec(${gesture.strokes.size},${speed}x)"
             return true
@@ -54,6 +65,7 @@ class MacroRunnerTest {
         override fun captureFrame(): Frame? = frameProvider()
         override fun samplePixelArgb(x: Int, y: Int): Int? = pixelArgb
         override fun loadTemplate(name: String): PreparedTemplate? = templates[name]
+        override fun loadMacro(id: String): Macro? = macrosById[id]
         override fun log(level: LogLevel, message: String) {}
         override fun nowMs(): Long = fakeClockMs
     }
@@ -68,7 +80,7 @@ class MacroRunnerTest {
     }
 
     @Test
-    fun imageAction_foundClicksCenterAndRunsThenBranch() = runTest {
+    fun imageAction_foundClicksCenterRunsThenAndHonorsFoundModeStop() = runTest {
         val screen = Frame(200, 200, IntArray(200 * 200) { 0xFF000000.toInt() })
         val icon = pattern(24, 24)
         for (y in 0 until 24) for (x in 0 until 24) {
@@ -79,7 +91,7 @@ class MacroRunnerTest {
             templates = mapOf("play.png" to PreparedTemplate("play.png", icon))
         )
         val macro = Macro(
-            loopCount = 1,
+            loopCount = 2,
             actions = listOf(
                 ImageAction(
                     imageName = "play.png",
@@ -87,18 +99,17 @@ class MacroRunnerTest {
                     timeoutMs = 0,
                     clickOnFound = true,
                     thenActions = listOf(ClickAction(x = 10, y = 20, delayAfterMs = 0)),
+                    foundMode = NotFoundMode.STOP,
                     elseActions = listOf(ClickAction(x = 99, y = 99, delayAfterMs = 0)),
                     delayAfterMs = 0
-                )
+                ),
+                ClickAction(x = 888, y = 888, delayAfterMs = 0)
             )
         )
 
         MacroRunner(rt).run(macro)
 
-        assertEquals(2, rt.events.size)
-        // Center of (60..84, 80..104) is (72, 92)
-        assertEquals("click(72,92,50)", rt.events[0])
-        assertEquals("click(10,20,50)", rt.events[1])
+        assertEquals(listOf("click(72,92,50)", "click(10,20,50)"), rt.events)
     }
 
     @Test
@@ -127,6 +138,63 @@ class MacroRunnerTest {
         MacroRunner(rt).run(macro)
 
         assertEquals(listOf("click(5,6,50)"), rt.events)
+    }
+
+    @Test
+    fun zoomAndLinkedMacroActions_executeAndGuardCycles() = runTest {
+        val subMacro = Macro(
+            id = "sub",
+            name = "Sub",
+            loopCount = 1,
+            actions = listOf(
+                ZoomAction(cx = 500, cy = 900, zoomIn = true, distancePx = 300, delayAfterMs = 0),
+                ZoomAction(cx = 500, cy = 900, zoomIn = false, distancePx = 220, delayAfterMs = 0)
+            )
+        )
+        val mainMacro = Macro(
+            id = "main",
+            name = "Main",
+            loopCount = 1,
+            actions = listOf(
+                ClickAction(x = 1, y = 1, delayAfterMs = 0),
+                RunMacroAction(targetMacroId = "sub", targetMacroName = "Sub", returnAfter = true, delayAfterMs = 0),
+                ClickAction(x = 2, y = 2, delayAfterMs = 0)
+            )
+        )
+        val rt = FakeRuntime(macrosById = mapOf("sub" to subMacro, "main" to mainMacro))
+
+        MacroRunner(rt).run(mainMacro)
+
+        assertEquals(
+            listOf("click(1,1,50)", "zoom(in,500,900,300)", "zoom(out,500,900,220)", "click(2,2,50)"),
+            rt.events
+        )
+    }
+
+    @Test
+    fun stuckWatchdog_recoversStuckMacroByTappingCenterAndRestarting() = runTest {
+        val blankScreen = Frame(100, 100, IntArray(100 * 100) { 0xFF000000.toInt() })
+        val icon = pattern(24, 24)
+        val rt = FakeRuntime(
+            frameProvider = { blankScreen },
+            templates = mapOf("never.png" to PreparedTemplate("never.png", icon))
+        )
+        val macro = Macro(
+            loopCount = 2,
+            loopDelayMs = 0,
+            autoRecoverStuckSec = 5,
+            stuckRecoveryMode = StuckRecoveryMode.TAP_CENTER_AND_RESTART,
+            actions = listOf(
+                // Waits up to 20s for an image that never appears -> watchdog triggers at 5s!
+                ImageAction(imageName = "never.png", threshold = 0.90f, timeoutMs = 20_000L, delayAfterMs = 0)
+            )
+        )
+
+        MacroRunner(rt).run(macro)
+
+        // Should have tapped screen center (540, 1200) on each stuck recovery
+        assertTrue(rt.events.contains("click(540,1200,50)"))
+        assertEquals(2, rt.events.size)
     }
 
     @Test

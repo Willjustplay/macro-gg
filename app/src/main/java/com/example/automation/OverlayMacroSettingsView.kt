@@ -9,49 +9,91 @@ import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.example.data.Action
+import com.example.data.ActionKind
+import com.example.data.ClickAction
+import com.example.data.ColorAction
+import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.LocalStore
+import com.example.data.LongPressAction
+import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.NotFoundMode
+import com.example.data.RecordAction
+import com.example.data.Region
+import com.example.data.RestartAction
+import com.example.data.RunMacroAction
+import com.example.data.Slot
+import com.example.data.StopAction
+import com.example.data.StuckRecoveryMode
+import com.example.data.SwipeAction
+import com.example.data.WaitAction
+import com.example.data.ZoomAction
+import com.example.data.childList
+import com.example.data.create
+import com.example.data.findAction
 import com.example.data.kind
+import com.example.data.slots
 import com.example.data.summary
 import kotlin.math.roundToInt
 
 /**
- * Floating Macro Settings & Action Inspector shown directly over other apps.
- * Allows inspecting & adjusting loop/delay/jitter, toggling marker visibility,
- * tuning Image Detection similarity %, and launching Crop Mode directly for any ImageAction.
+ * Full-featured in-overlay Macro Studio matching the in-app Macro Editor:
+ * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
+ *   Auto-Recover Stuck Macro watchdog, and marker visibility toggle.
+ * - Tab "Aksi": full action tree (including Then/Else/Loop branches), add any action kind,
+ *   reorder, enable/disable, delete, and full inline Action Editor (with Crop & Re-Crop).
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
     context: Context,
-    private val macro: Macro,
+    private var macro: Macro,
     private val store: LocalStore,
-    private val markersHidden: Boolean,
+    private val screenW: Int,
+    private val screenH: Int,
+    private var markersHidden: Boolean,
+    initialTab: Int = 0,
+    initialEditActionId: String? = null,
+    private val onSwitchMacro: (Macro) -> Unit,
     private val onToggleMarkersHidden: (Boolean) -> Unit,
-    private val onSaveSettings: (loopCount: Int, loopDelayMs: Long, jitterPx: Int) -> Unit,
-    private val onToggleActionEnabled: (actionId: String, enabled: Boolean) -> Unit,
-    private val onAdjustImageThreshold: (actionId: String, newThreshold: Float) -> Unit,
+    private val onUpdateMacro: (Macro) -> Unit,
+    private val onAddAction: (ContainerRef, Action) -> Unit,
+    private val onUpdateAction: (String, (Action) -> Action) -> Unit,
+    private val onMoveAction: (String, Int) -> Unit,
+    private val onDeleteAction: (String) -> Unit,
     private val onCropForImageAction: (actionId: String) -> Unit,
+    private val onRecropExistingImage: (imageName: String) -> Unit,
     private val onAddNewCropImageAction: () -> Unit,
-    private val onDeleteAction: (actionId: String) -> Unit,
     private val onClose: () -> Unit
 ) : LinearLayout(context) {
 
     private val d = resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * d).toInt()
 
+    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi
+    private var editingActionId: String? = initialEditActionId
+    private var addPickerRef: ContainerRef? = null
+
+    private val bodyContainer = LinearLayout(context).apply { orientation = VERTICAL }
+    private val tabSettingsBtn: TextView
+    private val tabActionsBtn: TextView
+    private val titleView: TextView
+    private val subtitleView: TextView
+
     init {
         orientation = VERTICAL
         setPadding(dp(12), dp(10), dp(12), dp(10))
         background = GradientDrawable().apply {
-            setColor(Color.parseColor("#F20F172A"))
+            setColor(Color.parseColor("#F50F172A"))
             cornerRadius = dp(16).toFloat()
             setStroke(dp(1), Color.parseColor("#2DD4BF"))
         }
@@ -62,139 +104,264 @@ class OverlayMacroSettingsView(
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(8)
+                bottomMargin = dp(6)
             }
         }
         val titleCol = LinearLayout(context).apply {
             orientation = VERTICAL
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
         }
-        titleCol.addView(TextView(context).apply {
-            text = macro.name.ifBlank { "Macro Aktif" }
+        titleView = TextView(context).apply {
             setTextColor(Color.WHITE)
             textSize = 13.5f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-        })
-        val loopLabel = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
-        titleCol.addView(TextView(context).apply {
-            text = "$loopLabel • ${macro.actions.size} aksi • Jeda ${macro.loopDelayMs}ms"
+        }
+        subtitleView = TextView(context).apply {
             setTextColor(Color.parseColor("#94A3B8"))
             textSize = 10.5f
-        })
+            maxLines = 1
+        }
+        titleCol.addView(titleView)
+        titleCol.addView(subtitleView)
         header.addView(titleCol)
-        header.addView(makeChipBtn("✕", "#334155") { onClose() })
+        header.addView(makeBtn("✕", "#334155") { onClose() })
         addView(header)
 
-        // Scrollable content (settings + actions list)
-        val scroll = ScrollView(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(320))
+        // Tab switcher row
+        val tabsRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
         }
-        val content = LinearLayout(context).apply {
-            orientation = VERTICAL
+        tabSettingsBtn = makeTabBtn("Setelan Macro") {
+            activeTab = 0
+            editingActionId = null
+            addPickerRef = null
+            rebuildBody()
+        }
+        tabActionsBtn = makeTabBtn("Daftar Aksi") {
+            activeTab = 1
+            editingActionId = null
+            addPickerRef = null
+            rebuildBody()
+        }
+        tabsRow.addView(tabSettingsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
+        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        addView(tabsRow)
+
+        val scroll = ScrollView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(370))
+            addView(bodyContainer)
+        }
+        addView(scroll)
+
+        rebuildBody()
+    }
+
+    fun refreshWithMacro(updated: Macro) {
+        macro = updated
+        rebuildBody()
+    }
+
+    private fun updateHeader() {
+        titleView.text = macro.name.ifBlank { "Macro Aktif" }
+        val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
+        val recStr = if (macro.autoRecoverStuckSec > 0) " • AutoFix ${macro.autoRecoverStuckSec}d" else ""
+        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr"
+        tabActionsBtn.text = "Daftar Aksi (${macro.actions.size})"
+
+        styleTab(tabSettingsBtn, activeTab == 0)
+        styleTab(tabActionsBtn, activeTab == 1)
+    }
+
+    private fun styleTab(tv: TextView, selected: Boolean) {
+        (tv.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (selected) "#0D9488" else "#1E293B")
+        )
+        tv.setTextColor(if (selected) Color.WHITE else Color.parseColor("#94A3B8"))
+    }
+
+    private fun rebuildBody() {
+        updateHeader()
+        bodyContainer.removeAllViews()
+
+        val pickerRef = addPickerRef
+        val editId = editingActionId
+        when {
+            pickerRef != null -> buildAddActionPicker(pickerRef)
+            editId != null -> {
+                val target = macro.actions.findAction(editId)
+                if (target != null) buildActionEditor(target)
+                else {
+                    editingActionId = null
+                    buildActionList()
+                }
+            }
+            activeTab == 0 -> buildMacroSettingsForm()
+            else -> buildActionList()
+        }
+    }
+
+    // ---- TAB 1: Complete Macro Settings ----
+
+    private fun buildMacroSettingsForm() {
+        // Quick switch between saved macros
+        val allMacros = store.macros.value
+        if (allMacros.size > 1) {
+            bodyContainer.addView(sectionLabel("Ganti Macro Aktif"))
+            val hScroll = HorizontalScrollView(context).apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(8)
+                }
+            }
+            val row = LinearLayout(context).apply { orientation = HORIZONTAL }
+            for (m in allMacros) {
+                val sel = m.id == macro.id
+                row.addView(makeBtn(m.name.take(16), if (sel) "#0D9488" else "#1E293B", marginEndDp = 5) {
+                    if (!sel) {
+                        macro = m
+                        onSwitchMacro(m)
+                        rebuildBody()
+                    }
+                })
+            }
+            hScroll.addView(row)
+            bodyContainer.addView(hScroll)
         }
 
-        // ---- Section 1: Loop & Touch Settings ----
+        val nameField = addTextRow(bodyContainer, "Nama Macro", macro.name)
+
         val infiniteCheck = CheckBox(context).apply {
             text = "Ulangi tanpa batas (Loop ∞)"
             isChecked = macro.loopCount <= 0
             setTextColor(Color.WHITE)
-            textSize = 12f
+            textSize = 11.5f
         }
-        content.addView(infiniteCheck)
+        bodyContainer.addView(infiniteCheck)
 
-        val loopCountField = addNumberRow(content, "Jumlah Loop", macro.loopCount.coerceAtLeast(1).toString())
+        val loopCountField = addNumberRow(bodyContainer, "Jumlah Loop", macro.loopCount.coerceAtLeast(1).toString())
         loopCountField.isEnabled = !infiniteCheck.isChecked
+        loopCountField.alpha = if (infiniteCheck.isChecked) 0.45f else 1f
         infiniteCheck.setOnCheckedChangeListener { _, checked ->
             loopCountField.isEnabled = !checked
             loopCountField.alpha = if (checked) 0.45f else 1f
         }
-        if (infiniteCheck.isChecked) loopCountField.alpha = 0.45f
 
-        val loopDelayField = addNumberRow(content, "Jeda antar loop (ms)", macro.loopDelayMs.toString())
-        val jitterField = addNumberRow(content, "Acak posisi (±px)", macro.jitterPx.toString())
+        val loopDelayField = addNumberRow(bodyContainer, "Jeda antar loop (ms)", macro.loopDelayMs.toString())
+        val jitterField = addNumberRow(bodyContainer, "Acak posisi (±px)", macro.jitterPx.toString())
+        val randomDelayField = addNumberRow(bodyContainer, "Acak jeda (+ms)", macro.randomDelayMs.toString())
+        val maxMinField = addNumberRow(bodyContainer, "Stop otomatis (menit, 0=off)", macro.maxDurationMin.toString())
 
+        // Auto-Recover Stuck Macro section
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("Auto Perbaiki Macro Macet (Watchdog)"))
+        val stuckSecField = addNumberRow(bodyContainer, "Batas macet (detik, 0=off)", macro.autoRecoverStuckSec.toString())
+        var chosenRecovery = macro.stuckRecoveryMode
+        val recRow = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        val recBtns = mutableListOf<Pair<StuckRecoveryMode, TextView>>()
+        StuckRecoveryMode.entries.forEach { mode ->
+            val btn = makeBtn(mode.label, if (mode == chosenRecovery) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                chosenRecovery = mode
+                recBtns.forEach { (m, tv) ->
+                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenRecovery) "#0284C7" else "#1E293B"))
+                }
+            }.apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(4)
+                }
+            }
+            recBtns += mode to btn
+            recRow.addView(btn)
+        }
+        bodyContainer.addView(recRow)
+
+        bodyContainer.addView(dividerLine())
         val hideMarkersCheck = CheckBox(context).apply {
             text = "Sembunyikan penanda titik di layar"
             isChecked = markersHidden
             setTextColor(Color.parseColor("#E2E8F0"))
             textSize = 11.5f
-            setOnCheckedChangeListener { _, checked -> onToggleMarkersHidden(checked) }
-        }
-        content.addView(hideMarkersCheck)
-
-        // Divider + Actions section header
-        val divider = LinearLayout(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(1)).apply {
-                topMargin = dp(6)
-                bottomMargin = dp(8)
-            }
-            setBackgroundColor(Color.parseColor("#334155"))
-        }
-        content.addView(divider)
-
-        val actHeader = LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(6)
+            setOnCheckedChangeListener { _, checked ->
+                markersHidden = checked
+                onToggleMarkersHidden(checked)
             }
         }
-        actHeader.addView(TextView(context).apply {
-            text = "Daftar Aksi (${macro.actions.size})"
-            setTextColor(Color.parseColor("#2DD4BF"))
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
-        })
-        actHeader.addView(makeChipBtn("+ Crop Img", "#0F766E") {
-            onAddNewCropImageAction()
-        })
-        content.addView(actHeader)
+        bodyContainer.addView(hideMarkersCheck)
 
-        if (macro.actions.isEmpty()) {
-            content.addView(TextView(context).apply {
-                text = "Belum ada aksi. Gunakan tombol '+' atau '+ Crop Img' untuk menambah."
-                setTextColor(Color.parseColor("#94A3B8"))
-                textSize = 11f
-                setPadding(dp(4), dp(8), dp(4), dp(8))
-            })
-        } else {
-            macro.actions.forEachIndexed { idx, action ->
-                content.addView(buildActionRow(idx + 1, action))
-            }
-        }
-
-        scroll.addView(content)
-        addView(scroll)
-
-        // Footer buttons
-        val footer = LinearLayout(context).apply {
+        // Save Settings button
+        val saveRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.END
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(8)
             }
         }
-        footer.addView(makeChipBtn("Tutup", "#475569", marginEndDp = 6) { onClose() })
-        footer.addView(makeChipBtn("Simpan Setelan", "#0D9488", marginEndDp = 0) {
-            val newLoop = if (infiniteCheck.isChecked) 0 else (loopCountField.text.toString().toIntOrNull() ?: 1).coerceAtLeast(1)
-            val newDelay = (loopDelayField.text.toString().toLongOrNull() ?: macro.loopDelayMs).coerceAtLeast(0L)
-            val newJitter = (jitterField.text.toString().toIntOrNull() ?: macro.jitterPx).coerceIn(0, 60)
-            onSaveSettings(newLoop, newDelay, newJitter)
-            onClose()
+        saveRow.addView(makeBtn("Simpan Setelan", "#0D9488") {
+            val updated = macro.copy(
+                name = nameField.text.toString().trim().ifBlank { "Macro Baru" },
+                loopCount = if (infiniteCheck.isChecked) 0 else (loopCountField.text.toString().toIntOrNull() ?: 1).coerceAtLeast(1),
+                loopDelayMs = (loopDelayField.text.toString().toLongOrNull() ?: macro.loopDelayMs).coerceAtLeast(0L),
+                jitterPx = (jitterField.text.toString().toIntOrNull() ?: macro.jitterPx).coerceIn(0, 60),
+                randomDelayMs = (randomDelayField.text.toString().toLongOrNull() ?: macro.randomDelayMs).coerceAtLeast(0L),
+                maxDurationMin = (maxMinField.text.toString().toIntOrNull() ?: macro.maxDurationMin).coerceIn(0, 1440),
+                autoRecoverStuckSec = (stuckSecField.text.toString().toIntOrNull() ?: macro.autoRecoverStuckSec).coerceIn(0, 3600),
+                stuckRecoveryMode = chosenRecovery
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            updateHeader()
         })
-        addView(footer)
+        bodyContainer.addView(saveRow)
     }
 
-    private fun buildActionRow(number: Int, action: Action): LinearLayout {
+    // ---- TAB 2: Complete Action Tree ----
+
+    private fun buildActionList() {
+        val topBtns = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        }
+        topBtns.addView(makeBtn("+ Tambah Aksi", "#1D4ED8", marginEndDp = 6) {
+            addPickerRef = ContainerRef.ROOT
+            rebuildBody()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        topBtns.addView(makeBtn("✂ Crop Img", "#0F766E") {
+            onAddNewCropImageAction()
+        })
+        bodyContainer.addView(topBtns)
+
+        if (macro.actions.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Belum ada aksi. Ketuk '+ Tambah Aksi' atau '✂ Crop Img'."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 11.5f
+                setPadding(dp(4), dp(12), dp(4), dp(12))
+            })
+        } else {
+            macro.actions.forEachIndexed { idx, action ->
+                bodyContainer.addView(buildActionCard(idx, macro.actions.size, action, depth = 0))
+            }
+        }
+    }
+
+    private fun buildActionCard(idx: Int, siblingCount: Int, action: Action, depth: Int): LinearLayout {
         val card = LinearLayout(context).apply {
             orientation = VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(6))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1E293B"))
+                setColor(Color.parseColor(if (depth == 0) "#1E293B" else "#0F172A"))
                 cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), Color.parseColor("#334155"))
             }
             alpha = if (action.enabled) 1f else 0.5f
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
@@ -202,25 +369,23 @@ class OverlayMacroSettingsView(
             }
         }
 
-        val top = LinearLayout(context).apply {
+        val row = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        // Thumbnail for ImageAction
         if (action is ImageAction && action.imageName.isNotBlank()) {
             val file = store.imageFile(action.imageName)
             if (file.exists()) {
                 val bmp = runCatching { BitmapFactory.decodeFile(file.absolutePath) }.getOrNull()
                 if (bmp != null) {
-                    val iv = ImageView(context).apply {
+                    row.addView(ImageView(context).apply {
                         setImageBitmap(bmp)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setBackgroundColor(Color.parseColor("#0B1220"))
                         setPadding(dp(2), dp(2), dp(2), dp(2))
-                        layoutParams = LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(8) }
-                    }
-                    top.addView(iv)
+                        layoutParams = LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(6) }
+                    })
                 }
             }
         }
@@ -228,9 +393,13 @@ class OverlayMacroSettingsView(
         val info = LinearLayout(context).apply {
             orientation = VERTICAL
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                editingActionId = action.id
+                rebuildBody()
+            }
         }
         info.addView(TextView(context).apply {
-            text = "$number. ${action.kind.label}"
+            text = "${idx + 1}. ${action.kind.label}"
             setTextColor(Color.WHITE)
             textSize = 11.5f
             typeface = Typeface.DEFAULT_BOLD
@@ -244,66 +413,677 @@ class OverlayMacroSettingsView(
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
-        top.addView(info)
+        row.addView(info)
 
-        top.addView(makeChipBtn(if (action.enabled) "ON" else "OFF", if (action.enabled) "#059669" else "#475569", marginEndDp = 4) {
-            onToggleActionEnabled(action.id, !action.enabled)
+        if (idx > 0) {
+            row.addView(makeSmallIconBtn("↑", "#334155") { onMoveAction(action.id, -1) })
+        }
+        if (idx < siblingCount - 1) {
+            row.addView(makeSmallIconBtn("↓", "#334155") { onMoveAction(action.id, 1) })
+        }
+        row.addView(makeSmallIconBtn(if (action.enabled) "ON" else "OFF", if (action.enabled) "#059669" else "#475569") {
+            onUpdateAction(action.id) { it.withEnabled(!action.enabled) }
         })
-        top.addView(makeChipBtn("✕", "#991B1B", marginEndDp = 0) {
+        row.addView(makeSmallIconBtn("✎", "#0284C7") {
+            editingActionId = action.id
+            rebuildBody()
+        })
+        row.addView(makeSmallIconBtn("✕", "#991B1B", marginEndDp = 0) {
             onDeleteAction(action.id)
         })
-        card.addView(top)
+        card.addView(row)
 
-        // Extra quick controls for ImageAction: Crop replacement + similarity +/-
-        if (action is ImageAction) {
-            val imgTools = LinearLayout(context).apply {
-                orientation = HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(6)
+        // Nested branches (Jika Ditemukan / Jika Tidak / Isi Perulangan)
+        val slots = action.slots()
+        if (slots.isNotEmpty() && depth < 2) {
+            for (slot in slots) {
+                val children = action.childList(slot)
+                val accentHex = when (slot) {
+                    Slot.THEN -> "#10B981"
+                    Slot.ELSE -> "#F59E0B"
+                    Slot.BODY -> "#818CF8"
                 }
+                val box = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    setPadding(dp(6), dp(5), dp(6), dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#18000000"))
+                        cornerRadius = dp(8).toFloat()
+                        setStroke(dp(1), Color.parseColor(accentHex))
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = dp(5)
+                    }
+                }
+                val bHeader = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                bHeader.addView(TextView(context).apply {
+                    text = "${slot.label} (${children.size})"
+                    setTextColor(Color.parseColor(accentHex))
+                    textSize = 10.5f
+                    typeface = Typeface.DEFAULT_BOLD
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                })
+                bHeader.addView(makeSmallIconBtn("+ Aksi", "#1E293B", marginEndDp = 0) {
+                    addPickerRef = ContainerRef(action.id, slot)
+                    rebuildBody()
+                })
+                box.addView(bHeader)
+                children.forEachIndexed { cIdx, child ->
+                    box.addView(buildActionCard(cIdx, children.size, child, depth + 1))
+                }
+                card.addView(box)
             }
-            imgTools.addView(makeChipBtn("✂ Crop", "#0F766E", marginEndDp = 6) {
-                onCropForImageAction(action.id)
-            })
-            val pct = (action.threshold * 100).roundToInt()
-            imgTools.addView(TextView(context).apply {
-                text = "Akurasi: $pct%"
-                setTextColor(Color.parseColor("#94A3B8"))
-                textSize = 10.5f
-                layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
-            })
-            imgTools.addView(makeChipBtn("-5%", "#334155", marginEndDp = 4) {
-                onAdjustImageThreshold(action.id, (action.threshold - 0.05f).coerceIn(0.50f, 0.99f))
-            })
-            imgTools.addView(makeChipBtn("+5%", "#334155", marginEndDp = 0) {
-                onAdjustImageThreshold(action.id, (action.threshold + 0.05f).coerceIn(0.50f, 0.99f))
-            })
-            card.addView(imgTools)
         }
 
         return card
     }
 
-    private fun addNumberRow(parent: LinearLayout, label: String, initial: String): EditText {
-        val row = LinearLayout(context).apply {
+    // ---- Add Action Picker inside Overlay ----
+
+    private fun buildAddActionPicker(ref: ContainerRef) {
+        val bar = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(6)
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        bar.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            addPickerRef = null
+            rebuildBody()
+        })
+        bar.addView(TextView(context).apply {
+            text = if (ref.slot != null) "Tambah ke: ${ref.slot.label}" else "Pilih Jenis Aksi"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        bodyContainer.addView(bar)
+
+        val kinds = listOf(
+            ActionKind.IMAGE, ActionKind.COLOR, ActionKind.CLICK, ActionKind.LONG_PRESS,
+            ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
+            ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
+        )
+        for (k in kinds) {
+            val item = LinearLayout(context).apply {
+                orientation = VERTICAL
+                setPadding(dp(10), dp(7), dp(10), dp(7))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1E293B"))
+                    cornerRadius = dp(10).toFloat()
+                }
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(5)
+                }
+                setOnClickListener {
+                    val defaultImg = store.images.value.firstOrNull()?.name.orEmpty()
+                    val created = k.create(screenW, screenH, imageName = defaultImg)
+                    onAddAction(ref, created)
+                    addPickerRef = null
+                    editingActionId = if (k == ActionKind.STOP || k == ActionKind.RESTART) null else created.id
+                }
             }
+            item.addView(TextView(context).apply {
+                text = k.label
+                setTextColor(Color.WHITE)
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+            })
+            item.addView(TextView(context).apply {
+                text = k.description
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 10f
+            })
+            bodyContainer.addView(item)
+        }
+    }
+
+    // ---- Complete Action Editor inside Overlay ----
+
+    private fun buildActionEditor(action: Action) {
+        val nav = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        nav.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            editingActionId = null
+            rebuildBody()
+        })
+        nav.addView(TextView(context).apply {
+            text = "Edit: ${action.kind.label}"
+            setTextColor(Color.WHITE)
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        bodyContainer.addView(nav)
+
+        when (action) {
+            is ClickAction -> {
+                val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
+                val yF = addNumberRow(bodyContainer, "Koordinat Y", action.y.toString())
+                val durF = addNumberRow(bodyContainer, "Durasi tekan (ms)", action.durationMs.toString())
+                val repF = addNumberRow(bodyContainer, "Jumlah klik", action.repeat.toString())
+                val repIntF = addNumberRow(bodyContainer, "Interval klik (ms)", action.repeatIntervalMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            x = xF.text.toString().toIntOrNull() ?: action.x,
+                            y = yF.text.toString().toIntOrNull() ?: action.y,
+                            durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceIn(10L, 60_000L),
+                            repeat = (repF.text.toString().toIntOrNull() ?: action.repeat).coerceIn(1, 999),
+                            repeatIntervalMs = (repIntF.text.toString().toLongOrNull() ?: action.repeatIntervalMs).coerceAtLeast(10L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is LongPressAction -> {
+                val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
+                val yF = addNumberRow(bodyContainer, "Koordinat Y", action.y.toString())
+                val durF = addNumberRow(bodyContainer, "Durasi tahan (ms)", action.durationMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            x = xF.text.toString().toIntOrNull() ?: action.x,
+                            y = yF.text.toString().toIntOrNull() ?: action.y,
+                            durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceIn(250L, 60_000L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is SwipeAction -> {
+                val x1F = addNumberRow(bodyContainer, "Awal X (A)", action.x1.toString())
+                val y1F = addNumberRow(bodyContainer, "Awal Y (A)", action.y1.toString())
+                val x2F = addNumberRow(bodyContainer, "Akhir X (B)", action.x2.toString())
+                val y2F = addNumberRow(bodyContainer, "Akhir Y (B)", action.y2.toString())
+                val durF = addNumberRow(bodyContainer, "Durasi swipe (ms)", action.durationMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            x1 = x1F.text.toString().toIntOrNull() ?: action.x1,
+                            y1 = y1F.text.toString().toIntOrNull() ?: action.y1,
+                            x2 = x2F.text.toString().toIntOrNull() ?: action.x2,
+                            y2 = y2F.text.toString().toIntOrNull() ?: action.y2,
+                            durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceIn(30L, 10_000L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is ZoomAction -> {
+                var zoomInFlag = action.zoomIn
+                val modeRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                lateinit var btnIn: TextView
+                lateinit var btnOut: TextView
+                btnIn = makeBtn("Zoom In (+)", if (zoomInFlag) "#0D9488" else "#1E293B", marginEndDp = 6) {
+                    zoomInFlag = true
+                    (btnIn.background as? GradientDrawable)?.setColor(Color.parseColor("#0D9488"))
+                    (btnOut.background as? GradientDrawable)?.setColor(Color.parseColor("#1E293B"))
+                }
+                btnOut = makeBtn("Zoom Out (−)", if (!zoomInFlag) "#0D9488" else "#1E293B") {
+                    zoomInFlag = false
+                    (btnIn.background as? GradientDrawable)?.setColor(Color.parseColor("#1E293B"))
+                    (btnOut.background as? GradientDrawable)?.setColor(Color.parseColor("#0D9488"))
+                }
+                modeRow.addView(btnIn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+                modeRow.addView(btnOut, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                bodyContainer.addView(modeRow)
+
+                val cxF = addNumberRow(bodyContainer, "Pusat X", action.cx.toString())
+                val cyF = addNumberRow(bodyContainer, "Pusat Y", action.cy.toString())
+                val distF = addNumberRow(bodyContainer, "Jarak cubit (px)", action.distancePx.toString())
+                val durF = addNumberRow(bodyContainer, "Durasi (ms)", action.durationMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            zoomIn = zoomInFlag,
+                            cx = cxF.text.toString().toIntOrNull() ?: action.cx,
+                            cy = cyF.text.toString().toIntOrNull() ?: action.cy,
+                            distancePx = (distF.text.toString().toIntOrNull() ?: action.distancePx).coerceIn(80, 900),
+                            durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceIn(60L, 5000L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is WaitAction -> {
+                val durF = addNumberRow(bodyContainer, "Tunggu (ms)", action.durationMs.toString())
+                val rndF = addNumberRow(bodyContainer, "Acak tambahan (ms)", action.randomMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceAtLeast(0L),
+                            randomMs = (rndF.text.toString().toLongOrNull() ?: action.randomMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is ImageAction -> {
+                var selectedImg = action.imageName
+                var threshold = action.threshold
+                var foundMode = action.foundMode
+                var notFoundMode = action.notFound
+
+                // Crop new & Re-crop existing buttons
+                val cropRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                cropRow.addView(makeBtn("✂ Crop Baru", "#0F766E", marginEndDp = 6) {
+                    onCropForImageAction(action.id)
+                }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+                if (selectedImg.isNotBlank() && store.imageFile(selectedImg).exists()) {
+                    cropRow.addView(makeBtn("✂ Potong Ulang", "#0284C7") {
+                        onRecropExistingImage(selectedImg)
+                    }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                }
+                bodyContainer.addView(cropRow)
+
+                // Image picker strip
+                val imgs = store.images.value
+                if (imgs.isNotEmpty()) {
+                    bodyContainer.addView(sectionLabel("Pilih dari Pustaka (${imgs.size})"))
+                    val hScroll = HorizontalScrollView(context).apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                    }
+                    val imgRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+                    val imgBtns = mutableListOf<Pair<String, TextView>>()
+                    imgs.forEach { asset ->
+                        val b = makeBtn(asset.name.removeSuffix(".png").take(12), if (asset.name == selectedImg) "#0D9488" else "#1E293B", marginEndDp = 4) {
+                            selectedImg = asset.name
+                            imgBtns.forEach { (n, tv) ->
+                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (n == selectedImg) "#0D9488" else "#1E293B"))
+                            }
+                        }
+                        imgBtns += asset.name to b
+                        imgRow.addView(b)
+                    }
+                    hScroll.addView(imgRow)
+                    bodyContainer.addView(hScroll)
+                }
+
+                // Threshold stepper
+                val thrRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val thrLabel = TextView(context).apply {
+                    text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                }
+                thrRow.addView(thrLabel)
+                thrRow.addView(makeSmallIconBtn("-5%", "#334155") {
+                    threshold = (threshold - 0.05f).coerceIn(0.50f, 0.99f)
+                    thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                })
+                thrRow.addView(makeSmallIconBtn("+5%", "#334155", marginEndDp = 0) {
+                    threshold = (threshold + 0.05f).coerceIn(0.50f, 0.99f)
+                    thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                })
+                bodyContainer.addView(thrRow)
+
+                val timeoutF = addNumberRow(bodyContainer, "Batas waktu cari (ms)", action.timeoutMs.toString())
+                val delayF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Ditemukan (Then)"))
+                val clickCheck = CheckBox(context).apply {
+                    text = "Klik gambar saat ditemukan"
+                    isChecked = action.clickOnFound
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(clickCheck)
+                val oxF = addSignedNumberRow(bodyContainer, "Offset X (px)", action.offsetX.toString())
+                val oyF = addSignedNumberRow(bodyContainer, "Offset Y (px)", action.offsetY.toString())
+                addBranchModePicker("Setelah cabang Ditemukan:", foundMode) { foundMode = it }
+                bodyContainer.addView(makeBtn("+ Tambah Aksi Jika Ditemukan (${action.thenActions.size})", "#065F46") {
+                    addPickerRef = ContainerRef(action.id, Slot.THEN)
+                    rebuildBody()
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Tidak Ditemukan (Else)"))
+                addBranchModePicker("Setelah cabang Tidak Ditemukan:", notFoundMode) { notFoundMode = it }
+                bodyContainer.addView(makeBtn("+ Tambah Aksi Jika Tidak (${action.elseActions.size})", "#92400E") {
+                    addPickerRef = ContainerRef(action.id, Slot.ELSE)
+                    rebuildBody()
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+
+                // Optional search region
+                bodyContainer.addView(dividerLine())
+                val regCheck = CheckBox(context).apply {
+                    text = "Batasi area pencarian (Region)"
+                    isChecked = action.region != null
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(regCheck)
+                val reg = action.region ?: Region(0, 0, screenW, screenH)
+                val rL = addNumberRow(bodyContainer, "Area Kiri", reg.left.toString())
+                val rT = addNumberRow(bodyContainer, "Area Atas", reg.top.toString())
+                val rR = addNumberRow(bodyContainer, "Area Kanan", reg.right.toString())
+                val rB = addNumberRow(bodyContainer, "Area Bawah", reg.bottom.toString())
+
+                addSaveActionBtn {
+                    val newRegion = if (regCheck.isChecked) {
+                        Region(
+                            rL.text.toString().toIntOrNull() ?: reg.left,
+                            rT.text.toString().toIntOrNull() ?: reg.top,
+                            rR.text.toString().toIntOrNull() ?: reg.right,
+                            rB.text.toString().toIntOrNull() ?: reg.bottom
+                        )
+                    } else null
+                    onUpdateAction(action.id) { cur ->
+                        val imgCur = (cur as? ImageAction) ?: action
+                        imgCur.copy(
+                            imageName = selectedImg,
+                            threshold = threshold,
+                            timeoutMs = (timeoutF.text.toString().toLongOrNull() ?: imgCur.timeoutMs).coerceAtLeast(0L),
+                            delayAfterMs = (delayF.text.toString().toLongOrNull() ?: imgCur.delayAfterMs).coerceAtLeast(0L),
+                            clickOnFound = clickCheck.isChecked,
+                            offsetX = oxF.text.toString().toIntOrNull() ?: imgCur.offsetX,
+                            offsetY = oyF.text.toString().toIntOrNull() ?: imgCur.offsetY,
+                            foundMode = foundMode,
+                            notFound = notFoundMode,
+                            region = newRegion
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is ColorAction -> {
+                var foundMode = action.foundMode
+                var notFoundMode = action.notFound
+                val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
+                val yF = addNumberRow(bodyContainer, "Koordinat Y", action.y.toString())
+                val hexF = addTextRow(bodyContainer, "Warna (#RRGGBB)", action.color)
+                val tolF = addNumberRow(bodyContainer, "Toleransi", action.tolerance.toString())
+                val toF = addNumberRow(bodyContainer, "Batas waktu (ms)", action.timeoutMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                val clickCheck = CheckBox(context).apply {
+                    text = "Klik titik saat warna cocok"
+                    isChecked = action.clickOnFound
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(clickCheck)
+                addBranchModePicker("Setelah cabang Ditemukan:", foundMode) { foundMode = it }
+                bodyContainer.addView(makeBtn("+ Aksi Jika Cocok (${action.thenActions.size})", "#065F46") {
+                    addPickerRef = ContainerRef(action.id, Slot.THEN)
+                    rebuildBody()
+                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+                addBranchModePicker("Setelah cabang Tidak Cocok:", notFoundMode) { notFoundMode = it }
+                bodyContainer.addView(makeBtn("+ Aksi Jika Tidak (${action.elseActions.size})", "#92400E") {
+                    addPickerRef = ContainerRef(action.id, Slot.ELSE)
+                    rebuildBody()
+                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+
+                addSaveActionBtn {
+                    onUpdateAction(action.id) { cur ->
+                        val colCur = (cur as? ColorAction) ?: action
+                        colCur.copy(
+                            x = xF.text.toString().toIntOrNull() ?: colCur.x,
+                            y = yF.text.toString().toIntOrNull() ?: colCur.y,
+                            color = hexF.text.toString().trim().uppercase().take(7).ifBlank { colCur.color },
+                            tolerance = (tolF.text.toString().toIntOrNull() ?: colCur.tolerance).coerceIn(0, 128),
+                            timeoutMs = (toF.text.toString().toLongOrNull() ?: colCur.timeoutMs).coerceAtLeast(0L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: colCur.delayAfterMs).coerceAtLeast(0L),
+                            clickOnFound = clickCheck.isChecked,
+                            foundMode = foundMode,
+                            notFound = notFoundMode
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is LoopAction -> {
+                val cntF = addNumberRow(bodyContainer, "Jumlah pengulangan", action.count.toString())
+                bodyContainer.addView(makeBtn("+ Tambah Aksi di Blok (${action.actions.size})", "#3730A3") {
+                    addPickerRef = ContainerRef(action.id, Slot.BODY)
+                    rebuildBody()
+                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+                addSaveActionBtn {
+                    onUpdateAction(action.id) { cur ->
+                        ((cur as? LoopAction) ?: action).copy(
+                            count = (cntF.text.toString().toIntOrNull() ?: action.count).coerceIn(1, 9999)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is RunMacroAction -> {
+                var targetId = action.targetMacroId
+                var targetName = action.targetMacroName
+                val otherMacros = store.macros.value.filter { it.id != macro.id }
+                bodyContainer.addView(sectionLabel("Pilih Macro Tujuan"))
+                if (otherMacros.isEmpty()) {
+                    bodyContainer.addView(TextView(context).apply {
+                        text = "Belum ada macro lain. Buat macro kedua dulu di aplikasi."
+                        setTextColor(Color.parseColor("#94A3B8"))
+                        textSize = 11f
+                    })
+                } else {
+                    val mBtns = mutableListOf<Pair<String, TextView>>()
+                    otherMacros.forEach { m ->
+                        val b = makeBtn(m.name, if (m.id == targetId) "#0D9488" else "#1E293B") {
+                            targetId = m.id
+                            targetName = m.name
+                            mBtns.forEach { (id, tv) ->
+                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (id == targetId) "#0D9488" else "#1E293B"))
+                            }
+                        }.apply {
+                            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                        }
+                        mBtns += m.id to b
+                        bodyContainer.addView(b)
+                    }
+                }
+                val retCheck = CheckBox(context).apply {
+                    text = "Kembali lanjutkan macro ini setelah selesai"
+                    isChecked = action.returnAfter
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(retCheck)
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            targetMacroId = targetId,
+                            targetMacroName = targetName,
+                            returnAfter = retCheck.isChecked,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is RecordAction -> {
+                var speed = action.speed
+                val spdRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val spdLbl = TextView(context).apply {
+                    text = "Kecepatan: ${String.format("%.2f", speed)}x (${action.gestures.size} gestur)"
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                }
+                spdRow.addView(spdLbl)
+                spdRow.addView(makeSmallIconBtn("−", "#334155") {
+                    speed = (speed - 0.25f).coerceIn(0.5f, 3f)
+                    spdLbl.text = "Kecepatan: ${String.format("%.2f", speed)}x (${action.gestures.size} gestur)"
+                })
+                spdRow.addView(makeSmallIconBtn("+", "#334155", marginEndDp = 0) {
+                    speed = (speed + 0.25f).coerceIn(0.5f, 3f)
+                    spdLbl.text = "Kecepatan: ${String.format("%.2f", speed)}x (${action.gestures.size} gestur)"
+                })
+                bodyContainer.addView(spdRow)
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    onUpdateAction(action.id) {
+                        action.copy(
+                            speed = speed,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                    editingActionId = null
+                }
+            }
+
+            is RestartAction, is StopAction -> {
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Aksi kontrol alur tidak memerlukan pengaturan tambahan."
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 11.5f
+                })
+            }
+        }
+    }
+
+    private fun addBranchModePicker(title: String, initial: NotFoundMode, onSelect: (NotFoundMode) -> Unit) {
+        bodyContainer.addView(TextView(context).apply {
+            text = title
+            setTextColor(Color.parseColor("#94A3B8"))
+            textSize = 10.5f
+            setPadding(0, dp(2), 0, dp(4))
+        })
+        var current = initial
+        val btns = mutableListOf<Pair<NotFoundMode, TextView>>()
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+        }
+        val shortLabels = mapOf(
+            NotFoundMode.CONTINUE to "Lanjut",
+            NotFoundMode.RESTART to "Ulangi",
+            NotFoundMode.STOP to "Stop"
+        )
+        NotFoundMode.entries.forEachIndexed { idx, mode ->
+            val b = makeBtn(shortLabels[mode] ?: mode.label, if (mode == current) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                current = mode
+                onSelect(mode)
+                btns.forEach { (m, tv) ->
+                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == current) "#0284C7" else "#1E293B"))
+                }
+            }
+            btns += mode to b
+            row.addView(b, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = if (idx < NotFoundMode.entries.lastIndex) dp(4) else 0
+            })
+        }
+        bodyContainer.addView(row)
+    }
+
+    private fun addSaveActionBtn(onClick: () -> Unit) {
+        bodyContainer.addView(makeBtn("Simpan Perubahan Aksi", "#0D9488", onClick = onClick).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+                bottomMargin = dp(4)
+            }
+        })
+    }
+
+    private fun sectionLabel(text: String): TextView = TextView(context).apply {
+        this.text = text
+        setTextColor(Color.parseColor("#2DD4BF"))
+        textSize = 11.5f
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(0, dp(2), 0, dp(4))
+    }
+
+    private fun dividerLine(): View = View(context).apply {
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(1)).apply {
+            topMargin = dp(6)
+            bottomMargin = dp(6)
+        }
+        setBackgroundColor(Color.parseColor("#334155"))
+    }
+
+    private fun addTextRow(parent: LinearLayout, label: String, initial: String): EditText {
+        val row = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
         }
         row.addView(TextView(context).apply {
             text = label
             setTextColor(Color.parseColor("#CBD5E1"))
-            textSize = 11.5f
+            textSize = 11f
+        })
+        val et = EditText(context).apply {
+            setText(initial)
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            isSingleLine = true
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1E293B"))
+                cornerRadius = dp(8).toFloat()
+            }
+        }
+        row.addView(et)
+        parent.addView(row)
+        return et
+    }
+
+    private fun addNumberRow(parent: LinearLayout, label: String, initial: String): EditText =
+        addNumericRow(parent, label, initial, InputType.TYPE_CLASS_NUMBER)
+
+    private fun addSignedNumberRow(parent: LinearLayout, label: String, initial: String): EditText =
+        addNumericRow(parent, label, initial, InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED)
+
+    private fun addNumericRow(parent: LinearLayout, label: String, initial: String, type: Int): EditText {
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(5) }
+        }
+        row.addView(TextView(context).apply {
+            text = label
+            setTextColor(Color.parseColor("#CBD5E1"))
+            textSize = 11f
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
         })
         val et = EditText(context).apply {
             setText(initial)
             setTextColor(Color.WHITE)
             textSize = 11.5f
-            inputType = InputType.TYPE_CLASS_NUMBER
+            inputType = type
             setPadding(dp(8), dp(4), dp(8), dp(4))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#1E293B"))
@@ -316,22 +1096,53 @@ class OverlayMacroSettingsView(
         return et
     }
 
-    private fun makeChipBtn(label: String, bgHex: String, marginEndDp: Int = 0, onClick: () -> Unit): TextView {
-        return TextView(context).apply {
-            text = label
-            setTextColor(Color.WHITE)
-            textSize = 10.5f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(9), dp(5), dp(9), dp(5))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor(bgHex))
-                cornerRadius = dp(10).toFloat()
-            }
-            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                marginEnd = dp(marginEndDp)
-            }
-            setOnClickListener { onClick() }
+    private fun makeTabBtn(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        textSize = 11.5f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+        background = GradientDrawable().apply {
+            setColor(Color.parseColor("#1E293B"))
+            cornerRadius = dp(10).toFloat()
         }
+        setOnClickListener { onClick() }
+    }
+
+    private fun makeBtn(label: String, bgHex: String, marginEndDp: Int = 0, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        textSize = 11f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        background = GradientDrawable().apply {
+            setColor(Color.parseColor(bgHex))
+            cornerRadius = dp(10).toFloat()
+        }
+        layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            marginEnd = dp(marginEndDp)
+        }
+        setOnClickListener { onClick() }
+    }
+
+    private fun makeSmallIconBtn(label: String, bgHex: String, marginEndDp: Int = 3, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        textSize = 10f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        minWidth = dp(24)
+        minHeight = dp(24)
+        setPadding(dp(5), dp(3), dp(5), dp(3))
+        background = GradientDrawable().apply {
+            setColor(Color.parseColor(bgHex))
+            cornerRadius = dp(8).toFloat()
+        }
+        layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            marginEnd = dp(marginEndDp)
+        }
+        setOnClickListener { onClick() }
     }
 }

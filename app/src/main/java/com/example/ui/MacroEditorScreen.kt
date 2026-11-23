@@ -77,7 +77,14 @@ import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
 import com.example.data.Macro
+import android.graphics.Bitmap
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilterChip
 import com.example.data.Slot
+import com.example.data.StuckRecoveryMode
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.duplicateAction
@@ -93,11 +100,13 @@ import com.example.data.updateAction
 @Composable
 fun MacroEditorScreen(
     macro: Macro,
+    allMacros: List<Macro>,
     images: List<ImageAsset>,
     lastPickedPixel: PickedPixel?,
     screenW: Int,
     screenH: Int,
     onUpdateMacro: (Macro) -> Unit,
+    onRecropImage: (String, Bitmap) -> Unit,
     onLaunchOverlay: (Macro) -> Unit,
     onLaunchCropOverlay: (Macro, String?) -> Unit,
     onLaunchRecorderOverlay: (Macro) -> Unit,
@@ -261,12 +270,17 @@ fun MacroEditorScreen(
     editingAction?.let { act ->
         ActionEditorSheet(
             action = act,
+            currentMacroId = macro.id,
+            allMacros = allMacros,
             images = images,
             lastPickedPixel = lastPickedPixel,
+            screenW = screenW,
+            screenH = screenH,
             onLaunchCropForAction = { actionId ->
                 editingAction = null
                 onLaunchCropOverlay(macro, actionId)
             },
+            onRecropImage = onRecropImage,
             onSave = { updated ->
                 mutateActions { it.updateAction(updated.id) { updated } }
                 editingAction = null
@@ -505,14 +519,15 @@ private fun AddActionPickerSheet(
 ) {
     val groups = listOf(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.COLOR),
-        "Sentuhan" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.WAIT),
-        "Alur & Kontrol" to listOf(ActionKind.LOOP, ActionKind.RESTART, ActionKind.STOP)
+        "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
+        "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP)
     )
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -557,7 +572,7 @@ private fun AddActionPickerSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun MacroSettingsSheet(
     macro: Macro,
@@ -571,11 +586,14 @@ private fun MacroSettingsSheet(
     var jitter by remember(macro.id) { mutableStateOf(macro.jitterPx.toString()) }
     var randomDelay by remember(macro.id) { mutableStateOf(macro.randomDelayMs.toString()) }
     var maxMin by remember(macro.id) { mutableStateOf(macro.maxDurationMin.toString()) }
+    var stuckSec by remember(macro.id) { mutableStateOf(macro.autoRecoverStuckSec.toString()) }
+    var recoveryMode by remember(macro.id) { mutableStateOf(macro.stuckRecoveryMode) }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -652,6 +670,26 @@ private fun MacroSettingsSheet(
                 )
             }
 
+            HorizontalDivider()
+            Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            OutlinedTextField(
+                value = stuckSec,
+                onValueChange = { stuckSec = it.filter(Char::isDigit) },
+                label = { Text("Pulihkan otomatis jika macet (detik, 0=off)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                StuckRecoveryMode.entries.forEach { m ->
+                    FilterChip(
+                        selected = recoveryMode == m,
+                        onClick = { recoveryMode = m },
+                        label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
+
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Batal") }
                 Button(
@@ -663,7 +701,9 @@ private fun MacroSettingsSheet(
                                 loopDelayMs = (loopDelay.toLongOrNull() ?: 500L).coerceAtLeast(0L),
                                 jitterPx = (jitter.toIntOrNull() ?: 0).coerceIn(0, 60),
                                 randomDelayMs = (randomDelay.toLongOrNull() ?: 0L).coerceAtLeast(0L),
-                                maxDurationMin = (maxMin.toIntOrNull() ?: 0).coerceIn(0, 1440)
+                                maxDurationMin = (maxMin.toIntOrNull() ?: 0).coerceIn(0, 1440),
+                                autoRecoverStuckSec = (stuckSec.toIntOrNull() ?: 0).coerceIn(0, 3600),
+                                stuckRecoveryMode = recoveryMode
                             )
                         )
                     },

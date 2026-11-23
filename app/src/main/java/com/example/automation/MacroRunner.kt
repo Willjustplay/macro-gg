@@ -11,9 +11,12 @@ import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.RestartAction
+import com.example.data.RunMacroAction
 import com.example.data.StopAction
+import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
 import com.example.data.WaitAction
+import com.example.data.ZoomAction
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
 import com.example.vision.MatchResult
@@ -24,15 +27,19 @@ import kotlin.random.Random
 
 /** Abstraction over OS gesture/capture/storage so [MacroRunner] is pure and unit-testable. */
 interface MacroRuntime {
+    val screenWidth: Int get() = 1080
+    val screenHeight: Int get() = 2400
     fun isStopped(): Boolean
     suspend fun waitIfPaused()
     suspend fun sleep(ms: Long)
     suspend fun click(x: Int, y: Int, durationMs: Long): Boolean
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean
+    suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean = true
     suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean
     fun captureFrame(): Frame?
     fun samplePixelArgb(x: Int, y: Int): Int?
     fun loadTemplate(name: String): PreparedTemplate?
+    fun loadMacro(id: String): Macro? = null
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
@@ -49,18 +56,28 @@ private enum class FlowControl {
 /**
  * Recursive Macrorify-style macro executor supporting:
  * - Multi-point clicks with burst repeat & jitter
- * - Long press, swipe, wait with random jitter
- * - Image detection (template matching) with click-on-found + then/else branches + notFound modes
- * - Color detection with click-on-found + then/else branches + notFound modes
- * - Nested loop blocks
+ * - Long press, swipe, 2-finger pinch Zoom In/Out, wait with random jitter
+ * - Image detection (template matching) & Color detection with full Then/Else branches + Found/NotFound flow modes
+ * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection
  * - Recorded gesture playback with speed multiplier
- * - Restart & Stop control flow + max duration guard
+ * - Auto-Fix Stuck Macro Watchdog ([Macro.autoRecoverStuckSec] & [StuckRecoveryMode])
  */
 class MacroRunner(
     private val runtime: MacroRuntime,
     private val random: Random = Random.Default
 ) {
+    private var lastProgressMs: Long = 0L
+
     suspend fun run(macro: Macro) {
+        lastProgressMs = runtime.nowMs()
+        runInternal(macro, depth = 0)
+    }
+
+    private suspend fun runInternal(macro: Macro, depth: Int): FlowControl {
+        if (depth >= MAX_CHAIN_DEPTH) {
+            runtime.log(LogLevel.WARN, "Batas kedalaman macro terhubung ($MAX_CHAIN_DEPTH) tercapai — dihentikan untuk mencegah loop tak hingga.")
+            return FlowControl.NEXT
+        }
         val startedAt = runtime.nowMs()
         val maxDurationMs = if (macro.maxDurationMin > 0) macro.maxDurationMin * 60_000L else Long.MAX_VALUE
         val maxLoops = if (macro.loopCount <= 0) Int.MAX_VALUE else macro.loopCount
@@ -72,14 +89,14 @@ class MacroRunner(
                 break
             }
             iteration++
-            runtime.onLoopChanged(iteration)
-            runtime.log(LogLevel.INFO, "Loop #$iteration dimulai.")
+            if (depth == 0) runtime.onLoopChanged(iteration)
+            runtime.log(LogLevel.INFO, if (depth == 0) "Loop #$iteration dimulai." else "Sub-macro '${macro.name}' loop #$iteration.")
 
-            val flow = executeList(macro.actions, macro, startedAt, maxDurationMs)
+            val flow = executeList(macro.actions, macro, startedAt, maxDurationMs, depth)
             when (flow) {
-                FlowControl.STOP_MACRO -> break
+                FlowControl.STOP_MACRO -> return FlowControl.STOP_MACRO
                 FlowControl.RESTART_MACRO -> {
-                    runtime.log(LogLevel.INFO, "Mengulang macro dari awal...")
+                    runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal...")
                     if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
                     continue
                 }
@@ -90,21 +107,49 @@ class MacroRunner(
                 }
             }
         }
+        return FlowControl.NEXT
+    }
+
+    private fun markProgress() {
+        lastProgressMs = runtime.nowMs()
+    }
+
+    /** Checks stuck watchdog; if triggered, performs recovery action and returns control signal. */
+    private suspend fun checkStuckRecovery(macro: Macro): FlowControl? {
+        val sec = macro.autoRecoverStuckSec
+        if (sec <= 0) return null
+        val elapsed = runtime.nowMs() - lastProgressMs
+        if (elapsed < sec * 1000L) return null
+
+        runtime.log(LogLevel.WARN, "Auto-Perbaiki: Macro macet > ${sec}d — menjalankan '${macro.stuckRecoveryMode.label}'.")
+        lastProgressMs = runtime.nowMs()
+        return when (macro.stuckRecoveryMode) {
+            StuckRecoveryMode.RESTART_MACRO -> FlowControl.RESTART_MACRO
+            StuckRecoveryMode.TAP_CENTER_AND_RESTART -> {
+                runtime.click(runtime.screenWidth / 2, runtime.screenHeight / 2, 50L)
+                runtime.sleep(250L)
+                lastProgressMs = runtime.nowMs()
+                FlowControl.RESTART_MACRO
+            }
+            StuckRecoveryMode.STOP_MACRO -> FlowControl.STOP_MACRO
+        }
     }
 
     private suspend fun executeList(
         actions: List<Action>,
         macro: Macro,
         startedAt: Long,
-        maxDurationMs: Long
+        maxDurationMs: Long,
+        depth: Int
     ): FlowControl {
         for (action in actions) {
             runtime.waitIfPaused()
             if (runtime.isStopped()) return FlowControl.STOP_MACRO
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
+            checkStuckRecovery(macro)?.let { return it }
             if (!action.enabled) continue
 
-            val flow = executeAction(action, macro, startedAt, maxDurationMs)
+            val flow = executeAction(action, macro, startedAt, maxDurationMs, depth)
             if (flow != FlowControl.NEXT) return flow
 
             val extraRandom = if (macro.randomDelayMs > 0) random.nextLong(0, macro.randomDelayMs + 1) else 0L
@@ -120,7 +165,8 @@ class MacroRunner(
         action: Action,
         macro: Macro,
         startedAt: Long,
-        maxDurationMs: Long
+        maxDurationMs: Long,
+        depth: Int
     ): FlowControl {
         return when (action) {
             is ClickAction -> {
@@ -130,7 +176,10 @@ class MacroRunner(
                     runtime.waitIfPaused()
                     val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
                     runtime.log(LogLevel.ACTION, "Klik ($tx, $ty) ${action.durationMs}ms" + if (times > 1) " [${i + 1}/$times]" else "")
-                    if (runtime.click(tx, ty, action.durationMs)) runtime.onActionExecuted()
+                    if (runtime.click(tx, ty, action.durationMs)) {
+                        runtime.onActionExecuted()
+                        markProgress()
+                    }
                     if (i + 1 < times && action.repeatIntervalMs > 0) {
                         runtime.sleep(action.repeatIntervalMs)
                     }
@@ -142,7 +191,10 @@ class MacroRunner(
                 val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
                 val dur = action.durationMs.coerceAtLeast(250L)
                 runtime.log(LogLevel.ACTION, "Tahan ($tx, $ty) ${dur}ms")
-                if (runtime.click(tx, ty, dur)) runtime.onActionExecuted()
+                if (runtime.click(tx, ty, dur)) {
+                    runtime.onActionExecuted()
+                    markProgress()
+                }
                 FlowControl.NEXT
             }
 
@@ -150,6 +202,17 @@ class MacroRunner(
                 runtime.log(LogLevel.ACTION, "Swipe (${action.x1},${action.y1}) → (${action.x2},${action.y2}) ${action.durationMs}ms")
                 if (runtime.swipe(action.x1, action.y1, action.x2, action.y2, action.durationMs)) {
                     runtime.onActionExecuted()
+                    markProgress()
+                }
+                FlowControl.NEXT
+            }
+
+            is ZoomAction -> {
+                val label = if (action.zoomIn) "Zoom In" else "Zoom Out"
+                runtime.log(LogLevel.ACTION, "$label di (${action.cx},${action.cy}) jarak=${action.distancePx}px")
+                if (runtime.zoom(action.cx, action.cy, action.zoomIn, action.distancePx, action.durationMs)) {
+                    runtime.onActionExecuted()
+                    markProgress()
                 }
                 FlowControl.NEXT
             }
@@ -162,9 +225,9 @@ class MacroRunner(
                 FlowControl.NEXT
             }
 
-            is ImageAction -> executeImageAction(action, macro, startedAt, maxDurationMs)
+            is ImageAction -> executeImageAction(action, macro, startedAt, maxDurationMs, depth)
 
-            is ColorAction -> executeColorAction(action, macro, startedAt, maxDurationMs)
+            is ColorAction -> executeColorAction(action, macro, startedAt, maxDurationMs, depth)
 
             is LoopAction -> {
                 val times = action.count.coerceAtLeast(1)
@@ -172,10 +235,34 @@ class MacroRunner(
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     runtime.waitIfPaused()
                     runtime.log(LogLevel.INFO, "Blok ulang #$i/$times")
-                    val flow = executeList(action.actions, macro, startedAt, maxDurationMs)
+                    val flow = executeList(action.actions, macro, startedAt, maxDurationMs, depth)
                     if (flow != FlowControl.NEXT) return flow
                 }
                 FlowControl.NEXT
+            }
+
+            is RunMacroAction -> {
+                if (action.targetMacroId.isBlank()) {
+                    runtime.log(LogLevel.WARN, "Hubungkan Macro dilewati: belum ada macro tujuan dipilih.")
+                    return FlowControl.NEXT
+                }
+                val target = runtime.loadMacro(action.targetMacroId)
+                if (target == null) {
+                    runtime.log(LogLevel.WARN, "Macro tujuan '${action.targetMacroName}' tidak ditemukan.")
+                    return FlowControl.NEXT
+                }
+                runtime.log(
+                    LogLevel.INFO,
+                    if (action.returnAfter) "Memanggil macro '${target.name}'..."
+                    else "Berpindah ke macro '${target.name}'..."
+                )
+                markProgress()
+                val subFlow = runInternal(target, depth + 1)
+                if (!action.returnAfter || subFlow == FlowControl.STOP_MACRO) {
+                    FlowControl.STOP_MACRO
+                } else {
+                    FlowControl.NEXT
+                }
             }
 
             is RecordAction -> {
@@ -187,7 +274,10 @@ class MacroRunner(
                     val waitMs = (g.delayBeforeMs / speed).roundToLong().coerceAtLeast(0L)
                     if (waitMs > 0) runtime.sleep(waitMs)
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
-                    if (runtime.playRecordedGesture(g, speed)) runtime.onActionExecuted()
+                    if (runtime.playRecordedGesture(g, speed)) {
+                        runtime.onActionExecuted()
+                        markProgress()
+                    }
                 }
                 FlowControl.NEXT
             }
@@ -205,7 +295,8 @@ class MacroRunner(
         action: ImageAction,
         macro: Macro,
         startedAt: Long,
-        maxDurationMs: Long
+        maxDurationMs: Long,
+        depth: Int
     ): FlowControl {
         if (action.imageName.isBlank()) {
             runtime.log(LogLevel.WARN, "Deteksi Gambar dilewati: belum ada gambar dipilih.")
@@ -214,7 +305,7 @@ class MacroRunner(
         val template = runtime.loadTemplate(action.imageName)
         if (template == null) {
             runtime.log(LogLevel.WARN, "Gambar '${action.imageName}' tidak ditemukan di pustaka.")
-            return handleNotFound(action.elseActions, action.notFound, macro, startedAt, maxDurationMs)
+            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
         }
 
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
@@ -225,6 +316,7 @@ class MacroRunner(
 
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
+            checkStuckRecovery(macro)?.let { return it }
             val frame = runtime.captureFrame()
             if (frame != null) {
                 sawFrame = true
@@ -250,11 +342,12 @@ class MacroRunner(
             val pct = (matched.score * 100).toInt()
             runtime.log(LogLevel.IMAGE, "Ditemukan '${action.imageName}' di (${matched.centerX},${matched.centerY}) $pct%")
             runtime.onMatchFound(matched, "${action.imageName} $pct%")
+            markProgress()
             if (action.clickOnFound) {
                 val (tx, ty) = applyJitter(matched.centerX + action.offsetX, matched.centerY + action.offsetY, macro.jitterPx)
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
-            return executeList(action.thenActions, macro, startedAt, maxDurationMs)
+            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
         } else {
             val reqPct = (action.threshold * 100).toInt()
             val maxPct = (bestScore * 100).toInt()
@@ -263,7 +356,7 @@ class MacroRunner(
             } else {
                 runtime.log(LogLevel.IMAGE, "Gambar '${action.imageName}' belum cocok (maks $maxPct% < $reqPct%).")
             }
-            return handleNotFound(action.elseActions, action.notFound, macro, startedAt, maxDurationMs)
+            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
         }
     }
 
@@ -271,12 +364,14 @@ class MacroRunner(
         action: ColorAction,
         macro: Macro,
         startedAt: Long,
-        maxDurationMs: Long
+        maxDurationMs: Long,
+        depth: Int
     ): FlowControl {
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var matched = false
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
+            checkStuckRecovery(macro)?.let { return it }
             val argb = runtime.samplePixelArgb(action.x, action.y)
             if (argb != null && ColorUtil.matches(argb, action.color, action.tolerance)) {
                 matched = true
@@ -288,27 +383,29 @@ class MacroRunner(
 
         if (matched) {
             runtime.log(LogLevel.COLOR, "Warna ${action.color} cocok di (${action.x},${action.y})")
+            markProgress()
             if (action.clickOnFound) {
                 val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
-            return executeList(action.thenActions, macro, startedAt, maxDurationMs)
+            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
         } else {
             runtime.log(LogLevel.COLOR, "Warna ${action.color} tidak cocok.")
-            return handleNotFound(action.elseActions, action.notFound, macro, startedAt, maxDurationMs)
+            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
         }
     }
 
-    private suspend fun handleNotFound(
-        elseActions: List<Action>,
-        mode: NotFoundMode,
+    private suspend fun handleBranch(
+        branchActions: List<Action>,
+        endMode: NotFoundMode,
         macro: Macro,
         startedAt: Long,
-        maxDurationMs: Long
+        maxDurationMs: Long,
+        depth: Int
     ): FlowControl {
-        val elseFlow = executeList(elseActions, macro, startedAt, maxDurationMs)
-        if (elseFlow != FlowControl.NEXT) return elseFlow
-        return when (mode) {
+        val childFlow = executeList(branchActions, macro, startedAt, maxDurationMs, depth)
+        if (childFlow != FlowControl.NEXT) return childFlow
+        return when (endMode) {
             NotFoundMode.CONTINUE -> FlowControl.NEXT
             NotFoundMode.RESTART -> FlowControl.RESTART_MACRO
             NotFoundMode.STOP -> FlowControl.STOP_MACRO
@@ -320,5 +417,9 @@ class MacroRunner(
         val dx = random.nextInt(-jitterPx, jitterPx + 1)
         val dy = random.nextInt(-jitterPx, jitterPx + 1)
         return (x + dx).coerceAtLeast(0) to (y + dy).coerceAtLeast(0)
+    }
+
+    companion object {
+        private const val MAX_CHAIN_DEPTH = 5
     }
 }

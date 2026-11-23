@@ -91,6 +91,8 @@ fun LuaStudioScreen(
             "findAll" to "\nlocal list = findAllImages(\"$sampleImg\", 0.85)\nfor _, p in ipairs(list) do click(p.x, p.y) sleep(200) end",
             "click" to "\nclick(540, 1200, 50)",
             "swipe" to "\nswipe(540, 1500, 540, 800, 350)",
+            "zoomIn" to "\nzoomIn(540, 1000, 260, 400)",
+            "zoomOut" to "\nzoomOut(540, 1000, 260, 400)",
             "matchColor" to "\nif matchColor(540, 1200, \"#2DD4BF\", 15) then click(540, 1200) end",
             "sleep" to "\nsleep(500)",
             "log" to "\nlog(\"Pesan log\")"

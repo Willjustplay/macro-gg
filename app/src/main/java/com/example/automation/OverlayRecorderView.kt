@@ -123,6 +123,9 @@ class OverlayRecorderView(
         statusLabel.text = "● Rekam (${recorded.size})"
     }
 
+    @Volatile
+    var isForwardingGesture: Boolean = false
+
     private inner class RecorderCanvasView(
         context: Context,
         private val onGestureCaptured: (RecordedGesture) -> Unit
@@ -166,6 +169,7 @@ class OverlayRecorderView(
 
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (isForwardingGesture) return true
             val rx = event.rawX.toInt().coerceAtLeast(0)
             val ry = event.rawY.toInt().coerceAtLeast(0)
             val now = System.currentTimeMillis()
@@ -183,22 +187,28 @@ class OverlayRecorderView(
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (now - lastSampleMs >= 16L && activePoints.size < 400) {
-                        activePoints.add(rx)
-                        activePoints.add(ry)
-                        activePath.lineTo(event.x, event.y)
-                        lastSampleMs = now
-                        invalidate()
+                    if (now - lastSampleMs >= 20L && activePoints.size < 300) {
+                        val lastPx = activePoints[activePoints.size - 2]
+                        val lastPy = activePoints[activePoints.size - 1]
+                        if (kotlin.math.abs(rx - lastPx) >= 3 || kotlin.math.abs(ry - lastPy) >= 3) {
+                            activePoints.add(rx)
+                            activePoints.add(ry)
+                            activePath.lineTo(event.x, event.y)
+                            lastSampleMs = now
+                            invalidate()
+                        }
                     }
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (activePoints.isNotEmpty()) {
-                        if (activePoints.size == 2 || activePoints[activePoints.size - 2] != rx || activePoints[activePoints.size - 1] != ry) {
+                        val lastPx = activePoints[activePoints.size - 2]
+                        val lastPy = activePoints[activePoints.size - 1]
+                        if (kotlin.math.abs(rx - lastPx) >= 4 || kotlin.math.abs(ry - lastPy) >= 4) {
                             activePoints.add(rx)
                             activePoints.add(ry)
                         }
-                        val duration = (now - strokeStartMs).coerceIn(30L, 10_000L)
+                        val duration = (now - strokeStartMs).coerceIn(35L, 10_000L)
                         val delayBefore = if (recorded.isEmpty()) 0L else (strokeStartMs - lastGestureEndMs).coerceIn(0L, 10_000L)
                         lastGestureEndMs = now
                         val gesture = RecordedGesture(

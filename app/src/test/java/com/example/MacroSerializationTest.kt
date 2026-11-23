@@ -12,9 +12,12 @@ import com.example.data.RecordedGesture
 import com.example.data.RecordedStroke
 import com.example.data.Region
 import com.example.data.RestartAction
+import com.example.data.RunMacroAction
 import com.example.data.StopAction
+import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
 import com.example.data.WaitAction
+import com.example.data.ZoomAction
 import com.example.data.countActions
 import com.example.data.imageNames
 import kotlinx.serialization.encodeToString
@@ -40,10 +43,13 @@ class MacroSerializationTest {
             jitterPx = 5,
             randomDelayMs = 120,
             maxDurationMin = 30,
+            autoRecoverStuckSec = 25,
+            stuckRecoveryMode = StuckRecoveryMode.TAP_CENTER_AND_RESTART,
             actions = listOf(
                 ClickAction(x = 100, y = 200, repeat = 3, repeatIntervalMs = 80),
                 LongPressAction(x = 300, y = 400, durationMs = 900),
                 SwipeAction(x1 = 10, y1 = 20, x2 = 30, y2 = 40, durationMs = 250),
+                ZoomAction(cx = 540, cy = 960, zoomIn = true, distancePx = 280, durationMs = 350),
                 WaitAction(durationMs = 500, randomMs = 150),
                 ImageAction(
                     imageName = "tombol_play.png",
@@ -54,14 +60,17 @@ class MacroSerializationTest {
                     offsetX = 4,
                     offsetY = -2,
                     thenActions = listOf(ClickAction(x = 50, y = 60)),
+                    foundMode = NotFoundMode.CONTINUE,
                     elseActions = listOf(RestartAction()),
                     notFound = NotFoundMode.RESTART
                 ),
                 ColorAction(
                     x = 222, y = 333, color = "#10B981", tolerance = 12,
                     thenActions = listOf(StopAction()),
+                    foundMode = NotFoundMode.STOP,
                     notFound = NotFoundMode.CONTINUE
                 ),
+                RunMacroAction(targetMacroId = "macro2", targetMacroName = "Farming #2", returnAfter = true),
                 LoopAction(
                     count = 4,
                     actions = listOf(
@@ -84,6 +93,6 @@ class MacroSerializationTest {
 
         assertEquals(original, decoded)
         assertEquals(setOf("tombol_play.png"), decoded.imageNames())
-        assertEquals(11, decoded.countActions())
+        assertEquals(13, decoded.countActions())
     }
 }

@@ -1,5 +1,7 @@
 package com.example.ui
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -38,6 +40,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,17 +53,24 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.example.automation.OverlayCropView
 import com.example.data.ImageAsset
+import java.io.File
 
 @Composable
 fun ImageLibraryScreen(
     images: List<ImageAsset>,
     onCropFromScreen: () -> Unit,
     onImportFromGallery: () -> Unit,
+    onRecropImage: (String, Bitmap) -> Unit,
     onRenameImage: (String, String) -> Unit,
     onDeleteImage: (String) -> Unit
 ) {
     var selectedAsset by remember { mutableStateOf<ImageAsset?>(null) }
+    var recropAsset by remember { mutableStateOf<ImageAsset?>(null) }
 
     Column(
         modifier = Modifier
@@ -182,7 +192,7 @@ fun ImageLibraryScreen(
             onDismissRequest = { selectedAsset = null },
             title = { Text("Detail Gambar") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -197,10 +207,21 @@ fun ImageLibraryScreen(
                     }
                     Text("Ukuran: ${asset.width}×${asset.height} px", style = MaterialTheme.typography.bodySmall)
                     Text(
-                        "Di Lua: findImage(\"${asset.name}\", 0.85)",
+                        "Di Lua: findImage(\"${asset.name}\", 0.80)",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    FilledTonalButton(
+                        onClick = {
+                            selectedAsset = null
+                            recropAsset = asset
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.Crop, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Potong Ulang Gambar (Re-Crop)")
+                    }
                     OutlinedTextField(
                         value = newName,
                         onValueChange = { newName = it },
@@ -234,6 +255,61 @@ fun ImageLibraryScreen(
                     }
                     OutlinedButton(onClick = { selectedAsset = null }) { Text("Tutup") }
                 }
+            }
+        )
+    }
+
+    recropAsset?.let { asset ->
+        InAppRecropDialog(
+            asset = asset,
+            onSave = { cropped ->
+                onRecropImage(asset.name, cropped)
+                recropAsset = null
+            },
+            onDismiss = { recropAsset = null }
+        )
+    }
+}
+
+/**
+ * Full-screen zoomable Re-Crop dialog reusing [OverlayCropView] so users can trim any
+ * already-cropped image right inside the app without needing MediaProjection active.
+ */
+@Composable
+fun InAppRecropDialog(
+    asset: ImageAsset,
+    onSave: (Bitmap) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sourceBitmap = remember(asset.path, asset.updatedAt) {
+        val f = File(asset.path)
+        if (f.exists()) runCatching { BitmapFactory.decodeFile(f.absolutePath) }.getOrNull() else null
+    }
+
+    DisposableEffect(sourceBitmap) {
+        onDispose { sourceBitmap?.recycle() }
+    }
+
+    if (sourceBitmap == null) {
+        onDismiss()
+        return
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        AndroidView(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            factory = { ctx ->
+                OverlayCropView(
+                    context = ctx,
+                    screenshot = sourceBitmap,
+                    onSave = { cropped, _ -> onSave(cropped) },
+                    onCancel = onDismiss
+                )
             }
         )
     }
