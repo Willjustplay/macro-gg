@@ -73,6 +73,8 @@ class OverlayMacroSettingsView(
     private val onCropForImageAction: (actionId: String) -> Unit,
     private val onRecropExistingImage: (imageName: String) -> Unit,
     private val onAddNewCropImageAction: () -> Unit,
+    private val onPickTargetOnScreen: (actionId: String) -> Unit,
+    private val onAddBranchClickTargetOnScreen: (parentId: String, slot: Slot) -> Unit,
     private val onClose: () -> Unit
 ) : LinearLayout(context) {
 
@@ -421,6 +423,11 @@ class OverlayMacroSettingsView(
         if (idx < siblingCount - 1) {
             row.addView(makeSmallIconBtn("↓", "#334155") { onMoveAction(action.id, 1) })
         }
+        if (isPositionable(action)) {
+            row.addView(makeSmallIconBtn("🎯", "#0F766E") {
+                onPickTargetOnScreen(action.id)
+            })
+        }
         row.addView(makeSmallIconBtn(if (action.enabled) "ON" else "OFF", if (action.enabled) "#059669" else "#475569") {
             onUpdateAction(action.id) { it.withEnabled(!action.enabled) }
         })
@@ -466,6 +473,9 @@ class OverlayMacroSettingsView(
                     typeface = Typeface.DEFAULT_BOLD
                     layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
                 })
+                bHeader.addView(makeSmallIconBtn("+🎯 Klik", "#0F766E", marginEndDp = 4) {
+                    onAddBranchClickTargetOnScreen(action.id, slot)
+                })
                 bHeader.addView(makeSmallIconBtn("+ Aksi", "#1E293B", marginEndDp = 0) {
                     addPickerRef = ContainerRef(action.id, slot)
                     rebuildBody()
@@ -479,6 +489,11 @@ class OverlayMacroSettingsView(
         }
 
         return card
+    }
+
+    private fun isPositionable(action: Action): Boolean = when (action) {
+        is ClickAction, is LongPressAction, is SwipeAction, is ZoomAction, is ColorAction -> true
+        else -> false
     }
 
     // ---- Add Action Picker inside Overlay ----
@@ -562,6 +577,7 @@ class OverlayMacroSettingsView(
 
         when (action) {
             is ClickAction -> {
+                addPickTargetBtn("🎯 Atur Posisi Klik di Layar") { onPickTargetOnScreen(action.id) }
                 val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
                 val yF = addNumberRow(bodyContainer, "Koordinat Y", action.y.toString())
                 val durF = addNumberRow(bodyContainer, "Durasi tekan (ms)", action.durationMs.toString())
@@ -584,6 +600,7 @@ class OverlayMacroSettingsView(
             }
 
             is LongPressAction -> {
+                addPickTargetBtn("🎯 Atur Posisi Tahan di Layar") { onPickTargetOnScreen(action.id) }
                 val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
                 val yF = addNumberRow(bodyContainer, "Koordinat Y", action.y.toString())
                 val durF = addNumberRow(bodyContainer, "Durasi tahan (ms)", action.durationMs.toString())
@@ -602,6 +619,7 @@ class OverlayMacroSettingsView(
             }
 
             is SwipeAction -> {
+                addPickTargetBtn("🎯 Atur Garis Swipe A→B di Layar") { onPickTargetOnScreen(action.id) }
                 val x1F = addNumberRow(bodyContainer, "Awal X (A)", action.x1.toString())
                 val y1F = addNumberRow(bodyContainer, "Awal Y (A)", action.y1.toString())
                 val x2F = addNumberRow(bodyContainer, "Akhir X (B)", action.x2.toString())
@@ -624,6 +642,7 @@ class OverlayMacroSettingsView(
             }
 
             is ZoomAction -> {
+                addPickTargetBtn("🎯 Atur Titik Pusat Zoom di Layar") { onPickTargetOnScreen(action.id) }
                 var zoomInFlag = action.zoomIn
                 val modeRow = LinearLayout(context).apply {
                     orientation = HORIZONTAL
@@ -761,22 +780,12 @@ class OverlayMacroSettingsView(
                 val oxF = addSignedNumberRow(bodyContainer, "Offset X (px)", action.offsetX.toString())
                 val oyF = addSignedNumberRow(bodyContainer, "Offset Y (px)", action.offsetY.toString())
                 addBranchModePicker("Setelah cabang Ditemukan:", foundMode) { foundMode = it }
-                bodyContainer.addView(makeBtn("+ Tambah Aksi Jika Ditemukan (${action.thenActions.size})", "#065F46") {
-                    addPickerRef = ContainerRef(action.id, Slot.THEN)
-                    rebuildBody()
-                }.apply {
-                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
-                })
+                addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
 
                 bodyContainer.addView(dividerLine())
                 bodyContainer.addView(sectionLabel("Jika Tidak Ditemukan (Else)"))
                 addBranchModePicker("Setelah cabang Tidak Ditemukan:", notFoundMode) { notFoundMode = it }
-                bodyContainer.addView(makeBtn("+ Tambah Aksi Jika Tidak (${action.elseActions.size})", "#92400E") {
-                    addPickerRef = ContainerRef(action.id, Slot.ELSE)
-                    rebuildBody()
-                }.apply {
-                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
-                })
+                addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
 
                 // Optional search region
                 bodyContainer.addView(dividerLine())
@@ -822,6 +831,7 @@ class OverlayMacroSettingsView(
             }
 
             is ColorAction -> {
+                addPickTargetBtn("🎯 Pilih Posisi & Warna di Layar") { onPickTargetOnScreen(action.id) }
                 var foundMode = action.foundMode
                 var notFoundMode = action.notFound
                 val xF = addNumberRow(bodyContainer, "Koordinat X", action.x.toString())
@@ -838,15 +848,9 @@ class OverlayMacroSettingsView(
                 }
                 bodyContainer.addView(clickCheck)
                 addBranchModePicker("Setelah cabang Ditemukan:", foundMode) { foundMode = it }
-                bodyContainer.addView(makeBtn("+ Aksi Jika Cocok (${action.thenActions.size})", "#065F46") {
-                    addPickerRef = ContainerRef(action.id, Slot.THEN)
-                    rebuildBody()
-                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+                addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
                 addBranchModePicker("Setelah cabang Tidak Cocok:", notFoundMode) { notFoundMode = it }
-                bodyContainer.addView(makeBtn("+ Aksi Jika Tidak (${action.elseActions.size})", "#92400E") {
-                    addPickerRef = ContainerRef(action.id, Slot.ELSE)
-                    rebuildBody()
-                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+                addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
 
                 addSaveActionBtn {
                     onUpdateAction(action.id) { cur ->
@@ -974,6 +978,75 @@ class OverlayMacroSettingsView(
                 })
             }
         }
+    }
+
+    private fun addPickTargetBtn(label: String, onClick: () -> Unit) {
+        bodyContainer.addView(makeBtn(label, "#0F766E", onClick = onClick).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        })
+    }
+
+    private fun addBranchActionsControls(
+        parentId: String,
+        slot: Slot,
+        children: List<Action>,
+        accentBgHex: String
+    ) {
+        // Show existing branch actions with 1-tap 🎯 target positioning & ✎ edit
+        if (children.isNotEmpty()) {
+            children.forEachIndexed { idx, child ->
+                val row = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(7), dp(5), dp(7), dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                        bottomMargin = dp(4)
+                    }
+                }
+                row.addView(TextView(context).apply {
+                    text = "${idx + 1}. ${child.kind.label} • ${child.summary()}"
+                    setTextColor(Color.parseColor("#E2E8F0"))
+                    textSize = 10.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }
+                })
+                if (isPositionable(child)) {
+                    row.addView(makeSmallIconBtn("🎯", "#0F766E") {
+                        onPickTargetOnScreen(child.id)
+                    })
+                }
+                row.addView(makeSmallIconBtn("✎", "#0284C7") {
+                    editingActionId = child.id
+                    rebuildBody()
+                })
+                row.addView(makeSmallIconBtn("✕", "#991B1B", marginEndDp = 0) {
+                    onDeleteAction(child.id)
+                })
+                bodyContainer.addView(row)
+            }
+        }
+
+        val btnRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        btnRow.addView(makeBtn("+ 🎯 Target Klik", "#0F766E", marginEndDp = 5) {
+            onAddBranchClickTargetOnScreen(parentId, slot)
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.15f).apply { marginEnd = dp(5) })
+        btnRow.addView(makeBtn("+ Aksi Lain (${children.size})", accentBgHex) {
+            addPickerRef = ContainerRef(parentId, slot)
+            rebuildBody()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        bodyContainer.addView(btnRow)
     }
 
     private fun addBranchModePicker(title: String, initial: NotFoundMode, onSelect: (NotFoundMode) -> Unit) {

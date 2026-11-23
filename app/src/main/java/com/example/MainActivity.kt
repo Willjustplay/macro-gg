@@ -127,6 +127,7 @@ private fun MacroGGApp() {
     var toolsSubTab by remember { mutableIntStateOf(0) } // 0=Lua, 1=Log, 2=Pengaturan
     var editingMacroId by remember { mutableStateOf<String?>(null) }
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
+    var pendingExportImageName by remember { mutableStateOf<String?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -150,6 +151,16 @@ private fun MacroGGApp() {
         pendingExportMacro = null
         if (uri != null && macro != null) {
             viewModel.exportMacroToUri(macro, uri)
+        }
+    }
+
+    val exportImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("image/png")
+    ) { uri ->
+        val imgName = pendingExportImageName
+        pendingExportImageName = null
+        if (uri != null && imgName != null) {
+            viewModel.exportImageToUri(imgName, uri)
         }
     }
 
@@ -290,6 +301,17 @@ private fun MacroGGApp() {
                         targetActionId = targetActionId
                     )
                 },
+                onLaunchTargetPickerOverlay = { m, targetActionId ->
+                    AutomationCoordinator.selectMacro(m)
+                    if (Settings.canDrawOverlays(context)) {
+                        (context as? Activity)?.moveTaskToBack(true)
+                    }
+                    launchOverlay(
+                        action = FloatingOverlayService.ACTION_PICK_TARGET,
+                        addToMacro = false,
+                        targetActionId = targetActionId
+                    )
+                },
                 onLaunchRecorderOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay(FloatingOverlayService.ACTION_OPEN_RECORDER)
@@ -394,6 +416,10 @@ private fun MacroGGApp() {
                                 galleryImageLauncher.launch("image/*")
                             },
                             onRecropImage = viewModel::recropImage,
+                            onExportImage = { asset ->
+                                pendingExportImageName = asset.name
+                                exportImageLauncher.launch(asset.name)
+                            },
                             onRenameImage = viewModel::renameImage,
                             onDeleteImage = viewModel::deleteImage
                         )

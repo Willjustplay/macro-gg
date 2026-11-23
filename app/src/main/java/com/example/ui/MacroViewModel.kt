@@ -129,8 +129,21 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     } ?: error("Tidak dapat membuka file tujuan.")
                 }
             }
-            if (result.isSuccess) _messages.emit("Macro '${macro.name}' diekspor (.zip).")
-            else _messages.emit("Gagal ekspor: ${result.exceptionOrNull()?.message}")
+            result.onSuccess { summary ->
+                val imgNote = if (summary.imagesExported > 0) {
+                    "${summary.imagesExported} file gambar"
+                } else {
+                    "tanpa gambar"
+                }
+                val macroNote = if (summary.macrosExported > 1) {
+                    "${summary.macrosExported} macro (termasuk sub-macro)"
+                } else {
+                    "1 macro"
+                }
+                _messages.emit("Diekspor '${macro.name}': $macroNote & $imgNote (.zip).")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor: ${err.message}")
+            }
         }
     }
 
@@ -143,8 +156,26 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     } ?: error("Tidak dapat membuka file backup.")
                 }
             }
-            if (result.isSuccess) _messages.emit("Semua data berhasil di-backup (.zip).")
-            else _messages.emit("Gagal backup: ${result.exceptionOrNull()?.message}")
+            result.onSuccess { summary ->
+                _messages.emit("Backup selesai: ${summary.macrosExported} macro & ${summary.imagesExported} file gambar (.zip).")
+            }.onFailure { err ->
+                _messages.emit("Gagal backup: ${err.message}")
+            }
+        }
+    }
+
+    fun exportImageToUri(imageName: String, uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val ok = appContext.contentResolver.openOutputStream(uri)?.use { out ->
+                        store.exportImagePng(imageName, out)
+                    } ?: error("Tidak dapat membuka file tujuan.")
+                    if (!ok) error("File gambar '$imageName' tidak ditemukan.")
+                }
+            }
+            if (result.isSuccess) _messages.emit("Gambar '$imageName' disimpan (.png).")
+            else _messages.emit("Gagal menyimpan gambar: ${result.exceptionOrNull()?.message}")
         }
     }
 

@@ -11,14 +11,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import java.io.BufferedInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
-import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 /**
@@ -192,12 +189,22 @@ class LocalStore(context: Context) {
 
     fun saveImageBytes(desiredName: String, pngBytes: ByteArray): String {
         val file = imageFile(desiredName)
-        val bmp = BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size)
-            ?: throw IllegalArgumentException("File gambar tidak valid.")
-        try {
-            bmp.savePng(file)
-        } finally {
-            bmp.recycle()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw IllegalArgumentException("File gambar tidak valid.")
+        }
+        file.parentFile?.mkdirs()
+        if (bounds.outMimeType == "image/png") {
+            file.writeBytes(pngBytes)
+        } else {
+            val bmp = BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size)
+                ?: throw IllegalArgumentException("File gambar tidak valid.")
+            try {
+                bmp.savePng(file)
+            } finally {
+                bmp.recycle()
+            }
         }
         templateCache.remove(file.name)
         _images.value = loadImages()
@@ -212,6 +219,20 @@ class LocalStore(context: Context) {
         if (!oldFile.renameTo(newFile)) return null
         templateCache.remove(oldFile.name)
         templateCache.remove(newFile.name)
+        // Update any macro referencing the renamed image so export & detection stay intact
+        val oldNormalized = oldFile.name
+        for (m in _macros.value) {
+            if (m.imageNames().any { normalizeImageName(it) == oldNormalized }) {
+                val updated = m.copy(
+                    actions = m.actions.mapAllActions { a ->
+                        if (a is ImageAction && normalizeImageName(a.imageName) == oldNormalized) {
+                            a.copy(imageName = newName)
+                        } else a
+                    }
+                )
+                saveMacro(updated)
+            }
+        }
         _images.value = loadImages()
         return newName
     }
@@ -221,6 +242,21 @@ class LocalStore(context: Context) {
         file.delete()
         templateCache.remove(file.name)
         _images.value = loadImages()
+    }
+
+    fun exportImagePng(name: String, output: OutputStream): Boolean {
+        val file = resolveExistingImageFile(name) ?: return false
+        output.use { out ->
+            out.write(file.readBytes())
+        }
+        return true
+    }
+
+    private fun resolveExistingImageFile(name: String): File? {
+        val normalized = imageFile(name)
+        if (normalized.exists()) return normalized
+        val raw = File(imagesDir, name.substringAfterLast('/').substringAfterLast('\\'))
+        return if (raw.exists()) raw else null
     }
 
     fun loadTemplate(name: String): PreparedTemplate? {
@@ -248,26 +284,31 @@ class LocalStore(context: Context) {
 
     // ---- Export / Import ----
 
-    /** Exports one macro + all PNG templates it references as a portable .zip file. */
-    fun exportMacroZip(macro: Macro, output: OutputStream) {
-        ZipOutputStream(output).use { zip ->
-            zip.putNextEntry(ZipEntry("macro.json"))
-            zip.write(json.encodeToString(macro).toByteArray(Charsets.UTF_8))
-            zip.closeEntry()
+    data class ExportSummary(
+        val macrosExported: Int,
+        val imagesExported: Int
+    )
 
-            for (imgName in macro.imageNames()) {
-                val file = imageFile(imgName)
-                if (file.exists()) {
-                    zip.putNextEntry(ZipEntry("images/${file.name}"))
-                    zip.write(file.readBytes())
-                    zip.closeEntry()
-                }
-            }
-        }
+    /**
+     * Exports a macro, all linked sub-macros, and all PNG target images they reference
+     * into a portable .zip bundle (macro.json, linked_macros folder, and images folder).
+     */
+    fun exportMacroZip(macro: Macro, output: OutputStream): ExportSummary {
+        val latest = getMacroById(macro.id) ?: macro
+        val res = MacroBundleCodec.writeMacroZip(
+            root = latest,
+            lookupMacro = ::getMacroById,
+            loadImage = { imgName ->
+                resolveExistingImageFile(imgName)?.let { f -> f.name to f.readBytes() }
+            },
+            output = output
+        )
+        return ExportSummary(macrosExported = res.macrosExported, imagesExported = res.imagesExported)
     }
 
     /** Exports every macro, Lua script, and target image into a single backup .zip file. */
-    fun exportAllBackupZip(output: OutputStream) {
+    fun exportAllBackupZip(output: OutputStream): ExportSummary {
+        var imagesWritten = 0
         ZipOutputStream(output).use { zip ->
             for (macro in _macros.value) {
                 zip.putNextEntry(ZipEntry("macros/${sanitizeFileName(macro.id)}.json"))
@@ -285,9 +326,11 @@ class LocalStore(context: Context) {
                     zip.putNextEntry(ZipEntry("images/${f.name}"))
                     zip.write(f.readBytes())
                     zip.closeEntry()
+                    imagesWritten++
                 }
             }
         }
+        return ExportSummary(macrosExported = _macros.value.size, imagesExported = imagesWritten)
     }
 
     data class ImportSummary(
@@ -297,84 +340,29 @@ class LocalStore(context: Context) {
     )
 
     /**
-     * Imports either a single macro JSON, a single macro .zip bundle, or a full backup .zip.
+     * Imports either a single macro JSON, a single macro .zip bundle (with linked macros & PNGs),
+     * or a full backup .zip. Preserves [RunMacroAction] links by remapping old macro IDs to new IDs.
      */
     fun importFromStream(input: InputStream): ImportSummary {
-        val buffered = BufferedInputStream(input)
-        buffered.mark(4)
-        val header = ByteArray(4)
-        val read = buffered.read(header)
-        buffered.reset()
-
-        val isZip = read >= 2 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
-        if (!isZip) {
-            val text = buffered.readBytes().toString(Charsets.UTF_8)
-            val macro = json.decodeFromString<Macro>(text)
-            saveMacro(macro.copy(id = newId(), actions = macro.actions.map { it.withNewIds() }))
-            return ImportSummary(macrosImported = 1, scriptsImported = 0, imagesImported = 0)
-        }
-
-        var macrosCount = 0
-        var scriptsCount = 0
+        val decoded = MacroBundleCodec.readBundle(input)
         var imagesCount = 0
-        ZipInputStream(buffered).use { zis ->
-            while (true) {
-                val entry = zis.nextEntry ?: break
-                if (entry.isDirectory) {
-                    zis.closeEntry()
-                    continue
-                }
-                val bytes = readZipEntryBytes(zis)
-                val name = entry.name
-                when {
-                    name == "macro.json" || (name.startsWith("macros/") && name.endsWith(".json")) -> {
-                        val macro = runCatching {
-                            json.decodeFromString<Macro>(bytes.toString(Charsets.UTF_8))
-                        }.getOrNull()
-                        if (macro != null) {
-                            saveMacro(
-                                macro.copy(
-                                    id = newId(),
-                                    actions = macro.actions.map { it.withNewIds() }
-                                )
-                            )
-                            macrosCount++
-                        }
-                    }
-                    name.startsWith("scripts/") && name.endsWith(".json") -> {
-                        val script = runCatching {
-                            json.decodeFromString<LuaScript>(bytes.toString(Charsets.UTF_8))
-                        }.getOrNull()
-                        if (script != null) {
-                            saveScript(script.copy(id = newId()))
-                            scriptsCount++
-                        }
-                    }
-                    name.startsWith("images/") && name.endsWith(".png", ignoreCase = true) -> {
-                        val fileName = name.substringAfterLast('/')
-                        if (fileName.isNotBlank()) {
-                            runCatching {
-                                saveImageBytes(fileName, bytes)
-                                imagesCount++
-                            }
-                        }
-                    }
-                }
-                zis.closeEntry()
+        for ((fileName, bytes) in decoded.images) {
+            runCatching {
+                saveImageBytes(fileName, bytes)
+                imagesCount++
             }
         }
-        return ImportSummary(macrosCount, scriptsCount, imagesCount)
-    }
-
-    private fun readZipEntryBytes(zis: ZipInputStream): ByteArray {
-        val out = ByteArrayOutputStream()
-        val buf = ByteArray(4096)
-        while (true) {
-            val n = zis.read(buf)
-            if (n <= 0) break
-            out.write(buf, 0, n)
+        for (script in decoded.scripts) {
+            saveScript(script)
         }
-        return out.toByteArray()
+        for (macro in decoded.macros) {
+            saveMacro(macro)
+        }
+        return ImportSummary(
+            macrosImported = decoded.macros.size,
+            scriptsImported = decoded.scripts.size,
+            imagesImported = imagesCount
+        )
     }
 
     private fun seedExamplesIfFirstRun() {

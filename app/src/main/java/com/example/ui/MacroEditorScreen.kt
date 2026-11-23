@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -72,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
+import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ImageAction
@@ -109,6 +111,7 @@ fun MacroEditorScreen(
     onRecropImage: (String, Bitmap) -> Unit,
     onLaunchOverlay: (Macro) -> Unit,
     onLaunchCropOverlay: (Macro, String?) -> Unit,
+    onLaunchTargetPickerOverlay: (Macro, String) -> Unit,
     onLaunchRecorderOverlay: (Macro) -> Unit,
     onBack: () -> Unit
 ) {
@@ -236,6 +239,13 @@ fun MacroEditorScreen(
                         depth = 0,
                         imageByName = imageByName,
                         onEdit = { editingAction = it },
+                        onPickTargetOnScreen = { id -> onLaunchTargetPickerOverlay(macro, id) },
+                        onAddBranchClickTarget = { parentId, slot ->
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updatedMacro = macro.copy(actions = macro.actions.insertInto(ContainerRef(parentId, slot), newClick))
+                            onUpdateMacro(updatedMacro)
+                            onLaunchTargetPickerOverlay(updatedMacro, newClick.id)
+                        },
                         onToggleEnabled = { id, enabled ->
                             mutateActions { it.updateAction(id) { a -> a.withEnabled(enabled) } }
                         },
@@ -280,6 +290,12 @@ fun MacroEditorScreen(
                 editingAction = null
                 onLaunchCropOverlay(macro, actionId)
             },
+            onPickTargetOnScreen = { updatedDraft, targetActionId ->
+                val updatedMacro = macro.copy(actions = macro.actions.updateAction(updatedDraft.id) { updatedDraft })
+                onUpdateMacro(updatedMacro)
+                editingAction = null
+                onLaunchTargetPickerOverlay(updatedMacro, targetActionId)
+            },
             onRecropImage = onRecropImage,
             onSave = { updated ->
                 mutateActions { it.updateAction(updated.id) { updated } }
@@ -310,6 +326,8 @@ private fun ActionNodeCard(
     depth: Int,
     imageByName: Map<String, ImageAsset>,
     onEdit: (Action) -> Unit,
+    onPickTargetOnScreen: (String) -> Unit,
+    onAddBranchClickTarget: (String, Slot) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
     onMove: (String, Int) -> Unit,
     onDuplicate: (String) -> Unit,
@@ -405,11 +423,29 @@ private fun ActionNodeCard(
                     )
                 }
 
+                if (isPositionableAction(action)) {
+                    IconButton(onClick = { onPickTargetOnScreen(action.id) }) {
+                        Icon(
+                            Icons.Filled.MyLocation,
+                            contentDescription = "Atur Posisi di Layar",
+                            tint = accent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
                 Box {
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "Opsi")
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        if (isPositionableAction(action)) {
+                            DropdownMenuItem(
+                                text = { Text("Atur Posisi di Layar") },
+                                leadingIcon = { Icon(Icons.Filled.MyLocation, null) },
+                                onClick = { menuExpanded = false; onPickTargetOnScreen(action.id) }
+                            )
+                        }
                         if (index > 0) {
                             DropdownMenuItem(
                                 text = { Text("Geser ke Atas") },
@@ -474,11 +510,21 @@ private fun ActionNodeCard(
                                         "${slot.label} (${children.size})",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = branchColor,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f)
                                     )
                                     TextButton(
+                                        onClick = { onAddBranchClickTarget(action.id, slot) },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(13.dp), tint = branchColor)
+                                        Spacer(Modifier.width(3.dp))
+                                        Text("Target Klik", style = MaterialTheme.typography.labelSmall, color = branchColor)
+                                    }
+                                    TextButton(
                                         onClick = { onAddChild(action.id, slot) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
                                         modifier = Modifier.height(28.dp)
                                     ) {
                                         Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = branchColor)
@@ -494,6 +540,8 @@ private fun ActionNodeCard(
                                         depth = depth + 1,
                                         imageByName = imageByName,
                                         onEdit = onEdit,
+                                        onPickTargetOnScreen = onPickTargetOnScreen,
+                                        onAddBranchClickTarget = onAddBranchClickTarget,
                                         onToggleEnabled = onToggleEnabled,
                                         onMove = onMove,
                                         onDuplicate = onDuplicate,

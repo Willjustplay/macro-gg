@@ -387,7 +387,7 @@ private fun MacroListCard(
                             onClick = { menuOpen = false; onDuplicate() }
                         )
                         DropdownMenuItem(
-                            text = { Text("Ekspor (.zip)") },
+                            text = { Text("Ekspor Macro + Gambar (.zip)") },
                             leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
                             onClick = { menuOpen = false; onExport() }
                         )

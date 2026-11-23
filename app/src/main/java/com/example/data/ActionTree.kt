@@ -106,6 +106,20 @@ fun List<Action>.walk(): Sequence<Action> = sequence {
     }
 }
 
+/** Depth-first walk carrying the immediate enclosing branch [Slot] (null for top-level actions). */
+fun List<Action>.walkWithSlot(enclosing: Slot? = null): Sequence<Pair<Action, Slot?>> = sequence {
+    for (a in this@walkWithSlot) {
+        yield(a to enclosing)
+        for (slot in a.slots()) yieldAll(a.childList(slot).walkWithSlot(slot))
+    }
+}
+
+/** Recursively transforms every action in the tree. */
+fun List<Action>.mapAllActions(transform: (Action) -> Action): List<Action> = map { a ->
+    val mappedChildren = a.mapChildLists { it.mapAllActions(transform) }
+    transform(mappedChildren)
+}
+
 fun Macro.imageNames(): Set<String> =
     actions.walk().filterIsInstance<ImageAction>().map { it.imageName }.filter { it.isNotBlank() }.toSet()
 

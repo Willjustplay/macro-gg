@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -96,6 +97,7 @@ fun ActionEditorSheet(
     screenW: Int,
     screenH: Int,
     onLaunchCropForAction: (actionId: String) -> Unit,
+    onPickTargetOnScreen: (updatedDraft: Action, targetActionId: String) -> Unit,
     onRecropImage: (String, Bitmap) -> Unit,
     onSave: (Action) -> Unit,
     onDismiss: () -> Unit
@@ -138,6 +140,9 @@ fun ActionEditorSheet(
 
             when (val a = draft) {
                 is ClickAction -> {
+                    PickOnScreenButton("Atur Posisi Klik di Layar") {
+                        onPickTargetOnScreen(draft, a.id)
+                    }
                     CoordRow(a.x, a.y) { nx, ny -> draft = a.copy(x = nx, y = ny) }
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NumberField("Durasi tekan (ms)", a.durationMs.toString(), Modifier.weight(1f)) {
@@ -158,6 +163,9 @@ fun ActionEditorSheet(
                 }
 
                 is LongPressAction -> {
+                    PickOnScreenButton("Atur Posisi Tahan di Layar") {
+                        onPickTargetOnScreen(draft, a.id)
+                    }
                     CoordRow(a.x, a.y) { nx, ny -> draft = a.copy(x = nx, y = ny) }
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NumberField("Durasi tahan (ms)", a.durationMs.toString(), Modifier.weight(1f)) {
@@ -170,6 +178,9 @@ fun ActionEditorSheet(
                 }
 
                 is SwipeAction -> {
+                    PickOnScreenButton("Atur Garis Swipe A→B di Layar") {
+                        onPickTargetOnScreen(draft, a.id)
+                    }
                     Text("Titik Awal (A)", style = MaterialTheme.typography.labelMedium)
                     CoordRow(a.x1, a.y1) { nx, ny -> draft = a.copy(x1 = nx, y1 = ny) }
                     Text("Titik Akhir (B)", style = MaterialTheme.typography.labelMedium)
@@ -185,6 +196,9 @@ fun ActionEditorSheet(
                 }
 
                 is ZoomAction -> {
+                    PickOnScreenButton("Atur Titik Pusat Zoom di Layar") {
+                        onPickTargetOnScreen(draft, a.id)
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
                             selected = a.zoomIn,
@@ -338,6 +352,15 @@ fun ActionEditorSheet(
                         onModeChange = { draft = a.copy(foundMode = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(thenActions = a.thenActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
                         onDeleteChild = { cid -> draft = a.copy(thenActions = a.thenActions.filter { it.id != cid }) },
                         screenW = screenW,
                         screenH = screenH,
@@ -373,6 +396,15 @@ fun ActionEditorSheet(
                         onModeChange = { draft = a.copy(notFound = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(elseActions = a.elseActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
                         onDeleteChild = { cid -> draft = a.copy(elseActions = a.elseActions.filter { it.id != cid }) },
                         screenW = screenW,
                         screenH = screenH,
@@ -418,6 +450,9 @@ fun ActionEditorSheet(
                 }
 
                 is ColorAction -> {
+                    PickOnScreenButton("Pilih Posisi & Warna di Layar") {
+                        onPickTargetOnScreen(draft, a.id)
+                    }
                     if (lastPickedPixel != null) {
                         OutlinedButton(
                             onClick = {
@@ -477,6 +512,15 @@ fun ActionEditorSheet(
                         onModeChange = { draft = a.copy(foundMode = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(thenActions = a.thenActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
                         onDeleteChild = { cid -> draft = a.copy(thenActions = a.thenActions.filter { it.id != cid }) },
                         screenW = screenW,
                         screenH = screenH,
@@ -500,6 +544,15 @@ fun ActionEditorSheet(
                         onModeChange = { draft = a.copy(notFound = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
+                        onAddClickTargetOnScreen = {
+                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+                            val updated = a.copy(elseActions = a.elseActions + newClick)
+                            draft = updated
+                            onPickTargetOnScreen(updated, newClick.id)
+                        },
+                        onPickChildOnScreen = { childId ->
+                            onPickTargetOnScreen(draft, childId)
+                        },
                         onDeleteChild = { cid -> draft = a.copy(elseActions = a.elseActions.filter { it.id != cid }) },
                         screenW = screenW,
                         screenH = screenH,
@@ -611,6 +664,23 @@ fun ActionEditorSheet(
     }
 }
 
+@Composable
+private fun PickOnScreenButton(label: String, onClick: () -> Unit) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(label)
+    }
+}
+
+internal fun isPositionableAction(action: Action): Boolean = when (action) {
+    is ClickAction, is LongPressAction, is SwipeAction, is ZoomAction, is ColorAction -> true
+    else -> false
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BranchSectionEditor(
@@ -621,6 +691,8 @@ private fun BranchSectionEditor(
     onModeChange: (NotFoundMode) -> Unit,
     branchActions: List<Action>,
     onAddChild: (Action) -> Unit,
+    onAddClickTargetOnScreen: () -> Unit,
+    onPickChildOnScreen: (childId: String) -> Unit,
     onDeleteChild: (String) -> Unit,
     screenW: Int,
     screenH: Int,
@@ -645,18 +717,34 @@ private fun BranchSectionEditor(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = accent)
+                Text(
+                    title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = accent,
+                    modifier = Modifier.weight(1f)
+                )
                 TextButton(
                     onClick = { showAddRow = !showAddRow },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                 ) {
                     Icon(Icons.Filled.Add, null, modifier = Modifier.size(15.dp), tint = accent)
                     Spacer(Modifier.width(2.dp))
-                    Text("Tambah Aksi", style = MaterialTheme.typography.labelSmall, color = accent)
+                    Text("Aksi Lain", style = MaterialTheme.typography.labelSmall, color = accent)
                 }
             }
 
             extraContent?.invoke()
+
+            FilledTonalButton(
+                onClick = onAddClickTargetOnScreen,
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp), tint = accent)
+                Spacer(Modifier.width(6.dp))
+                Text("+ Tempatkan Target Klik di Layar", style = MaterialTheme.typography.labelMedium)
+            }
 
             if (showAddRow) {
                 val quickKinds = listOf(
@@ -696,6 +784,19 @@ private fun BranchSectionEditor(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            if (isPositionableAction(child)) {
+                                IconButton(
+                                    onClick = { onPickChildOnScreen(child.id) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.MyLocation,
+                                        contentDescription = "Atur Posisi di Layar",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = accent
+                                    )
+                                }
+                            }
                             IconButton(
                                 onClick = { onDeleteChild(child.id) },
                                 modifier = Modifier.size(28.dp)

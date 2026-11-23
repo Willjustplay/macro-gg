@@ -43,13 +43,17 @@ import com.example.R
 import com.example.data.Action
 import com.example.data.ClickAction
 import com.example.data.ColorAction
+import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
+import com.example.data.LoopAction
 import com.example.data.Macro
 import com.example.data.RecordedGesture
+import com.example.data.Slot
 import com.example.data.SwipeAction
 import com.example.data.ZoomAction
+import com.example.data.walkWithSlot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -114,6 +118,8 @@ class FloatingOverlayService : Service() {
     private var recorderOverlayView: OverlayRecorderView? = null
     private var recorderParams: WindowManager.LayoutParams? = null
 
+    private var targetPickerView: OverlayTargetPickerView? = null
+
     private var markerEditorView: View? = null
 
     private var matchBoxView: MatchHighlightView? = null
@@ -157,6 +163,14 @@ class FloatingOverlayService : Service() {
             ACTION_OPEN_RECORDER -> {
                 ensureOverlayRunning()
                 mainHandler.postDelayed({ openTouchRecorder() }, 200L)
+                return START_STICKY
+            }
+            ACTION_PICK_TARGET -> {
+                val targetActionId = intent.getStringExtra(EXTRA_TARGET_ACTION_ID)
+                ensureOverlayRunning()
+                if (!targetActionId.isNullOrBlank()) {
+                    mainHandler.postDelayed({ launchTargetPicker(targetActionId, reopenSettingsActionId = null) }, 180L)
+                }
                 return START_STICKY
             }
         }
@@ -552,6 +566,23 @@ class FloatingOverlayService : Service() {
                 dismissMacroSettingsPanel()
                 launchScreenshotCrop(addToMacro = true, targetActionId = null)
             },
+            onPickTargetOnScreen = { actionId ->
+                dismissMacroSettingsPanel()
+                launchTargetPicker(actionId, reopenSettingsActionId = actionId)
+            },
+            onAddBranchClickTargetOnScreen = { parentId, slot ->
+                refreshScreenSize()
+                val tapMs = store.settings.value.defaultTapDurationMs
+                val created = ClickAction(
+                    x = screenWidth / 2,
+                    y = screenHeight / 2,
+                    durationMs = tapMs,
+                    delayAfterMs = 250L
+                )
+                AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created)
+                dismissMacroSettingsPanel()
+                launchTargetPicker(created.id, reopenSettingsActionId = parentId)
+            },
             onClose = { dismissMacroSettingsPanel() }
         )
 
@@ -577,6 +608,150 @@ class FloatingOverlayService : Service() {
             try { windowManager.removeView(it) } catch (_: Throwable) {}
         }
         macroSettingsView = null
+    }
+
+    // ---- Interactive On-Screen Target Placement (Click / Swipe / Zoom / Color, incl. Then/Else) ----
+
+    private fun launchTargetPicker(actionId: String, reopenSettingsActionId: String? = null) {
+        if (targetPickerView != null) dismissTargetPicker()
+        if (isOverlayHidden) exitHideButtonsMode()
+        dismissMarkerEditor()
+        refreshScreenSize()
+
+        val found = AutomationCoordinator.activeMacro.value.actions
+            .walkWithSlot()
+            .firstOrNull { it.first.id == actionId }
+        if (found == null) {
+            Toast.makeText(this, "Aksi target tidak ditemukan.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val (action, slot) = found
+        val slotSuffix = when (slot) {
+            Slot.THEN -> " — Jika Ditemukan"
+            Slot.ELSE -> " — Jika Tidak Ditemukan"
+            Slot.BODY -> " — Perulangan"
+            null -> ""
+        }
+        val accentHex = when (slot) {
+            Slot.THEN -> "#10B981"
+            Slot.ELSE -> "#F59E0B"
+            Slot.BODY -> "#818CF8"
+            null -> "#2DD4BF"
+        }
+
+        val isDual: Boolean
+        val x1: Int
+        val y1: Int
+        val x2: Int
+        val y2: Int
+        val sampleColor: Boolean
+        val initHex: String?
+        val title: String
+        when (action) {
+            is ClickAction -> {
+                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                sampleColor = false; initHex = null
+                title = "🎯 Posisi Klik$slotSuffix"
+            }
+            is LongPressAction -> {
+                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                sampleColor = false; initHex = null
+                title = "🎯 Posisi Tahan$slotSuffix"
+            }
+            is SwipeAction -> {
+                isDual = true; x1 = action.x1; y1 = action.y1; x2 = action.x2; y2 = action.y2
+                sampleColor = false; initHex = null
+                title = "🎯 Garis Swipe A→B$slotSuffix"
+            }
+            is ZoomAction -> {
+                isDual = false; x1 = action.cx; y1 = action.cy; x2 = x1; y2 = y1
+                sampleColor = false; initHex = null
+                title = "🎯 Pusat Zoom$slotSuffix"
+            }
+            is ColorAction -> {
+                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                sampleColor = true; initHex = action.color
+                title = "🎯 Titik Warna$slotSuffix"
+            }
+            else -> {
+                Toast.makeText(this, "Aksi ini tidak memerlukan posisi layar.", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        if (sampleColor) {
+            ScreenCaptureService.highFrequencyCapture = true
+        }
+        setOverlayChromeVisibility(View.INVISIBLE)
+
+        val picker = OverlayTargetPickerView(
+            context = this,
+            title = title,
+            accentHex = accentHex,
+            isDualPoint = isDual,
+            initialX1 = x1,
+            initialY1 = y1,
+            initialX2 = x2,
+            initialY2 = y2,
+            sampleColor = sampleColor,
+            initialHexColor = initHex,
+            pixelSampler = if (sampleColor) { px, py -> ScreenCaptureService.samplePixelHex(px, py) } else null,
+            onSave = { nx1, ny1, nx2, ny2, hex ->
+                AutomationCoordinator.updateActionFromOverlay(actionId) { cur ->
+                    when (cur) {
+                        is ClickAction -> cur.copy(x = nx1, y = ny1)
+                        is LongPressAction -> cur.copy(x = nx1, y = ny1)
+                        is SwipeAction -> cur.copy(x1 = nx1, y1 = ny1, x2 = nx2, y2 = ny2)
+                        is ZoomAction -> cur.copy(cx = nx1, cy = ny1)
+                        is ColorAction -> cur.copy(x = nx1, y = ny1, color = hex ?: cur.color)
+                        else -> cur
+                    }
+                }
+                if (sampleColor && hex != null) {
+                    AutomationCoordinator.publishPickedPixel(nx1, ny1, hex)
+                }
+                dismissTargetPicker()
+                Toast.makeText(this, "Posisi target disimpan ($nx1, $ny1)", Toast.LENGTH_SHORT).show()
+                if (reopenSettingsActionId != null) {
+                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                }
+            },
+            onCancel = {
+                dismissTargetPicker()
+                if (reopenSettingsActionId != null) {
+                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                }
+            }
+        )
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).also { applyFullScreenCutout(it) }
+
+        if (safeAddView(picker, params)) {
+            targetPickerView = picker
+        } else {
+            setOverlayChromeVisibility(View.VISIBLE)
+            applyMarkerVisibility()
+        }
+    }
+
+    private fun dismissTargetPicker() {
+        targetPickerView?.let {
+            try { windowManager.removeView(it) } catch (_: Throwable) {}
+        }
+        targetPickerView = null
+        if (AutomationCoordinator.engineState.value != EngineState.RUNNING && !isColorSpyVisible) {
+            ScreenCaptureService.highFrequencyCapture = false
+        }
+        setOverlayChromeVisibility(View.VISIBLE)
+        applyMarkerVisibility()
     }
 
     private fun makeCompactButton(
@@ -1142,6 +1317,32 @@ class FloatingOverlayService : Service() {
 
     // ---- Visual Target Markers ----
 
+    private fun collectEnabledWithSlot(
+        actions: List<Action>,
+        enclosing: Slot? = null,
+        out: MutableList<Pair<Action, Slot?>> = ArrayList()
+    ): List<Pair<Action, Slot?>> {
+        for (a in actions) {
+            if (!a.enabled) continue
+            out += a to enclosing
+            when (a) {
+                is ImageAction -> {
+                    collectEnabledWithSlot(a.thenActions, Slot.THEN, out)
+                    collectEnabledWithSlot(a.elseActions, Slot.ELSE, out)
+                }
+                is ColorAction -> {
+                    collectEnabledWithSlot(a.thenActions, Slot.THEN, out)
+                    collectEnabledWithSlot(a.elseActions, Slot.ELSE, out)
+                }
+                is LoopAction -> {
+                    collectEnabledWithSlot(a.actions, Slot.BODY, out)
+                }
+                else -> Unit
+            }
+        }
+        return out
+    }
+
     private fun rebuildTargetMarkers(actions: List<Action>, isRunning: Boolean) {
         clearTargetMarkers()
         val markerSize = dp(36)
@@ -1152,21 +1353,41 @@ class FloatingOverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
 
-        val swipeSegments = actions
-            .filter { it.enabled }
+        val enabledEntries = collectEnabledWithSlot(actions)
+
+        val swipeSegments = enabledEntries
+            .map { it.first }
             .filterIsInstance<SwipeAction>()
             .map { SwipeSegment(it.id, it.x1.toFloat(), it.y1.toFloat(), it.x2.toFloat(), it.y2.toFloat()) }
         updateSwipePathOverlay(swipeSegments, isRunning, half.toFloat())
 
         var markerNumber = 0
-        actions.forEach { action ->
-            if (!action.enabled) return@forEach
+        enabledEntries.forEach { (action, slot) ->
+            val prefix = when (slot) {
+                Slot.THEN -> "✓"
+                Slot.ELSE -> "✗"
+                Slot.BODY -> "↻"
+                null -> ""
+            }
+            val strokeHex = when (slot) {
+                Slot.THEN -> "#10B981"
+                Slot.ELSE -> "#F59E0B"
+                Slot.BODY -> "#818CF8"
+                null -> "#99F6E4"
+            }
             when (action) {
                 is ClickAction -> {
                     markerNumber++
+                    val fillHex = when (slot) {
+                        Slot.THEN -> "#CC059669"
+                        Slot.ELSE -> "#CCB45309"
+                        Slot.BODY -> "#CC4338CA"
+                        null -> "#CC0D9488"
+                    }
                     addMarker(
-                        label = "$markerNumber",
-                        colorHex = "#CC0D9488",
+                        label = "$prefix$markerNumber",
+                        colorHex = fillHex,
+                        strokeHex = strokeHex,
                         cx = action.x,
                         cy = action.y,
                         size = markerSize,
@@ -1180,8 +1401,9 @@ class FloatingOverlayService : Service() {
                 is LongPressAction -> {
                     markerNumber++
                     addMarker(
-                        label = "${markerNumber}L",
+                        label = "${prefix}${markerNumber}L",
                         colorHex = "#CC4F46E5",
+                        strokeHex = strokeHex,
                         cx = action.x,
                         cy = action.y,
                         size = markerSize,
@@ -1195,8 +1417,9 @@ class FloatingOverlayService : Service() {
                 is SwipeAction -> {
                     markerNumber++
                     addMarker(
-                        label = "${markerNumber}A",
+                        label = "${prefix}${markerNumber}A",
                         colorHex = "#CC0284C7",
+                        strokeHex = strokeHex,
                         cx = action.x1,
                         cy = action.y1,
                         size = markerSize,
@@ -1208,8 +1431,9 @@ class FloatingOverlayService : Service() {
                         onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = false) }
                     )
                     addMarker(
-                        label = "${markerNumber}B",
+                        label = "${prefix}${markerNumber}B",
                         colorHex = "#CC0369A1",
+                        strokeHex = strokeHex,
                         cx = action.x2,
                         cy = action.y2,
                         size = markerSize,
@@ -1224,8 +1448,9 @@ class FloatingOverlayService : Service() {
                 is ZoomAction -> {
                     markerNumber++
                     addMarker(
-                        label = if (action.zoomIn) "Z+" else "Z−",
+                        label = if (action.zoomIn) "${prefix}Z+" else "${prefix}Z−",
                         colorHex = "#CC0891B2",
+                        strokeHex = strokeHex,
                         cx = action.cx,
                         cy = action.cy,
                         size = markerSize,
@@ -1239,8 +1464,9 @@ class FloatingOverlayService : Service() {
                 is ColorAction -> {
                     markerNumber++
                     addMarker(
-                        label = "${markerNumber}C",
+                        label = "${prefix}${markerNumber}C",
                         colorHex = "#CC7C3AED",
+                        strokeHex = strokeHex,
                         cx = action.x,
                         cy = action.y,
                         size = markerSize,
@@ -1260,6 +1486,7 @@ class FloatingOverlayService : Service() {
     private fun addMarker(
         label: String,
         colorHex: String,
+        strokeHex: String = "#99F6E4",
         cx: Int,
         cy: Int,
         size: Int,
@@ -1273,14 +1500,14 @@ class FloatingOverlayService : Service() {
         val view = TextView(this).apply {
             text = label
             setTextColor(Color.WHITE)
-            textSize = 11f
+            textSize = if (label.length >= 3) 9.5f else 11f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             alpha = if (isRunning) 0.4f else 0.92f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor(colorHex))
-                setStroke(dp(2), Color.parseColor("#99F6E4"))
+                setStroke(dp(2), Color.parseColor(strokeHex))
             }
         }
         val params = WindowManager.LayoutParams(
@@ -1674,6 +1901,7 @@ class FloatingOverlayService : Service() {
         hiddenBubbleView = null
         dismissMacroSettingsPanel()
         dismissCropOverlay()
+        dismissTargetPicker()
         dismissTouchRecorder()
         dismissMarkerEditor()
         clearTargetMarkers()
@@ -1701,6 +1929,7 @@ class FloatingOverlayService : Service() {
         const val ACTION_STOP = "com.example.action.STOP_OVERLAY"
         const val ACTION_OPEN_CROP = "com.example.action.OPEN_CROP"
         const val ACTION_OPEN_RECORDER = "com.example.action.OPEN_RECORDER"
+        const val ACTION_PICK_TARGET = "com.example.action.PICK_TARGET"
         const val EXTRA_ADD_TO_MACRO = "add_to_macro"
         const val EXTRA_TARGET_ACTION_ID = "target_action_id"
 

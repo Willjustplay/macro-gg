@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material3.AlertDialog
@@ -66,6 +67,7 @@ fun ImageLibraryScreen(
     onCropFromScreen: () -> Unit,
     onImportFromGallery: () -> Unit,
     onRecropImage: (String, Bitmap) -> Unit,
+    onExportImage: (ImageAsset) -> Unit,
     onRenameImage: (String, String) -> Unit,
     onDeleteImage: (String) -> Unit
 ) {
@@ -221,6 +223,17 @@ fun ImageLibraryScreen(
                         Icon(Icons.Filled.Crop, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Potong Ulang Gambar (Re-Crop)")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            selectedAsset = null
+                            onExportImage(asset)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.Download, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Ekspor File Gambar (.png)")
                     }
                     OutlinedTextField(
                         value = newName,
