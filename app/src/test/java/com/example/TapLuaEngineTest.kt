@@ -2,7 +2,8 @@ package com.example
 
 import com.example.automation.LuaBridge
 import com.example.automation.SandboxedLuaEngine
-import com.example.automation.ScreenColorSamplerService
+import com.example.data.Region
+import com.example.vision.MatchResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -13,7 +14,7 @@ class TapLuaEngineTest {
 
     @Test
     fun syntaxValidation_detectsValidAndInvalidLua() {
-        val ok = SandboxedLuaEngine.validateSyntax("local x = 10\nclick(x, 20)\nlog('ok')")
+        val ok = SandboxedLuaEngine.validateSyntax("local ok, x, y = findImage('play.png', 0.85)\nif ok then click(x, y) end")
         assertTrue(ok.isValid)
 
         val bad = SandboxedLuaEngine.validateSyntax("if true then click(10, 20)")
@@ -38,71 +39,73 @@ class TapLuaEngineTest {
     }
 
     @Test
-    fun tapLuaCustomApis_dispatchGesturesAndColorMatching() {
+    fun luaImageAndColorApis_workEndToEnd() {
         val logs = mutableListOf<String>()
         val clicks = mutableListOf<Pair<Int, Int>>()
         val bridge = FakeLuaBridge(
             logs = logs,
             clicks = clicks,
-            pixelArgb = 0xFF2DD4BF.toInt()
+            pixelArgb = 0xFF2DD4BF.toInt(),
+            fakeMatch = MatchResult(100, 200, 40, 20, 0.96)
         )
         val script = """
-            local w, h = getScreenSize()
-            local hex, r, g, b = getColor(100, 200)
-            log(w .. "x" .. h .. ":" .. hex)
-            if matchColor(100, 200, "#2ED4BE", 5) then
-                click(100, 200, 50)
-            end
+            local ok, x, y, score = findImage("play.png", 0.85)
+            log("found=" .. tostring(ok) .. ":" .. x .. "," .. y)
+            if ok then click(x, y) end
+            local clicked, cx, cy = clickImage("play.png", 0.85, 0, 5, -5)
+            log("clicked=" .. tostring(clicked) .. ":" .. cx .. "," .. cy)
+            local all = findAllImages("play.png", 0.85)
+            log("count=" .. #all)
+            local hex = getColor(10, 10)
+            log("hex=" .. hex)
         """.trimIndent()
 
         val result = SandboxedLuaEngine.execute(script, bridge)
         assertTrue(result.isSuccess)
-        assertEquals(listOf("1080x2400:#2DD4BF"), logs)
-        assertEquals(listOf(100 to 200), clicks)
+        assertEquals(listOf(120 to 210, 125 to 205), clicks)
+        assertEquals(
+            listOf("found=true:120,210", "clicked=true:125,205", "count=1", "hex=#2DD4BF"),
+            logs
+        )
     }
 
     @Test
-    fun cooperativeAbortHook_stopsInfiniteLoopImmediately() {
-        val stopped = AtomicBoolean(false)
-        val bridge = FakeLuaBridge(stoppedFlag = stopped)
-
-        val worker = Thread {
-            SandboxedLuaEngine.execute("while true do local a = 1 + 1 end", bridge)
+    fun cooperativeStop_abortsInfiniteLoopQuickly() {
+        val stopFlag = AtomicBoolean(false)
+        val bridge = FakeLuaBridge(stopFlag = stopFlag)
+        val thread = Thread {
+            Thread.sleep(60L)
+            stopFlag.set(true)
         }
-        worker.start()
-        Thread.sleep(60L)
-        stopped.set(true)
-        worker.join(2000L)
-        assertFalse("Infinite Lua loop must terminate promptly when stopped", worker.isAlive)
-    }
-
-    @Test
-    fun colorMatcher_respectsToleranceBounds() {
-        val teal = 0xFF2DD4BF.toInt()
-        assertTrue(ScreenColorSamplerService.colorMatches(teal, "#2DD4BF", 0))
-        assertTrue(ScreenColorSamplerService.colorMatches(teal, "#32D9C4", 10))
-        assertFalse(ScreenColorSamplerService.colorMatches(teal, "#FF0000", 15))
+        thread.start()
+        val started = System.currentTimeMillis()
+        val result = SandboxedLuaEngine.execute("while true do end", bridge)
+        val elapsed = System.currentTimeMillis() - started
+        assertTrue(result.isFailure)
+        assertTrue("Expected fast stop, got ${elapsed}ms", elapsed < 2000L)
     }
 
     private class FakeLuaBridge(
         private val logs: MutableList<String> = mutableListOf(),
         private val clicks: MutableList<Pair<Int, Int>> = mutableListOf(),
-        private val pixelArgb: Int? = 0xFF000000.toInt(),
-        private val stoppedFlag: AtomicBoolean = AtomicBoolean(false)
+        private val pixelArgb: Int? = null,
+        private val fakeMatch: MatchResult? = null,
+        private val stopFlag: AtomicBoolean = AtomicBoolean(false)
     ) : LuaBridge {
         override val screenWidth: Int = 1080
         override val screenHeight: Int = 2400
-        override fun isStopped(): Boolean = stoppedFlag.get()
+        override fun isStopped(): Boolean = stopFlag.get()
         override fun isPaused(): Boolean = false
         override fun click(x: Int, y: Int, durationMs: Int): Boolean {
-            clicks.add(x to y)
+            clicks += x to y
             return true
         }
         override fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean = true
         override fun sleepCooperative(ms: Long) {}
         override fun getColorArgb(x: Int, y: Int): Int? = pixelArgb
-        override fun log(message: String) {
-            logs.add(message)
-        }
+        override fun findImage(name: String, threshold: Double, region: Region?): MatchResult? = fakeMatch
+        override fun findAllImages(name: String, threshold: Double, maxResults: Int, region: Region?): List<MatchResult> =
+            listOfNotNull(fakeMatch)
+        override fun log(message: String) { logs += message }
     }
 }

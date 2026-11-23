@@ -8,13 +8,15 @@ import android.graphics.Path
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.accessibility.AccessibilityEvent
+import com.example.data.RecordedGesture
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import kotlin.math.roundToLong
 
-class TapLuaAccessibilityService : AccessibilityService() {
+class MacroAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -32,24 +34,20 @@ class TapLuaAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
-        if (instance === this) {
-            instance = null
-        }
+        if (instance === this) instance = null
         _isConnected.value = false
         ExecutionLogBus.warn("Accessibility Gesture Engine terputus.")
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        if (instance === this) {
-            instance = null
-        }
+        if (instance === this) instance = null
         _isConnected.value = false
         super.onDestroy()
     }
 
     suspend fun performClick(x: Float, y: Float, durationMs: Long): Boolean {
-        val safeDuration = durationMs.coerceIn(10L, 60000L)
+        val safeDuration = durationMs.coerceIn(10L, 60_000L)
         val path = Path().apply {
             moveTo(x.coerceAtLeast(0f), y.coerceAtLeast(0f))
         }
@@ -65,7 +63,7 @@ class TapLuaAccessibilityService : AccessibilityService() {
         y2: Float,
         durationMs: Long
     ): Boolean {
-        val safeDuration = durationMs.coerceIn(20L, 60000L)
+        val safeDuration = durationMs.coerceIn(20L, 60_000L)
         val path = Path().apply {
             moveTo(x1.coerceAtLeast(0f), y1.coerceAtLeast(0f))
             lineTo(x2.coerceAtLeast(0f), y2.coerceAtLeast(0f))
@@ -73,6 +71,29 @@ class TapLuaAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(path, 0L, safeDuration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGestureSuspended(gesture)
+    }
+
+    suspend fun performRecordedGesture(recorded: RecordedGesture, speed: Float): Boolean {
+        if (recorded.strokes.isEmpty()) return true
+        val safeSpeed = speed.coerceIn(0.25f, 5f)
+        val builder = GestureDescription.Builder()
+        var added = 0
+        for (s in recorded.strokes.take(GestureDescription.getMaxStrokeCount())) {
+            if (s.points.size < 2) continue
+            val path = Path()
+            path.moveTo(s.points[0].coerceAtLeast(0).toFloat(), s.points[1].coerceAtLeast(0).toFloat())
+            var i = 2
+            while (i + 1 < s.points.size) {
+                path.lineTo(s.points[i].coerceAtLeast(0).toFloat(), s.points[i + 1].coerceAtLeast(0).toFloat())
+                i += 2
+            }
+            val start = (s.startMs / safeSpeed).roundToLong().coerceAtLeast(0L)
+            val dur = (s.durationMs / safeSpeed).roundToLong().coerceIn(15L, 60_000L)
+            builder.addStroke(GestureDescription.StrokeDescription(path, start, dur))
+            added++
+        }
+        if (added == 0) return true
+        return dispatchGestureSuspended(builder.build())
     }
 
     private suspend fun dispatchGestureSuspended(gesture: GestureDescription): Boolean =
@@ -99,7 +120,7 @@ class TapLuaAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile
-        private var instance: TapLuaAccessibilityService? = null
+        private var instance: MacroAccessibilityService? = null
 
         private val _isConnected = MutableStateFlow(false)
         val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
@@ -110,7 +131,7 @@ class TapLuaAccessibilityService : AccessibilityService() {
                 context.contentResolver,
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: return false
-            val expected = ComponentName(context, TapLuaAccessibilityService::class.java)
+            val expected = ComponentName(context, MacroAccessibilityService::class.java)
             val splitter = TextUtils.SimpleStringSplitter(':')
             splitter.setString(enabledServices)
             while (splitter.hasNext()) {
@@ -134,6 +155,11 @@ class TapLuaAccessibilityService : AccessibilityService() {
         ): Boolean {
             val svc = instance ?: return false
             return svc.performSwipe(x1, y1, x2, y2, durationMs)
+        }
+
+        suspend fun dispatchRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean {
+            val svc = instance ?: return false
+            return svc.performRecordedGesture(gesture, speed)
         }
     }
 }

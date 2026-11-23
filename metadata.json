@@ -1,6 +1,5 @@
 {
-  "name": "TapLua",
-  "description": "Aplikasi otomasi klik dan swipe layar Android seperti Macrorify dengan visual macro, deteksi warna piksel, floating overlay + live log, engine script Lua kustom ter-sandbox, dan sinkronisasi cloud.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "name": "MacroGG",
+  "description": "Aplikasi otomasi layar Android offline bergaya Macrorify dengan Image Detection, Auto Clicker multi-titik, Crop gambar langsung dari overlay, Rekam & Replay sentuhan, kondisi If/Else, dan Lua Script Studio.",
+  "requestFramePermissions": []
 }

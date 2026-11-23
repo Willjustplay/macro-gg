@@ -1,11 +1,25 @@
 package com.example.automation
 
+import android.content.Context
+import com.example.data.Action
+import com.example.data.ClickAction
+import com.example.data.ColorAction
+import com.example.data.ImageAction
+import com.example.data.LocalStore
+import com.example.data.LongPressAction
 import com.example.data.LuaScript
-import com.example.data.MacroStep
-import com.example.data.MacroStepType
-import com.example.data.RunTargetType
-import com.example.data.ScriptRunStatus
-import com.example.data.VisualMacro
+import com.example.data.Macro
+import com.example.data.RecordAction
+import com.example.data.RecordedGesture
+import com.example.data.Region
+import com.example.data.SwipeAction
+import com.example.data.removeAction
+import com.example.data.updateAction
+import com.example.data.walk
+import com.example.vision.Frame
+import com.example.vision.MatchResult
+import com.example.vision.PreparedTemplate
+import com.example.vision.TemplateMatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,21 +54,24 @@ data class PickedPixel(
     val hexColor: String
 )
 
-data class RunSummary(
-    val targetType: RunTargetType,
-    val targetId: String,
-    val targetName: String,
-    val status: ScriptRunStatus,
-    val durationMs: Long,
-    val actionsExecuted: Int,
-    val summaryMessage: String
+data class MatchHighlight(
+    val match: MatchResult,
+    val label: String,
+    val timestampMs: Long = System.currentTimeMillis()
 )
 
+/**
+ * Central state machine coordinating the active Macro / Lua script,
+ * Android system services, Floating Overlay markers, and local persistence.
+ */
 object AutomationCoordinator {
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var activeJob: Job? = null
     private val stopRequested = AtomicBoolean(false)
     private val pausedFlag = AtomicBoolean(false)
+
+    @Volatile
+    private var store: LocalStore? = null
 
     private val _engineState = MutableStateFlow(EngineState.IDLE)
     val engineState: StateFlow<EngineState> = _engineState.asStateFlow()
@@ -62,98 +79,144 @@ object AutomationCoordinator {
     private val _activeMode = MutableStateFlow(AutomationMode.MACRO)
     val activeMode: StateFlow<AutomationMode> = _activeMode.asStateFlow()
 
-    private val _activeTargetName = MutableStateFlow("Belum ada target")
-    val activeTargetName: StateFlow<String> = _activeTargetName.asStateFlow()
-
-    private val _isOverlayActive = MutableStateFlow(false)
-    val isOverlayActive: StateFlow<Boolean> = _isOverlayActive.asStateFlow()
-
-    private val _activeMacro = MutableStateFlow(
-        VisualMacro(
-            id = "",
-            name = "Macro Baru",
-            description = "",
-            loopCount = 1,
-            loopDelayMs = 800,
-            stopOnError = true
-        )
-    )
-    val activeMacro: StateFlow<VisualMacro> = _activeMacro.asStateFlow()
-
-    private val _activeMacroSteps = MutableStateFlow<List<MacroStep>>(emptyList())
-    val activeMacroSteps: StateFlow<List<MacroStep>> = _activeMacroSteps.asStateFlow()
+    private val _activeMacro = MutableStateFlow(Macro(name = "Auto Clicker Cepat"))
+    val activeMacro: StateFlow<Macro> = _activeMacro.asStateFlow()
 
     private val _activeLuaScript = MutableStateFlow<LuaScript?>(null)
     val activeLuaScript: StateFlow<LuaScript?> = _activeLuaScript.asStateFlow()
 
+    private val _isOverlayActive = MutableStateFlow(false)
+    val isOverlayActive: StateFlow<Boolean> = _isOverlayActive.asStateFlow()
+
     private val _lastPickedPixel = MutableStateFlow<PickedPixel?>(null)
     val lastPickedPixel: StateFlow<PickedPixel?> = _lastPickedPixel.asStateFlow()
 
-    private var defaultTapDurationMs: Int = 60
-    private var jitterRadiusPx: Int = 4
-    private var onRunFinishedCallback: ((RunSummary) -> Unit)? = null
+    private val _matchHighlight = MutableStateFlow<MatchHighlight?>(null)
+    val matchHighlight: StateFlow<MatchHighlight?> = _matchHighlight.asStateFlow()
 
-    fun setRunFinishedListener(listener: ((RunSummary) -> Unit)?) {
-        onRunFinishedCallback = listener
+    private val _currentLoop = MutableStateFlow(0)
+    val currentLoop: StateFlow<Int> = _currentLoop.asStateFlow()
+
+    private val _actionsExecuted = MutableStateFlow(0)
+    val actionsExecuted: StateFlow<Int> = _actionsExecuted.asStateFlow()
+
+    fun attachStore(context: Context) {
+        if (store == null) {
+            store = LocalStore.get(context)
+        }
     }
 
-    fun updateUserTouchPreferences(tapDurationMs: Int, jitterPx: Int) {
-        defaultTapDurationMs = tapDurationMs.coerceIn(10, 5000)
-        jitterRadiusPx = jitterPx.coerceIn(0, 100)
-    }
+    fun getStore(): LocalStore? = store
 
     fun setOverlayActive(active: Boolean) {
         _isOverlayActive.value = active
     }
 
-    fun publishPickedPixel(x: Int, y: Int, hex: String) {
-        _lastPickedPixel.value = PickedPixel(x, y, hex)
-        ExecutionLogBus.color("Color Spy: ($x, $y) -> $hex")
+    fun activeTargetName(): String = when (_activeMode.value) {
+        AutomationMode.MACRO -> _activeMacro.value.name.ifBlank { "Macro" }
+        AutomationMode.LUA -> _activeLuaScript.value?.name?.ifBlank { "Lua" } ?: "Lua"
     }
 
-    fun selectMacroForRun(macro: VisualMacro, steps: List<MacroStep> = macro.parsedSteps()) {
+    fun selectMacro(macro: Macro) {
         _activeMode.value = AutomationMode.MACRO
         _activeMacro.value = macro
-        _activeMacroSteps.value = steps
-        _activeTargetName.value = macro.name.ifBlank { "Macro Visual" }
     }
 
-    fun syncDraftSteps(steps: List<MacroStep>) {
-        _activeMacroSteps.value = steps
-    }
-
-    fun selectLuaScriptForRun(script: LuaScript) {
+    fun selectLuaScript(script: LuaScript) {
         _activeMode.value = AutomationMode.LUA
         _activeLuaScript.value = script
-        _activeTargetName.value = script.title.ifBlank { "Script Lua" }
+    }
+
+    fun updateActiveMacro(persist: Boolean = true, transform: (Macro) -> Macro) {
+        val next = transform(_activeMacro.value)
+        _activeMacro.value = next
+        if (persist) {
+            store?.saveMacro(next)
+        }
     }
 
     fun addQuickClickMarker(x: Int, y: Int) {
+        val settings = store?.settings?.value
+        val tapMs = settings?.defaultTapDurationMs ?: 50L
         _activeMode.value = AutomationMode.MACRO
-        _activeMacroSteps.update { current ->
-            if (current.size >= 50) current
-            else current + MacroStep(
-                type = MacroStepType.CLICK,
-                label = "Klik #${current.size + 1}",
-                x = x,
-                y = y,
-                durationMs = defaultTapDurationMs,
-                delayAfterMs = 500
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions + ClickAction(x = x, y = y, durationMs = tapMs, delayAfterMs = 300L)
             )
         }
-        ExecutionLogBus.info("Titik klik #${_activeMacroSteps.value.size} ditambahkan di ($x, $y).")
+        ExecutionLogBus.info("Titik klik ditambahkan di ($x, $y).")
     }
 
-    fun updateMarkerPosition(stepId: String, newX: Int, newY: Int, isEndNode: Boolean = false) {
-        _activeMacroSteps.update { list ->
-            list.map { step ->
-                if (step.stepId == stepId) {
-                    if (isEndNode) step.copy(endX = newX, endY = newY)
-                    else step.copy(x = newX, y = newY)
-                } else step
-            }
+    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions + SwipeAction(x1 = x1, y1 = y1, x2 = x2, y2 = y2, durationMs = 350L, delayAfterMs = 300L)
+            )
+        }
+        ExecutionLogBus.info("Swipe ditambahkan ($x1,$y1) → ($x2,$y2).")
+    }
+
+    fun addQuickImageAction(imageName: String, threshold: Float = 0.85f, region: Region? = null) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions + ImageAction(
+                    imageName = imageName,
+                    threshold = threshold,
+                    timeoutMs = 3000L,
+                    region = region,
+                    clickOnFound = true
+                )
+            )
+        }
+        ExecutionLogBus.image("Aksi Deteksi Gambar '$imageName' ditambahkan ke '${_activeMacro.value.name}'.")
+    }
+
+    fun addRecordedGestures(gestures: List<RecordedGesture>) {
+        if (gestures.isEmpty()) return
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions + RecordAction(gestures = gestures))
+        }
+        ExecutionLogBus.action("Rekaman (${gestures.size} gestur) ditambahkan ke '${_activeMacro.value.name}'.")
+    }
+
+    fun updateMarkerPosition(actionId: String, newX: Int, newY: Int, isEndNode: Boolean = false) {
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions.updateAction(actionId) { a ->
+                    when (a) {
+                        is ClickAction -> a.copy(x = newX, y = newY)
+                        is LongPressAction -> a.copy(x = newX, y = newY)
+                        is SwipeAction -> if (isEndNode) a.copy(x2 = newX, y2 = newY) else a.copy(x1 = newX, y1 = newY)
+                        is ColorAction -> a.copy(x = newX, y = newY)
+                        else -> a
+                    }
+                }
+            )
         }
     }
+
+    fun updateActionFromOverlay(actionId: String, transform: (Action) -> Action) {
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions.updateAction(actionId, transform))
+        }
+    }
+
+    fun removeActionFromOverlay(actionId: String) {
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(actions = macro.actions.removeAction(actionId))
+        }
+    }
+
+    fun publishPickedPixel(x: Int, y: Int, hex: String) {
+        _lastPickedPixel.value = PickedPixel(x, y, hex)
+        ExecutionLogBus.color("Color Spy: ($x, $y) → $hex")
+    }
+
+    fun macroNeedsScreenCapture(macro: Macro): Boolean =
+        macro.actions.walk().any { it is ImageAction || it is ColorAction }
 
     fun togglePlayPause(screenWidth: Int, screenHeight: Int) {
         when (_engineState.value) {
@@ -163,173 +226,113 @@ object AutomationCoordinator {
                 if (_activeMode.value == AutomationMode.LUA) {
                     val script = _activeLuaScript.value
                     if (script == null || script.code.isBlank()) {
-                        ExecutionLogBus.warn("Pilih atau tulis script Lua terlebih dahulu di Lua Studio.")
+                        ExecutionLogBus.warn("Pilih atau tulis script Lua terlebih dahulu.")
                         return
                     }
                     runLuaScript(script, screenWidth, screenHeight)
                 } else {
                     val macro = _activeMacro.value
-                    val steps = _activeMacroSteps.value
-                    if (steps.isEmpty()) {
-                        ExecutionLogBus.warn("Tambahkan minimal satu titik klik/aksi sebelum menjalankan macro.")
+                    if (macro.actions.isEmpty()) {
+                        ExecutionLogBus.warn("Tambahkan minimal 1 aksi (Klik / Gambar / Rekam) terlebih dahulu.")
                         return
                     }
-                    runVisualMacro(macro, steps)
+                    runMacro(macro)
                 }
             }
         }
     }
 
-    fun runVisualMacro(macro: VisualMacro, steps: List<MacroStep>) {
+    fun runMacro(macro: Macro) {
         stop()
-        if (!TapLuaAccessibilityService.isConnected.value) {
+        if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
             ExecutionLogBus.error("Accessibility Service belum aktif! Aktifkan di Pengaturan Aksesibilitas.")
             return
         }
-        val usesColor = steps.any { it.type == MacroStepType.WAIT_COLOR }
-        if (usesColor && !ScreenColorSamplerService.isCapturing.value) {
-            ExecutionLogBus.warn("Deteksi warna layar belum aktif — langkah WAIT_COLOR mungkin timeout.")
+        if (macroNeedsScreenCapture(macro) && !ScreenCaptureService.isCapturing.value) {
+            ExecutionLogBus.warn("Tangkap layar belum aktif — deteksi gambar/warna tidak dapat melihat layar.")
         }
 
-        selectMacroForRun(macro, steps)
+        selectMacro(macro)
         stopRequested.set(false)
         pausedFlag.set(false)
+        _currentLoop.value = 0
+        _actionsExecuted.value = 0
         _engineState.value = EngineState.RUNNING
 
         val startedAt = System.currentTimeMillis()
-        val actionsCount = AtomicInteger(0)
+        val counter = AtomicInteger(0)
+        val localStore = store
 
         activeJob = engineScope.launch {
-            ExecutionLogBus.info("Memulai Visual Macro '${macro.name}' (${steps.size} langkah, loop=${if (macro.loopCount == 0) "∞" else macro.loopCount}).")
-            var finalStatus = ScriptRunStatus.SUCCESS
-            var finalMsg = "Macro selesai dengan lancar."
-            try {
-                var iteration = 0
-                val maxLoops = if (macro.loopCount <= 0) Int.MAX_VALUE else macro.loopCount
-                while (isActive && !stopRequested.get() && iteration < maxLoops) {
-                    iteration++
-                    ExecutionLogBus.info("Loop #$iteration dimulai.")
-                    for ((index, step) in steps.withIndex()) {
-                        waitIfPaused()
-                        if (stopRequested.get()) break
+            ExecutionLogBus.info(
+                "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
+            )
+            val runtime = object : MacroRuntime {
+                override fun isStopped(): Boolean = stopRequested.get() || !isActive
+                override suspend fun waitIfPaused() = this@AutomationCoordinator.waitIfPaused()
+                override suspend fun sleep(ms: Long) = cooperativeDelay(ms)
+                override suspend fun click(x: Int, y: Int, durationMs: Long): Boolean =
+                    MacroAccessibilityService.dispatchClick(x.toFloat(), y.toFloat(), durationMs)
 
-                        val success = executeMacroStep(index + 1, step, actionsCount)
-                        if (!success && macro.stopOnError) {
-                            finalStatus = ScriptRunStatus.ERROR
-                            finalMsg = "Langkah #${index + 1} (${step.label}) gagal atau timeout."
-                            stopRequested.set(true)
-                            break
-                        }
-                        if (step.delayAfterMs > 0 && !stopRequested.get()) {
-                            cooperativeDelay(step.delayAfterMs.toLong())
-                        }
-                    }
-                    if (!stopRequested.get() && iteration < maxLoops && macro.loopDelayMs > 0) {
-                        cooperativeDelay(macro.loopDelayMs.toLong())
+                override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
+                    MacroAccessibilityService.dispatchSwipe(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs)
+
+                override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean =
+                    MacroAccessibilityService.dispatchRecordedGesture(gesture, speed)
+
+                override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
+                override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
+                override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
+                override fun onMatchFound(match: MatchResult, label: String) {
+                    if (localStore?.settings?.value?.showDebugMatchBox != false) {
+                        flashMatchHighlight(match, label)
                     }
                 }
-                if (stopRequested.get() && finalStatus == ScriptRunStatus.SUCCESS) {
-                    finalStatus = ScriptRunStatus.STOPPED
-                    finalMsg = "Dihentikan oleh pengguna."
-                }
+                override fun onLoopChanged(loop: Int) { _currentLoop.value = loop }
+                override fun onActionExecuted() { _actionsExecuted.value = counter.incrementAndGet() }
+                override fun log(level: LogLevel, message: String) = ExecutionLogBus.log(level, message)
+            }
+
+            try {
+                MacroRunner(runtime).run(macro)
             } catch (_: CancellationException) {
-                finalStatus = ScriptRunStatus.STOPPED
-                finalMsg = "Dihentikan oleh pengguna."
+                ExecutionLogBus.info("Macro dihentikan.")
             } catch (e: Exception) {
-                finalStatus = ScriptRunStatus.ERROR
-                finalMsg = e.message ?: "Error tidak terduga saat menjalankan macro."
-                ExecutionLogBus.error(finalMsg)
+                _engineState.value = EngineState.ERROR
+                ExecutionLogBus.error("Error: ${e.message ?: "tidak diketahui"}")
             } finally {
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-                _engineState.value = if (finalStatus == ScriptRunStatus.ERROR) EngineState.ERROR else EngineState.IDLE
-                pausedFlag.set(false)
-                ExecutionLogBus.info("Selesai: $finalMsg (${actionsCount.get()} aksi, ${elapsed}ms).")
-                onRunFinishedCallback?.invoke(
-                    RunSummary(
-                        targetType = RunTargetType.MACRO,
-                        targetId = macro.id,
-                        targetName = macro.name.ifBlank { "Macro Visual" },
-                        status = finalStatus,
-                        durationMs = elapsed,
-                        actionsExecuted = actionsCount.get(),
-                        summaryMessage = finalMsg
-                    )
-                )
-            }
-        }
-    }
-
-    private suspend fun executeMacroStep(
-        number: Int,
-        step: MacroStep,
-        actionsCount: AtomicInteger
-    ): Boolean {
-        val jx = if (jitterRadiusPx > 0) Random.nextInt(-jitterRadiusPx, jitterRadiusPx + 1) else 0
-        val jy = if (jitterRadiusPx > 0) Random.nextInt(-jitterRadiusPx, jitterRadiusPx + 1) else 0
-        return when (step.type) {
-            MacroStepType.CLICK, MacroStepType.LONG_PRESS -> {
-                val tx = (step.x + jx).coerceAtLeast(0).toFloat()
-                val ty = (step.y + jy).coerceAtLeast(0).toFloat()
-                val dur = if (step.type == MacroStepType.LONG_PRESS) step.durationMs.coerceAtLeast(300) else step.durationMs
-                ExecutionLogBus.action("#$number ${step.type.label} (${tx.toInt()}, ${ty.toInt()}) ${dur}ms")
-                val ok = TapLuaAccessibilityService.dispatchClick(tx, ty, dur.toLong())
-                if (ok) actionsCount.incrementAndGet()
-                ok
-            }
-            MacroStepType.SWIPE -> {
-                ExecutionLogBus.action("#$number Swipe (${step.x},${step.y}) -> (${step.endX},${step.endY}) ${step.durationMs}ms")
-                val ok = TapLuaAccessibilityService.dispatchSwipe(
-                    step.x.toFloat(),
-                    step.y.toFloat(),
-                    step.endX.toFloat(),
-                    step.endY.toFloat(),
-                    step.durationMs.toLong()
-                )
-                if (ok) actionsCount.incrementAndGet()
-                ok
-            }
-            MacroStepType.WAIT -> {
-                ExecutionLogBus.info("#$number Jeda ${step.durationMs}ms")
-                cooperativeDelay(step.durationMs.toLong())
-                true
-            }
-            MacroStepType.WAIT_COLOR -> {
-                ExecutionLogBus.color("#$number Tunggu warna ${step.targetColorHex} di (${step.x},${step.y}) tol=${step.colorTolerance}")
-                val deadline = System.currentTimeMillis() + step.timeoutMs.toLong()
-                while (System.currentTimeMillis() <= deadline && !stopRequested.get()) {
-                    waitIfPaused()
-                    if (ScreenColorSamplerService.matchesColor(step.x, step.y, step.targetColorHex, step.colorTolerance)) {
-                        actionsCount.incrementAndGet()
-                        ExecutionLogBus.color("#$number Warna ${step.targetColorHex} cocok!")
-                        return true
-                    }
-                    cooperativeDelay(100L)
+                if (_engineState.value != EngineState.ERROR) {
+                    _engineState.value = EngineState.IDLE
                 }
-                ExecutionLogBus.warn("#$number Timeout menunggu warna ${step.targetColorHex}.")
-                false
+                pausedFlag.set(false)
+                ExecutionLogBus.info("Selesai (${counter.get()} aksi dalam ${elapsed}ms).")
             }
         }
     }
 
     fun runLuaScript(script: LuaScript, screenWidth: Int, screenHeight: Int) {
         stop()
-        if (!TapLuaAccessibilityService.isConnected.value) {
+        if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
             ExecutionLogBus.error("Accessibility Service belum aktif! Aktifkan terlebih dahulu.")
             return
         }
 
-        selectLuaScriptForRun(script)
+        selectLuaScript(script)
         stopRequested.set(false)
         pausedFlag.set(false)
+        _actionsExecuted.value = 0
         _engineState.value = EngineState.RUNNING
 
         val startedAt = System.currentTimeMillis()
-        val actionsCount = AtomicInteger(0)
+        val counter = AtomicInteger(0)
+        val localStore = store
+        val jitter = localStore?.settings?.value?.defaultJitterPx ?: 0
 
         activeJob = engineScope.launch {
-            ExecutionLogBus.lua("Menjalankan script Lua '${script.title}'...")
+            ExecutionLogBus.lua("Menjalankan script Lua '${script.name}'...")
             val bridge = object : LuaBridge {
                 override val screenWidth: Int = screenWidth
                 override val screenHeight: Int = screenHeight
@@ -337,36 +340,32 @@ object AutomationCoordinator {
                 override fun isPaused(): Boolean = pausedFlag.get()
 
                 override fun click(x: Int, y: Int, durationMs: Int): Boolean {
-                    val jx = if (jitterRadiusPx > 0) Random.nextInt(-jitterRadiusPx, jitterRadiusPx + 1) else 0
-                    val jy = if (jitterRadiusPx > 0) Random.nextInt(-jitterRadiusPx, jitterRadiusPx + 1) else 0
-                    val tx = (x + jx).coerceAtLeast(0).toFloat()
-                    val ty = (y + jy).coerceAtLeast(0).toFloat()
+                    val dx = if (jitter > 0) Random.nextInt(-jitter, jitter + 1) else 0
+                    val dy = if (jitter > 0) Random.nextInt(-jitter, jitter + 1) else 0
+                    val tx = (x + dx).coerceAtLeast(0).toFloat()
+                    val ty = (y + dy).coerceAtLeast(0).toFloat()
                     ExecutionLogBus.action("Lua click(${tx.toInt()}, ${ty.toInt()}, ${durationMs}ms)")
-                    val ok = runBlocking { TapLuaAccessibilityService.dispatchClick(tx, ty, durationMs.toLong()) }
-                    if (ok) actionsCount.incrementAndGet()
+                    val ok = runBlocking { MacroAccessibilityService.dispatchClick(tx, ty, durationMs.toLong()) }
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
                     return ok
                 }
 
                 override fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean {
-                    ExecutionLogBus.action("Lua swipe($x1,$y1 -> $x2,$y2, ${durationMs}ms)")
+                    ExecutionLogBus.action("Lua swipe($x1,$y1 → $x2,$y2, ${durationMs}ms)")
                     val ok = runBlocking {
-                        TapLuaAccessibilityService.dispatchSwipe(
+                        MacroAccessibilityService.dispatchSwipe(
                             x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs.toLong()
                         )
                     }
-                    if (ok) actionsCount.incrementAndGet()
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
                     return ok
                 }
 
                 override fun sleepCooperative(ms: Long) {
                     var remaining = ms
                     while (remaining > 0L) {
-                        while (pausedFlag.get() && !stopRequested.get()) {
-                            Thread.sleep(30L)
-                        }
-                        if (stopRequested.get() || !isActive) {
-                            throw LuaStopSignal(graceful = false)
-                        }
+                        while (pausedFlag.get() && !stopRequested.get()) Thread.sleep(30L)
+                        if (stopRequested.get() || !isActive) throw LuaStopSignal(graceful = false)
                         val chunk = minOf(remaining, 50L)
                         Thread.sleep(chunk)
                         remaining -= chunk
@@ -374,49 +373,64 @@ object AutomationCoordinator {
                 }
 
                 override fun getColorArgb(x: Int, y: Int): Int? {
-                    val argb = ScreenColorSamplerService.samplePixelArgb(x, y)
-                    if (argb == null) {
-                        ExecutionLogBus.warn("getColor($x,$y): Color Sampler belum aktif.")
-                    } else {
-                        actionsCount.incrementAndGet()
-                    }
+                    val argb = ScreenCaptureService.samplePixelArgb(x, y)
+                    if (argb == null) ExecutionLogBus.warn("getColor($x,$y): Tangkap layar belum aktif.")
                     return argb
                 }
 
-                override fun log(message: String) {
-                    ExecutionLogBus.lua(message)
+                override fun findImage(name: String, threshold: Double, region: Region?): MatchResult? {
+                    val tpl = localStore?.loadTemplate(name)
+                    if (tpl == null) {
+                        ExecutionLogBus.warn("findImage('$name'): gambar tidak ada di pustaka.")
+                        return null
+                    }
+                    val frame = ScreenCaptureService.captureFrame()
+                    if (frame == null) {
+                        ExecutionLogBus.warn("findImage('$name'): Tangkap layar belum aktif.")
+                        return null
+                    }
+                    val match = if (region != null) {
+                        TemplateMatcher.find(frame, tpl, threshold, region.left, region.top, region.right, region.bottom)
+                    } else {
+                        TemplateMatcher.find(frame, tpl, threshold)
+                    }
+                    if (match != null && localStore.settings.value.showDebugMatchBox) {
+                        flashMatchHighlight(match, "$name ${(match.score * 100).toInt()}%")
+                    }
+                    return match
                 }
+
+                override fun findAllImages(name: String, threshold: Double, maxResults: Int, region: Region?): List<MatchResult> {
+                    val tpl = localStore?.loadTemplate(name) ?: return emptyList()
+                    val frame = ScreenCaptureService.captureFrame() ?: return emptyList()
+                    return if (region != null) {
+                        TemplateMatcher.findAll(frame, tpl, threshold, maxResults, region.left, region.top, region.right, region.bottom)
+                    } else {
+                        TemplateMatcher.findAll(frame, tpl, threshold, maxResults)
+                    }
+                }
+
+                override fun log(message: String) = ExecutionLogBus.lua(message)
             }
 
             val result = SandboxedLuaEngine.execute(script.code, bridge)
             val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-
-            val (status, msg) = when {
-                result.isSuccess -> ScriptRunStatus.SUCCESS to "Script Lua selesai."
-                result.exceptionOrNull() is LuaStopSignal || stopRequested.get() ->
-                    ScriptRunStatus.STOPPED to "Script Lua dihentikan pengguna."
-                else -> {
-                    val errText = result.exceptionOrNull()?.message ?: "Runtime error Lua."
-                    ExecutionLogBus.error("Lua Error: $errText")
-                    ScriptRunStatus.ERROR to errText
-                }
+            val isError = result.isFailure && result.exceptionOrNull() !is LuaStopSignal && !stopRequested.get()
+            if (isError) {
+                ExecutionLogBus.error("Lua Error: ${result.exceptionOrNull()?.message}")
             }
-
-            _engineState.value = if (status == ScriptRunStatus.ERROR) EngineState.ERROR else EngineState.IDLE
+            _engineState.value = if (isError) EngineState.ERROR else EngineState.IDLE
             pausedFlag.set(false)
-            ExecutionLogBus.info("Lua selesai ($status): ${actionsCount.get()} aksi dalam ${elapsed}ms.")
+            ExecutionLogBus.info("Lua selesai (${counter.get()} aksi dalam ${elapsed}ms).")
+        }
+    }
 
-            onRunFinishedCallback?.invoke(
-                RunSummary(
-                    targetType = RunTargetType.LUA,
-                    targetId = script.id,
-                    targetName = script.title.ifBlank { "Script Lua" },
-                    status = status,
-                    durationMs = elapsed,
-                    actionsExecuted = actionsCount.get(),
-                    summaryMessage = msg
-                )
-            )
+    private fun flashMatchHighlight(match: MatchResult, label: String) {
+        val highlight = MatchHighlight(match, label)
+        _matchHighlight.value = highlight
+        engineScope.launch {
+            delay(750L)
+            _matchHighlight.update { cur -> if (cur?.timestampMs == highlight.timestampMs) null else cur }
         }
     }
 
@@ -424,7 +438,7 @@ object AutomationCoordinator {
         if (_engineState.value == EngineState.RUNNING) {
             pausedFlag.set(true)
             _engineState.value = EngineState.PAUSED
-            ExecutionLogBus.info("Otomasi dijeda.")
+            ExecutionLogBus.info("Dijeda.")
         }
     }
 
@@ -432,7 +446,7 @@ object AutomationCoordinator {
         if (_engineState.value == EngineState.PAUSED) {
             pausedFlag.set(false)
             _engineState.value = EngineState.RUNNING
-            ExecutionLogBus.info("Otomasi dilanjutkan.")
+            ExecutionLogBus.info("Dilanjutkan.")
         }
     }
 
@@ -443,7 +457,7 @@ object AutomationCoordinator {
         activeJob = null
         if (_engineState.value != EngineState.IDLE) {
             _engineState.value = EngineState.IDLE
-            ExecutionLogBus.info("Otomasi dihentikan.")
+            ExecutionLogBus.info("Dihentikan.")
         }
     }
 

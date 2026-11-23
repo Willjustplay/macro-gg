@@ -1,0 +1,112 @@
+package com.example.data
+
+/** Named child lists of container actions. */
+enum class Slot(val label: String) {
+    THEN("Jika ditemukan"),
+    ELSE("Jika tidak ditemukan"),
+    BODY("Isi perulangan")
+}
+
+/** Address of an action list: the root list ([parentId] == null) or a slot of a container action. */
+data class ContainerRef(val parentId: String? = null, val slot: Slot? = null) {
+    companion object {
+        val ROOT = ContainerRef()
+    }
+}
+
+fun Action.slots(): List<Slot> = when (this) {
+    is ImageAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
+    is LoopAction -> listOf(Slot.BODY)
+    else -> emptyList()
+}
+
+fun Action.childList(slot: Slot): List<Action> = when (this) {
+    is ImageAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is ColorAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is LoopAction -> if (slot == Slot.BODY) actions else emptyList()
+    else -> emptyList()
+}
+
+fun Action.withChildList(slot: Slot, list: List<Action>): Action = when (this) {
+    is ImageAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is ColorAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is LoopAction -> if (slot == Slot.BODY) copy(actions = list) else this
+    else -> this
+}
+
+/** Applies [block] to every child list recursively, returning a rebuilt action. */
+private fun Action.mapChildLists(block: (List<Action>) -> List<Action>): Action {
+    var result = this
+    for (slot in slots()) {
+        result = result.withChildList(slot, block(result.childList(slot)))
+    }
+    return result
+}
+
+fun List<Action>.findAction(id: String): Action? {
+    for (a in this) {
+        if (a.id == id) return a
+        for (slot in a.slots()) {
+            a.childList(slot).findAction(id)?.let { return it }
+        }
+    }
+    return null
+}
+
+fun List<Action>.updateAction(id: String, transform: (Action) -> Action): List<Action> = map { a ->
+    if (a.id == id) transform(a) else a.mapChildLists { it.updateAction(id, transform) }
+}
+
+fun List<Action>.removeAction(id: String): List<Action> =
+    filter { it.id != id }.map { a -> a.mapChildLists { it.removeAction(id) } }
+
+fun List<Action>.moveAction(id: String, delta: Int): List<Action> {
+    val idx = indexOfFirst { it.id == id }
+    if (idx >= 0) {
+        val target = (idx + delta).coerceIn(0, size - 1)
+        if (target == idx) return this
+        val list = toMutableList()
+        val item = list.removeAt(idx)
+        list.add(target, item)
+        return list
+    }
+    return map { a -> a.mapChildLists { it.moveAction(id, delta) } }
+}
+
+fun List<Action>.duplicateAction(id: String): List<Action> {
+    val idx = indexOfFirst { it.id == id }
+    if (idx >= 0) {
+        val list = toMutableList()
+        list.add(idx + 1, this[idx].withNewIds())
+        return list
+    }
+    return map { a -> a.mapChildLists { it.duplicateAction(id) } }
+}
+
+fun List<Action>.insertInto(ref: ContainerRef, action: Action): List<Action> {
+    if (ref.parentId == null || ref.slot == null) return this + action
+    return updateAction(ref.parentId) { parent ->
+        parent.withChildList(ref.slot, parent.childList(ref.slot) + action)
+    }
+}
+
+/** Depth-first walk over every action in the tree. */
+fun List<Action>.walk(): Sequence<Action> = sequence {
+    for (a in this@walk) {
+        yield(a)
+        for (slot in a.slots()) yieldAll(a.childList(slot).walk())
+    }
+}
+
+fun Macro.imageNames(): Set<String> =
+    actions.walk().filterIsInstance<ImageAction>().map { it.imageName }.filter { it.isNotBlank() }.toSet()
+
+fun Macro.countActions(): Int = actions.walk().count()

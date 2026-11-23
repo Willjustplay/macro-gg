@@ -1,10 +1,13 @@
 package com.example.automation
 
-import kotlinx.coroutines.runBlocking
+import com.example.data.Region
+import com.example.vision.ColorUtil
+import com.example.vision.MatchResult
 import org.luaj.vm2.Globals
 import org.luaj.vm2.LoadState
 import org.luaj.vm2.LuaBoolean
 import org.luaj.vm2.LuaError
+import org.luaj.vm2.LuaTable
 import org.luaj.vm2.LuaValue
 import org.luaj.vm2.Varargs
 import org.luaj.vm2.compiler.LuaC
@@ -16,7 +19,6 @@ import org.luaj.vm2.lib.OneArgFunction
 import org.luaj.vm2.lib.PackageLib
 import org.luaj.vm2.lib.StringLib
 import org.luaj.vm2.lib.TableLib
-import org.luaj.vm2.lib.TwoArgFunction
 import org.luaj.vm2.lib.VarArgFunction
 import org.luaj.vm2.lib.ZeroArgFunction
 import org.luaj.vm2.lib.jse.JseBaseLib
@@ -37,17 +39,13 @@ interface LuaBridge {
     fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean
     fun sleepCooperative(ms: Long)
     fun getColorArgb(x: Int, y: Int): Int?
+    fun findImage(name: String, threshold: Double, region: Region?): MatchResult? = null
+    fun findAllImages(name: String, threshold: Double, maxResults: Int, region: Region?): List<MatchResult> = emptyList()
     fun log(message: String)
 }
 
 object SandboxedLuaEngine {
 
-    /**
-     * Builds a strictly sandboxed Lua 5.2 Globals environment:
-     * - Allows pure computation libraries: base, table, string, math, bit32, coroutine
-     * - Explicitly omits LuajavaLib, OsLib, and IoLib (no reflection, shell, or file access)
-     * - Strips dofile/loadfile/package.loadlib
-     */
     private fun createSandboxedGlobals(bridge: LuaBridge?): Globals {
         val globals = Globals()
         globals.load(JseBaseLib())
@@ -70,7 +68,7 @@ object SandboxedLuaEngine {
 
         if (bridge != null) {
             globals.load(CooperativeAbortDebugLib(bridge))
-            registerTapLuaApi(globals, bridge)
+            registerApi(globals, bridge)
         }
 
         LoadState.install(globals)
@@ -96,7 +94,7 @@ object SandboxedLuaEngine {
     fun execute(code: String, bridge: LuaBridge): Result<Unit> {
         return try {
             val globals = createSandboxedGlobals(bridge)
-            val chunk = globals.load(code, "taplua_script.lua")
+            val chunk = globals.load(code, "macrogg_script.lua")
             chunk.call()
             Result.success(Unit)
         } catch (stop: LuaStopSignal) {
@@ -113,16 +111,43 @@ object SandboxedLuaEngine {
         }
     }
 
-    private fun registerTapLuaApi(globals: Globals, bridge: LuaBridge) {
+    private fun parseOptionalRegion(args: Varargs, startIdx: Int): Region? {
+        if (args.narg() < startIdx + 3) return null
+        if (args.isnil(startIdx)) return null
+        return Region(
+            left = args.checkint(startIdx),
+            top = args.checkint(startIdx + 1),
+            right = args.checkint(startIdx + 2),
+            bottom = args.checkint(startIdx + 3)
+        )
+    }
+
+    private fun matchToVarargs(match: MatchResult?): Varargs {
+        return if (match == null) {
+            LuaValue.varargsOf(
+                arrayOf(LuaValue.FALSE, LuaValue.valueOf(0), LuaValue.valueOf(0), LuaValue.valueOf(0.0))
+            )
+        } else {
+            LuaValue.varargsOf(
+                arrayOf(
+                    LuaValue.TRUE,
+                    LuaValue.valueOf(match.centerX),
+                    LuaValue.valueOf(match.centerY),
+                    LuaValue.valueOf(match.score)
+                )
+            )
+        }
+    }
+
+    private fun registerApi(globals: Globals, bridge: LuaBridge) {
         // click(x, y, [durationMs])
         globals.set("click", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
                 checkState(bridge)
                 val x = args.checkint(1)
                 val y = args.checkint(2)
-                val duration = args.optint(3, 60)
-                val ok = bridge.click(x, y, duration)
-                return LuaBoolean.valueOf(ok)
+                val duration = args.optint(3, 50)
+                return LuaBoolean.valueOf(bridge.click(x, y, duration))
             }
         })
 
@@ -133,8 +158,7 @@ object SandboxedLuaEngine {
                 val x = args.checkint(1)
                 val y = args.checkint(2)
                 val duration = args.optint(3, 600)
-                val ok = bridge.click(x, y, duration)
-                return LuaBoolean.valueOf(ok)
+                return LuaBoolean.valueOf(bridge.click(x, y, duration))
             }
         })
 
@@ -147,8 +171,7 @@ object SandboxedLuaEngine {
                 val x2 = args.checkint(3)
                 val y2 = args.checkint(4)
                 val duration = args.optint(5, 350)
-                val ok = bridge.swipe(x1, y1, x2, y2, duration)
-                return LuaBoolean.valueOf(ok)
+                return LuaBoolean.valueOf(bridge.swipe(x1, y1, x2, y2, duration))
             }
         })
 
@@ -156,11 +179,103 @@ object SandboxedLuaEngine {
         globals.set("sleep", object : OneArgFunction() {
             override fun call(arg: LuaValue): LuaValue {
                 checkState(bridge)
-                val ms = arg.checklong().coerceIn(0L, 600000L)
+                val ms = arg.checklong().coerceIn(0L, 600_000L)
                 bridge.sleepCooperative(ms)
                 return LuaValue.NIL
             }
         })
+
+        // ---- Image Detection APIs (Macrorify-style) ----
+
+        // findImage(name, [threshold=0.85], [x1, y1, x2, y2]) -> found, cx, cy, score
+        globals.set("findImage", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val name = args.checkjstring(1)
+                val threshold = args.optdouble(2, 0.85).coerceIn(0.3, 1.0)
+                val region = parseOptionalRegion(args, 3)
+                val match = bridge.findImage(name, threshold, region)
+                return matchToVarargs(match)
+            }
+        })
+
+        // findAllImages(name, [threshold=0.85], [maxCount=10], [x1, y1, x2, y2]) -> table of {x, y, score}
+        globals.set("findAllImages", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val name = args.checkjstring(1)
+                val threshold = args.optdouble(2, 0.85).coerceIn(0.3, 1.0)
+                val maxCount = args.optint(3, 10).coerceIn(1, 50)
+                val region = parseOptionalRegion(args, 4)
+                val matches = bridge.findAllImages(name, threshold, maxCount, region)
+                val tbl = LuaTable()
+                matches.forEachIndexed { idx, m ->
+                    val item = LuaTable()
+                    item.set("x", LuaValue.valueOf(m.centerX))
+                    item.set("y", LuaValue.valueOf(m.centerY))
+                    item.set("left", LuaValue.valueOf(m.x))
+                    item.set("top", LuaValue.valueOf(m.y))
+                    item.set("width", LuaValue.valueOf(m.width))
+                    item.set("height", LuaValue.valueOf(m.height))
+                    item.set("score", LuaValue.valueOf(m.score))
+                    tbl.set(idx + 1, item)
+                }
+                return tbl
+            }
+        })
+
+        // waitImage(name, [threshold=0.85], [timeoutMs=5000], [x1, y1, x2, y2]) -> found, cx, cy, score
+        globals.set("waitImage", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val name = args.checkjstring(1)
+                val threshold = args.optdouble(2, 0.85).coerceIn(0.3, 1.0)
+                val timeoutMs = args.optlong(3, 5000L).coerceIn(0L, 600_000L)
+                val region = parseOptionalRegion(args, 4)
+                val deadline = System.currentTimeMillis() + timeoutMs
+                while (true) {
+                    checkState(bridge)
+                    val match = bridge.findImage(name, threshold, region)
+                    if (match != null) return matchToVarargs(match)
+                    if (System.currentTimeMillis() >= deadline) return matchToVarargs(null)
+                    bridge.sleepCooperative(120L)
+                }
+            }
+        })
+
+        // clickImage(name, [threshold=0.85], [timeoutMs=0], [offsetX=0], [offsetY=0]) -> clicked, cx, cy, score
+        globals.set("clickImage", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val name = args.checkjstring(1)
+                val threshold = args.optdouble(2, 0.85).coerceIn(0.3, 1.0)
+                val timeoutMs = args.optlong(3, 0L).coerceIn(0L, 600_000L)
+                val offsetX = args.optint(4, 0)
+                val offsetY = args.optint(5, 0)
+                val deadline = System.currentTimeMillis() + timeoutMs
+                while (true) {
+                    checkState(bridge)
+                    val match = bridge.findImage(name, threshold, null)
+                    if (match != null) {
+                        val tx = (match.centerX + offsetX).coerceAtLeast(0)
+                        val ty = (match.centerY + offsetY).coerceAtLeast(0)
+                        val ok = bridge.click(tx, ty, 50)
+                        return LuaValue.varargsOf(
+                            arrayOf(
+                                LuaBoolean.valueOf(ok),
+                                LuaValue.valueOf(tx),
+                                LuaValue.valueOf(ty),
+                                LuaValue.valueOf(match.score)
+                            )
+                        )
+                    }
+                    if (System.currentTimeMillis() >= deadline) return matchToVarargs(null)
+                    bridge.sleepCooperative(120L)
+                }
+            }
+        })
+
+        // ---- Color Detection APIs ----
 
         // getColor(x, y) -> hex, r, g, b
         globals.set("getColor", object : VarArgFunction() {
@@ -175,14 +290,9 @@ object SandboxedLuaEngine {
                 val r = (argb shr 16) and 0xFF
                 val g = (argb shr 8) and 0xFF
                 val b = argb and 0xFF
-                val hex = String.format("#%02X%02X%02X", r, g, b)
+                val hex = ColorUtil.toHex(argb)
                 return LuaValue.varargsOf(
-                    arrayOf(
-                        LuaValue.valueOf(hex),
-                        LuaValue.valueOf(r),
-                        LuaValue.valueOf(g),
-                        LuaValue.valueOf(b)
-                    )
+                    arrayOf(LuaValue.valueOf(hex), LuaValue.valueOf(r), LuaValue.valueOf(g), LuaValue.valueOf(b))
                 )
             }
         })
@@ -196,8 +306,7 @@ object SandboxedLuaEngine {
                 val hex = args.checkjstring(3)
                 val tolerance = args.optint(4, 15)
                 val argb = bridge.getColorArgb(x, y) ?: return LuaValue.FALSE
-                val matched = ScreenColorSamplerService.colorMatches(argb, hex, tolerance)
-                return LuaBoolean.valueOf(matched)
+                return LuaBoolean.valueOf(ColorUtil.matches(argb, hex, tolerance))
             }
         })
 
@@ -209,31 +318,27 @@ object SandboxedLuaEngine {
                 val y = args.checkint(2)
                 val hex = args.checkjstring(3)
                 val tolerance = args.optint(4, 15)
-                val timeoutMs = args.optlong(5, 5000L).coerceIn(100L, 600000L)
+                val timeoutMs = args.optlong(5, 5000L).coerceIn(0L, 600_000L)
                 val deadline = System.currentTimeMillis() + timeoutMs
-                while (System.currentTimeMillis() <= deadline) {
+                while (true) {
                     checkState(bridge)
                     val argb = bridge.getColorArgb(x, y)
-                    if (argb != null && ScreenColorSamplerService.colorMatches(argb, hex, tolerance)) {
+                    if (argb != null && ColorUtil.matches(argb, hex, tolerance)) {
                         return LuaValue.TRUE
                     }
+                    if (System.currentTimeMillis() >= deadline) return LuaValue.FALSE
                     bridge.sleepCooperative(100L)
                 }
-                return LuaValue.FALSE
             }
         })
 
         // getScreenSize() -> width, height
         globals.set("getScreenSize", object : VarArgFunction() {
-            override fun invoke(args: Varargs): Varargs {
-                return LuaValue.varargsOf(
-                    LuaValue.valueOf(bridge.screenWidth),
-                    LuaValue.valueOf(bridge.screenHeight)
-                )
-            }
+            override fun invoke(args: Varargs): Varargs =
+                LuaValue.varargsOf(LuaValue.valueOf(bridge.screenWidth), LuaValue.valueOf(bridge.screenHeight))
         })
 
-        // log(message...) & print(message...)
+        // log(...) & print(...)
         val logFn = object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
                 val parts = (1..args.narg()).map { idx -> args.arg(idx).tojstring() }
@@ -244,12 +349,10 @@ object SandboxedLuaEngine {
         globals.set("log", logFn)
         globals.set("print", logFn)
 
-        // isRunning() -> boolean
         globals.set("isRunning", object : ZeroArgFunction() {
             override fun call(): LuaValue = LuaBoolean.valueOf(!bridge.isStopped())
         })
 
-        // stop() -> graceful exit
         globals.set("stop", object : ZeroArgFunction() {
             override fun call(): LuaValue {
                 throw LuaStopSignal(graceful = true)

@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 enum class LogLevel(val tag: String) {
     INFO("INFO"),
     ACTION("ACT"),
+    IMAGE("IMG"),
     COLOR("CLR"),
     LUA("LUA"),
     WARN("WARN"),
@@ -26,7 +27,7 @@ data class LogEntry(
 )
 
 object ExecutionLogBus {
-    private const val MAX_ENTRIES = 200
+    private const val MAX_ENTRIES = 250
     private val idGenerator = AtomicLong(1L)
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
@@ -47,6 +48,7 @@ object ExecutionLogBus {
 
     fun info(message: String) = log(LogLevel.INFO, message)
     fun action(message: String) = log(LogLevel.ACTION, message)
+    fun image(message: String) = log(LogLevel.IMAGE, message)
     fun color(message: String) = log(LogLevel.COLOR, message)
     fun lua(message: String) = log(LogLevel.LUA, message)
     fun warn(message: String) = log(LogLevel.WARN, message)

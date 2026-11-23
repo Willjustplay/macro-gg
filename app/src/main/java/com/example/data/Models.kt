@@ -1,172 +1,305 @@
 package com.example.data
 
-import androidx.annotation.Keep
-import com.google.firebase.Timestamp
-import com.google.firebase.firestore.DocumentId
-import com.google.firebase.firestore.IgnoreExtraProperties
-import com.google.firebase.firestore.ServerTimestamp
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import java.util.UUID
 
-enum class ThemeMode {
-    SYSTEM, LIGHT, DARK;
+fun newId(): String = UUID.randomUUID().toString().take(12)
 
-    companion object {
-        fun fromRaw(raw: String?): ThemeMode =
-            entries.firstOrNull { it.name == raw } ?: SYSTEM
-    }
+/** Rectangle on screen in real pixels (used as search area for image detection). */
+@Serializable
+data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val width: Int get() = (right - left).coerceAtLeast(0)
+    val height: Int get() = (bottom - top).coerceAtLeast(0)
 }
 
-enum class MacroStepType(val label: String) {
-    CLICK("Klik"),
-    LONG_PRESS("Tahan"),
-    SWIPE("Swipe"),
-    WAIT("Jeda"),
-    WAIT_COLOR("Tunggu Warna");
-
-    companion object {
-        fun fromRaw(raw: String?): MacroStepType =
-            entries.firstOrNull { it.name == raw } ?: CLICK
-    }
+/** What to do after the "not found" branch has been executed. */
+@Serializable
+enum class NotFoundMode(val label: String) {
+    CONTINUE("Lanjut ke aksi berikutnya"),
+    RESTART("Ulangi macro dari awal"),
+    STOP("Hentikan macro")
 }
 
-enum class ScriptRunStatus(val label: String) {
-    NEVER("Belum Dijalankan"),
-    SUCCESS("Berhasil"),
-    STOPPED("Dihentikan"),
-    ERROR("Error");
+/**
+ * A single building block of a macro (Macrorify calls these "components").
+ * Condition actions ([ImageAction], [ColorAction]) and [LoopAction] contain nested actions.
+ */
+@Serializable
+sealed class Action {
+    abstract val id: String
+    abstract val enabled: Boolean
+    /** Pause after the action finishes. */
+    abstract val delayAfterMs: Long
 
-    companion object {
-        fun fromRaw(raw: String?): ScriptRunStatus =
-            entries.firstOrNull { it.name == raw } ?: NEVER
-    }
+    abstract fun withEnabled(value: Boolean): Action
+    abstract fun withNewIds(): Action
 }
 
-enum class RunTargetType {
-    MACRO, LUA;
-
-    companion object {
-        fun fromRaw(raw: String?): RunTargetType =
-            entries.firstOrNull { it.name == raw } ?: MACRO
-    }
+@Serializable
+@SerialName("click")
+data class ClickAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val x: Int,
+    val y: Int,
+    val durationMs: Long = 50,
+    /** Number of taps fired for this point (auto-clicker burst). */
+    val repeat: Int = 1,
+    /** Pause between taps of the same burst. */
+    val repeatIntervalMs: Long = 100
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
 }
 
-sealed interface UiState<out T> {
-    data object Loading : UiState<Nothing>
-    data class Success<T>(val data: T) : UiState<T>
-    data class Error(val message: String) : UiState<Nothing>
+@Serializable
+@SerialName("long_press")
+data class LongPressAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val x: Int,
+    val y: Int,
+    val durationMs: Long = 800
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
 }
 
-data class MacroStep(
-    val stepId: String = "st_${UUID.randomUUID().toString().take(8)}",
-    val type: MacroStepType = MacroStepType.CLICK,
-    val label: String = "Titik Klik",
-    val x: Int = 540,
-    val y: Int = 960,
-    val endX: Int = 540,
-    val endY: Int = 500,
-    val durationMs: Int = 60,
-    val delayAfterMs: Int = 400,
-    val targetColorHex: String = "#2DD4BF",
-    val colorTolerance: Int = 15,
-    val timeoutMs: Int = 5000
-) {
-    fun toFirestoreMap(): Map<String, Any> = mapOf(
-        "stepId" to stepId,
-        "type" to type.name,
-        "label" to label.take(60),
-        "x" to x.coerceIn(0, 10000),
-        "y" to y.coerceIn(0, 10000),
-        "endX" to endX.coerceIn(0, 10000),
-        "endY" to endY.coerceIn(0, 10000),
-        "durationMs" to durationMs.coerceIn(10, 60000),
-        "delayAfterMs" to delayAfterMs.coerceIn(0, 600000),
-        "targetColorHex" to targetColorHex.uppercase().take(9),
-        "colorTolerance" to colorTolerance.coerceIn(0, 255),
-        "timeoutMs" to timeoutMs.coerceIn(100, 600000)
+@Serializable
+@SerialName("swipe")
+data class SwipeAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val x1: Int,
+    val y1: Int,
+    val x2: Int,
+    val y2: Int,
+    val durationMs: Long = 350
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
+@Serializable
+@SerialName("wait")
+data class WaitAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0,
+    val durationMs: Long = 1000,
+    /** Extra random 0..randomMs added on every run (human-like timing). */
+    val randomMs: Long = 0
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
+@Serializable
+@SerialName("image")
+data class ImageAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    /** File name of the template inside the image library (e.g. "tombol_ok.png"). */
+    val imageName: String,
+    /** Similarity 0.5..1.0 (normalized cross-correlation). */
+    val threshold: Float = 0.85f,
+    /** Keep searching up to this long. 0 = check only once. */
+    val timeoutMs: Long = 3000,
+    /** Restrict search area. null = whole screen. */
+    val region: Region? = null,
+    /** Tap the center of the found image automatically. */
+    val clickOnFound: Boolean = true,
+    val offsetX: Int = 0,
+    val offsetY: Int = 0,
+    val thenActions: List<Action> = emptyList(),
+    val elseActions: List<Action> = emptyList(),
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
     )
-
-    companion object {
-        fun fromFirestoreMap(map: Map<String, Any?>): MacroStep = MacroStep(
-            stepId = (map["stepId"] as? String)?.takeIf { it.isNotBlank() }
-                ?: "st_${UUID.randomUUID().toString().take(8)}",
-            type = MacroStepType.fromRaw(map["type"] as? String),
-            label = (map["label"] as? String).orEmpty().ifBlank { "Aksi" },
-            x = (map["x"] as? Number)?.toInt() ?: 540,
-            y = (map["y"] as? Number)?.toInt() ?: 960,
-            endX = (map["endX"] as? Number)?.toInt() ?: 540,
-            endY = (map["endY"] as? Number)?.toInt() ?: 500,
-            durationMs = (map["durationMs"] as? Number)?.toInt() ?: 60,
-            delayAfterMs = (map["delayAfterMs"] as? Number)?.toInt() ?: 400,
-            targetColorHex = (map["targetColorHex"] as? String)?.takeIf { it.startsWith("#") } ?: "#2DD4BF",
-            colorTolerance = (map["colorTolerance"] as? Number)?.toInt() ?: 15,
-            timeoutMs = (map["timeoutMs"] as? Number)?.toInt() ?: 5000
-        )
-    }
 }
 
-@Keep
-@IgnoreExtraProperties
-data class UserProfile(
-    @DocumentId val id: String = "",
-    val userId: String = "",
-    val displayName: String = "Pengguna TapLua",
-    val email: String? = null,
-    val themeMode: String = ThemeMode.SYSTEM.name,
-    val defaultTapDurationMs: Int = 60,
-    val jitterRadiusPx: Int = 4,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
-) {
-    fun resolvedThemeMode(): ThemeMode = ThemeMode.fromRaw(themeMode)
+@Serializable
+@SerialName("color")
+data class ColorAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val x: Int,
+    val y: Int,
+    /** #RRGGBB */
+    val color: String,
+    val tolerance: Int = 15,
+    val timeoutMs: Long = 3000,
+    val clickOnFound: Boolean = true,
+    val thenActions: List<Action> = emptyList(),
+    val elseActions: List<Action> = emptyList(),
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
+    )
 }
 
-@Keep
-@IgnoreExtraProperties
-data class VisualMacro(
-    @DocumentId val id: String = "",
-    val userId: String = "",
-    val name: String = "",
-    val description: String = "",
+@Serializable
+@SerialName("loop")
+data class LoopAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0,
+    val count: Int = 3,
+    val actions: List<Action> = emptyList()
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId(), actions = actions.map { it.withNewIds() })
+}
+
+/** One recorded touch stroke. [points] is a flat list x0,y0,x1,y1,... sampled evenly over [durationMs]. */
+@Serializable
+data class RecordedStroke(
+    val startMs: Long,
+    val durationMs: Long,
+    val points: List<Int>
+)
+
+/** One gesture (1..n simultaneous strokes) preceded by a pause. */
+@Serializable
+data class RecordedGesture(
+    val delayBeforeMs: Long,
+    val strokes: List<RecordedStroke>
+)
+
+@Serializable
+@SerialName("record")
+data class RecordAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 300,
+    val gestures: List<RecordedGesture> = emptyList(),
+    /** Playback speed multiplier (2.0 = twice as fast). */
+    val speed: Float = 1f
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
+@Serializable
+@SerialName("stop")
+data class StopAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
+@Serializable
+@SerialName("restart")
+data class RestartAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withNewIds() = copy(id = newId())
+}
+
+@Serializable
+data class Macro(
+    val id: String = newId(),
+    val name: String = "Macro Baru",
+    val actions: List<Action> = emptyList(),
+    /** 0 = repeat forever. */
     val loopCount: Int = 1,
-    val loopDelayMs: Int = 800,
-    val stopOnError: Boolean = true,
-    val steps: List<Map<String, Any>> = emptyList(),
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
-) {
-    fun parsedSteps(): List<MacroStep> = steps.map { MacroStep.fromFirestoreMap(it) }
-}
+    val loopDelayMs: Long = 500,
+    /** Random tap offset radius in px (anti-detection / stability). */
+    val jitterPx: Int = 0,
+    /** Random extra delay 0..n ms added after every action. */
+    val randomDelayMs: Long = 0,
+    /** Auto stop after N minutes (0 = off). */
+    val maxDurationMin: Int = 0,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
 
-@Keep
-@IgnoreExtraProperties
+@Serializable
 data class LuaScript(
-    @DocumentId val id: String = "",
-    val userId: String = "",
-    val title: String = "",
-    val description: String = "",
+    val id: String = newId(),
+    val name: String = "Script Baru",
     val code: String = "",
-    val tags: List<String> = emptyList(),
-    val lastRunStatus: String = ScriptRunStatus.NEVER.name,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
-) {
-    fun resolvedStatus(): ScriptRunStatus = ScriptRunStatus.fromRaw(lastRunStatus)
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/** Kinds that the "+" pickers offer. */
+enum class ActionKind(val label: String, val description: String) {
+    CLICK("Klik", "Ketuk satu titik"),
+    LONG_PRESS("Tahan", "Tekan lama satu titik"),
+    SWIPE("Swipe", "Geser dari A ke B"),
+    WAIT("Tunggu", "Jeda beberapa saat"),
+    IMAGE("Deteksi Gambar", "Cari gambar di layar lalu klik"),
+    COLOR("Deteksi Warna", "Cek warna piksel lalu klik"),
+    LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
+    RECORD("Rekaman", "Putar ulang sentuhan yang direkam"),
+    RESTART("Ulang dari Awal", "Lompat ke awal macro"),
+    STOP("Hentikan", "Hentikan macro")
 }
 
-@Keep
-@IgnoreExtraProperties
-data class RunHistoryEntry(
-    @DocumentId val id: String = "",
-    val userId: String = "",
-    val targetType: String = RunTargetType.MACRO.name,
-    val targetId: String = "",
-    val targetName: String = "",
-    val status: String = ScriptRunStatus.SUCCESS.name,
-    val durationMs: Long = 0L,
-    val actionsExecuted: Int = 0,
-    val summaryMessage: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
-) {
-    fun resolvedTargetType(): RunTargetType = RunTargetType.fromRaw(targetType)
-    fun resolvedStatus(): ScriptRunStatus = ScriptRunStatus.fromRaw(status)
+val Action.kind: ActionKind
+    get() = when (this) {
+        is ClickAction -> ActionKind.CLICK
+        is LongPressAction -> ActionKind.LONG_PRESS
+        is SwipeAction -> ActionKind.SWIPE
+        is WaitAction -> ActionKind.WAIT
+        is ImageAction -> ActionKind.IMAGE
+        is ColorAction -> ActionKind.COLOR
+        is LoopAction -> ActionKind.LOOP
+        is RecordAction -> ActionKind.RECORD
+        is RestartAction -> ActionKind.RESTART
+        is StopAction -> ActionKind.STOP
+    }
+
+/** Short human summary shown in lists and on the overlay log. */
+fun Action.summary(): String = when (this) {
+    is ClickAction -> "($x, $y)" + if (repeat > 1) " ×$repeat" else ""
+    is LongPressAction -> "($x, $y) ${durationMs}ms"
+    is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
+    is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
+    is ImageAction -> "$imageName • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+    is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
+    is LoopAction -> "${count}× (${actions.size} aksi)"
+    is RecordAction -> "${gestures.size} gestur" + if (speed != 1f) " • ${speed}x" else ""
+    is RestartAction -> "Kembali ke aksi pertama"
+    is StopAction -> "Akhiri macro"
+}
+
+/** Create a sensible default action for the given kind (center of screen). */
+fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Action {
+    val cx = screenW / 2
+    val cy = screenH / 2
+    return when (this) {
+        ActionKind.CLICK -> ClickAction(x = cx, y = cy)
+        ActionKind.LONG_PRESS -> LongPressAction(x = cx, y = cy)
+        ActionKind.SWIPE -> SwipeAction(x1 = cx, y1 = cy + screenH / 6, x2 = cx, y2 = cy - screenH / 6)
+        ActionKind.WAIT -> WaitAction()
+        ActionKind.IMAGE -> ImageAction(imageName = imageName)
+        ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
+        ActionKind.LOOP -> LoopAction()
+        ActionKind.RECORD -> RecordAction()
+        ActionKind.RESTART -> RestartAction()
+        ActionKind.STOP -> StopAction()
+    }
 }

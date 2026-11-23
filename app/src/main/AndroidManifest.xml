@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -31,8 +29,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".automation.ScreenCapturePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.TransparentHelper" />
+
         <service
-            android:name=".automation.TapLuaAccessibilityService"
+            android:name=".automation.MacroAccessibilityService"
             android:exported="false"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -45,7 +49,7 @@
         </service>
 
         <service
-            android:name=".automation.ScreenColorSamplerService"
+            android:name=".automation.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
@@ -55,7 +59,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-controlled floating automation bar, visual tap markers, and live Lua execution log overlay" />
+                android:value="User-controlled floating macro control bar, screenshot cropper, touch recorder, visual markers, and live log" />
         </service>
     </application>
 

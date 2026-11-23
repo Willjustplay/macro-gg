@@ -8,8 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -24,12 +24,20 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.example.R
+import com.example.vision.ColorUtil
+import com.example.vision.Frame
+import com.example.vision.toFrame
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.abs
 
-class ScreenColorSamplerService : Service() {
+/**
+ * Foreground MediaProjection service supplying live screen frames for:
+ * - Image detection (template matching)
+ * - Overlay screenshot & crop tool
+ * - Real-time pixel color detection & Color Spy
+ */
+class ScreenCaptureService : Service() {
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -39,7 +47,7 @@ class ScreenColorSamplerService : Service() {
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
-            ExecutionLogBus.warn("Sesi MediaProjection dihentikan oleh sistem.")
+            ExecutionLogBus.warn("Sesi tangkap layar (MediaProjection) dihentikan oleh sistem.")
             stopCaptureResources()
             stopSelf()
         }
@@ -64,7 +72,7 @@ class ScreenColorSamplerService : Service() {
         }
 
         if (resultCode != Activity.RESULT_OK || dataIntent == null) {
-            ExecutionLogBus.warn("Izin deteksi warna layar (MediaProjection) tidak lengkap.")
+            ExecutionLogBus.warn("Izin tangkap layar tidak lengkap.")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -72,6 +80,28 @@ class ScreenColorSamplerService : Service() {
         startForegroundNotification()
         startCapture(resultCode, dataIntent)
         return START_NOT_STICKY
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val projection = mediaProjection ?: return
+        val handler = captureHandler ?: return
+        val (w, h, density) = readDisplayMetrics()
+        if (w != captureWidth || h != captureHeight) {
+            recreateVirtualDisplay(projection, handler, w, h, density)
+        }
+    }
+
+    private fun readDisplayMetrics(): Triple<Int, Int, Int> {
+        val wm = getSystemService(WindowManager::class.java)
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(metrics)
+        return Triple(
+            metrics.widthPixels.coerceAtLeast(1),
+            metrics.heightPixels.coerceAtLeast(1),
+            metrics.densityDpi.coerceAtLeast(160)
+        )
     }
 
     private fun startForegroundNotification() {
@@ -118,23 +148,41 @@ class ScreenColorSamplerService : Service() {
             return
         }
 
-        val wm = getSystemService(WindowManager::class.java)
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
-        val width = metrics.widthPixels.coerceAtLeast(1)
-        val height = metrics.heightPixels.coerceAtLeast(1)
-        val density = metrics.densityDpi
-
-        captureWidth = width
-        captureHeight = height
-
-        val thread = HandlerThread("TapLuaColorSampler").apply { start() }
+        val (width, height, density) = readDisplayMetrics()
+        val thread = HandlerThread("MacroGGScreenCapture").apply { start() }
         val handler = Handler(thread.looper)
         captureThread = thread
         captureHandler = handler
-
+        mediaProjection = projection
         projection.registerCallback(projectionCallback, handler)
+
+        recreateVirtualDisplay(projection, handler, width, height, density)
+        _isCapturing.value = true
+        ExecutionLogBus.image("Tangkap layar aktif (${width}x${height}).")
+
+        val pending = pendingOnReady
+        pendingOnReady = null
+        if (pending != null) {
+            // Give ImageReader a brief moment to receive the initial frame.
+            handler.postDelayed({ pending() }, 250L)
+        }
+    }
+
+    private fun recreateVirtualDisplay(
+        projection: MediaProjection,
+        handler: Handler,
+        width: Int,
+        height: Int,
+        density: Int
+    ) {
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try {
+            imageReader?.setOnImageAvailableListener(null, null)
+            imageReader?.close()
+        } catch (_: Exception) {}
+
+        captureWidth = width
+        captureHeight = height
 
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         reader.setOnImageAvailableListener({ ir ->
@@ -166,14 +214,14 @@ class ScreenColorSamplerService : Service() {
                     old?.recycle()
                 }
             } catch (_: Exception) {
-                // Skip transient frame acquisition errors safely
+                // Skip transient frame errors safely
             } finally {
                 image.close()
             }
         }, handler)
 
         val vd = projection.createVirtualDisplay(
-            "TapLuaColorDisplay",
+            "MacroGGScreenDisplay",
             width,
             height,
             density,
@@ -183,18 +231,13 @@ class ScreenColorSamplerService : Service() {
             handler
         )
 
-        mediaProjection = projection
         imageReader = reader
         virtualDisplay = vd
-        _isCapturing.value = true
-        ExecutionLogBus.color("Color Sampler aktif (${width}x${height}).")
     }
 
     private fun stopCaptureResources() {
         _isCapturing.value = false
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
+        try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
 
         try {
@@ -209,9 +252,7 @@ class ScreenColorSamplerService : Service() {
         } catch (_: Exception) {}
         mediaProjection = null
 
-        try {
-            captureThread?.quitSafely()
-        } catch (_: Exception) {}
+        try { captureThread?.quitSafely() } catch (_: Exception) {}
         captureThread = null
         captureHandler = null
 
@@ -227,7 +268,7 @@ class ScreenColorSamplerService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "taplua_color_capture"
+        private const val CHANNEL_ID = "macrogg_screen_capture"
         private const val NOTIFICATION_ID = 4102
         const val ACTION_START = "com.example.action.START_CAPTURE"
         const val ACTION_STOP = "com.example.action.STOP_CAPTURE"
@@ -238,12 +279,13 @@ class ScreenColorSamplerService : Service() {
         private var latestBitmap: Bitmap? = null
         @Volatile var captureWidth: Int = 1080
         @Volatile var captureHeight: Int = 2400
+        @Volatile var pendingOnReady: (() -> Unit)? = null
 
         private val _isCapturing = MutableStateFlow(false)
         val isCapturing: StateFlow<Boolean> = _isCapturing.asStateFlow()
 
         fun start(context: Context, resultCode: Int, dataIntent: Intent) {
-            val intent = Intent(context, ScreenColorSamplerService::class.java).apply {
+            val intent = Intent(context, ScreenCaptureService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_DATA_INTENT, dataIntent)
@@ -256,51 +298,48 @@ class ScreenColorSamplerService : Service() {
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, ScreenColorSamplerService::class.java).apply {
+            val intent = Intent(context, ScreenCaptureService::class.java).apply {
                 action = ACTION_STOP
             }
             context.startService(intent)
+        }
+
+        /** Returns an immutable snapshot [Frame] of the latest screen image for template matching. */
+        fun captureFrame(): Frame? {
+            synchronized(frameLock) {
+                val bmp = latestBitmap ?: return null
+                if (bmp.isRecycled) return null
+                return bmp.toFrame()
+            }
+        }
+
+        /** Returns a standalone mutable/immutable Bitmap copy for the overlay cropper UI. */
+        fun captureBitmapCopy(): Bitmap? {
+            synchronized(frameLock) {
+                val bmp = latestBitmap ?: return null
+                if (bmp.isRecycled) return null
+                return bmp.copy(Bitmap.Config.ARGB_8888, false)
+            }
         }
 
         fun samplePixelArgb(x: Int, y: Int): Int? {
             synchronized(frameLock) {
                 val bmp = latestBitmap ?: return null
                 if (bmp.isRecycled) return null
-                val clampedX = x.coerceIn(0, bmp.width - 1)
-                val clampedY = y.coerceIn(0, bmp.height - 1)
-                return bmp.getPixel(clampedX, clampedY)
+                val cx = x.coerceIn(0, bmp.width - 1)
+                val cy = y.coerceIn(0, bmp.height - 1)
+                return bmp.getPixel(cx, cy)
             }
         }
 
         fun samplePixelHex(x: Int, y: Int): String? {
             val argb = samplePixelArgb(x, y) ?: return null
-            return argbToHex(argb)
+            return ColorUtil.toHex(argb)
         }
 
         fun matchesColor(x: Int, y: Int, targetHex: String, tolerance: Int = 15): Boolean {
             val argb = samplePixelArgb(x, y) ?: return false
-            return colorMatches(argb, targetHex, tolerance)
-        }
-
-        fun argbToHex(argb: Int): String {
-            val r = Color.red(argb)
-            val g = Color.green(argb)
-            val b = Color.blue(argb)
-            return String.format("#%02X%02X%02X", r, g, b)
-        }
-
-        fun colorMatches(actualArgb: Int, targetHex: String, tolerance: Int): Boolean {
-            val clean = targetHex.trim().removePrefix("#")
-            if (clean.length != 6) return false
-            val targetRgb = clean.toIntOrNull(16) ?: return false
-            val tr = (targetRgb shr 16) and 0xFF
-            val tg = (targetRgb shr 8) and 0xFF
-            val tb = targetRgb and 0xFF
-            val ar = (actualArgb shr 16) and 0xFF
-            val ag = (actualArgb shr 8) and 0xFF
-            val ab = actualArgb and 0xFF
-            val tol = tolerance.coerceIn(0, 255)
-            return abs(ar - tr) <= tol && abs(ag - tg) <= tol && abs(ab - tb) <= tol
+            return ColorUtil.matches(argb, targetHex, tolerance)
         }
     }
 }
