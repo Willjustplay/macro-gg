@@ -220,20 +220,27 @@ class MacroRunner(
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         val region = action.region
         var matched: MatchResult? = null
+        var bestScore = 0.0
+        var sawFrame = false
 
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
             val frame = runtime.captureFrame()
             if (frame != null) {
-                matched = if (region != null && region.width >= template.width && region.height >= template.height) {
-                    TemplateMatcher.find(
+                sawFrame = true
+                val outcome = if (region != null && region.width >= template.width && region.height >= template.height) {
+                    TemplateMatcher.findWithStats(
                         frame, template, action.threshold.toDouble(),
                         region.left, region.top, region.right, region.bottom
                     )
                 } else {
-                    TemplateMatcher.find(frame, template, action.threshold.toDouble())
+                    TemplateMatcher.findWithStats(frame, template, action.threshold.toDouble())
                 }
-                if (matched != null) break
+                if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
+                if (outcome.match != null) {
+                    matched = outcome.match
+                    break
+                }
             }
             if (runtime.nowMs() >= deadline) break
             runtime.sleep(120L)
@@ -249,7 +256,13 @@ class MacroRunner(
             }
             return executeList(action.thenActions, macro, startedAt, maxDurationMs)
         } else {
-            runtime.log(LogLevel.IMAGE, "Gambar '${action.imageName}' tidak ditemukan.")
+            val reqPct = (action.threshold * 100).toInt()
+            val maxPct = (bestScore * 100).toInt()
+            if (!sawFrame) {
+                runtime.log(LogLevel.WARN, "Deteksi '${action.imageName}' gagal: Tangkap Layar belum aktif / belum ada frame.")
+            } else {
+                runtime.log(LogLevel.IMAGE, "Gambar '${action.imageName}' belum cocok (maks $maxPct% < $reqPct%).")
+            }
             return handleNotFound(action.elseActions, action.notFound, macro, startedAt, maxDurationMs)
         }
     }

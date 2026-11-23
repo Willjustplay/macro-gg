@@ -99,7 +99,7 @@ fun MacroEditorScreen(
     screenH: Int,
     onUpdateMacro: (Macro) -> Unit,
     onLaunchOverlay: (Macro) -> Unit,
-    onLaunchCropOverlay: (Macro) -> Unit,
+    onLaunchCropOverlay: (Macro, String?) -> Unit,
     onLaunchRecorderOverlay: (Macro) -> Unit,
     onBack: () -> Unit
 ) {
@@ -176,7 +176,7 @@ fun MacroEditorScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
-                        onClick = { onLaunchCropOverlay(macro) },
+                        onClick = { onLaunchCropOverlay(macro, null) },
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                     ) {
@@ -263,7 +263,10 @@ fun MacroEditorScreen(
             action = act,
             images = images,
             lastPickedPixel = lastPickedPixel,
-            onLaunchCropOverlay = { onLaunchCropOverlay(macro) },
+            onLaunchCropForAction = { actionId ->
+                editingAction = null
+                onLaunchCropOverlay(macro, actionId)
+            },
             onSave = { updated ->
                 mutateActions { it.updateAction(updated.id) { updated } }
                 editingAction = null

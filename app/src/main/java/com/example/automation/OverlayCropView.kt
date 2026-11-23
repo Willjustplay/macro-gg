@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
@@ -12,6 +13,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -21,8 +23,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Full-screen interactive screenshot cropper shown directly inside the Floating Overlay.
- * Features a compact bottom pill bar with only Cancel ("Batal") and Save ("Simpan") buttons.
+ * Full-screen interactive screenshot cropper shown directly inside the Floating Overlay:
+ * - Pinch-to-zoom, 2-finger pan, and compact top [- | 1.0x | +] zoom controls (1x..6x)
+ * - Selection rectangle tracked in exact screenshot pixel coordinates for 1:1 accuracy
+ * - Compact bottom navigation bar with only Batal and Simpan buttons
  */
 @SuppressLint("ViewConstructor")
 class OverlayCropView(
@@ -33,18 +37,70 @@ class OverlayCropView(
 ) : FrameLayout(context) {
 
     private val canvasView: CropCanvasView
+    private val zoomLabel: TextView
 
     init {
-        canvasView = CropCanvasView(context, screenshot)
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+
+        zoomLabel = TextView(context).apply {
+            text = "1.0x"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+
+        canvasView = CropCanvasView(context, screenshot) { z ->
+            zoomLabel.text = String.format("%.1fx", z)
+        }
         addView(
             canvasView,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         )
 
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
+        // Compact top zoom bar: [-] [1.0x] [+]
+        val zoomBar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(3), dp(4), dp(3))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#DD0F172A"))
+                cornerRadius = dp(16).toFloat()
+                setStroke(dp(1), Color.parseColor("#334155"))
+            }
+            elevation = dp(6).toFloat()
+        }
 
-        // Compact floating navigation bar with only Batal & Simpan
+        fun makeZoomBtn(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            minWidth = dp(28)
+            minHeight = dp(26)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1E293B"))
+                cornerRadius = dp(13).toFloat()
+            }
+            setOnClickListener { onClick() }
+        }
+
+        zoomBar.addView(makeZoomBtn("−") { canvasView.zoomBy(0.75f) })
+        zoomLabel.setOnClickListener { canvasView.resetZoom() }
+        zoomBar.addView(zoomLabel)
+        zoomBar.addView(makeZoomBtn("+") { canvasView.zoomBy(1.35f) })
+
+        addView(
+            zoomBar,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+                topMargin = dp(38)
+            }
+        )
+
+        // Compact bottom navigation bar with ONLY Batal & Simpan
         val navBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -91,28 +147,42 @@ class OverlayCropView(
         addView(
             navBar,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-                bottomMargin = dp(28)
+                bottomMargin = dp(26)
             }
         )
     }
 
     private class CropCanvasView(
         context: Context,
-        private val bitmap: Bitmap
+        private val bitmap: Bitmap,
+        private val onZoomChanged: (Float) -> Unit
     ) : View(context) {
 
-        private enum class Handle { NONE, MOVE, TL, TR, BL, BR, LEFT, RIGHT, TOP, BOTTOM }
+        private enum class Mode { NONE, PAN, MOVE, TL, TR, BL, BR, LEFT, RIGHT, TOP, BOTTOM }
 
         private val d = resources.displayMetrics.density
-        private val handleRadius = 26f * d
-        private val minBoxPx = 24f * d
-        private val sel = RectF()
+        private val handleHitPx = 26f * d
+        private val minCropImgPx = 12f
+
+        /** Crop selection stored in exact screenshot bitmap coordinates. */
+        private val selImg = RectF()
         private var initialized = false
-        private var activeHandle = Handle.NONE
+
+        private var zoom = 1f
+        private var panX = 0f
+        private var panY = 0f
+        private var baseScale = 1f
+
+        private var activeMode = Mode.NONE
         private var lastX = 0f
         private var lastY = 0f
+        private var isScaling = false
 
-        private val scrimPaint = Paint().apply { color = Color.parseColor("#99000000") }
+        private val drawMatrix = Matrix()
+        private val selScreen = RectF()
+
+        private val bgPaint = Paint().apply { color = Color.BLACK }
+        private val scrimPaint = Paint().apply { color = Color.parseColor("#88000000") }
         private val borderPaint = Paint().apply {
             color = Color.parseColor("#2DD4BF")
             style = Paint.Style.STROKE
@@ -140,38 +210,126 @@ class OverlayCropView(
             typeface = Typeface.MONOSPACE
             isAntiAlias = true
         }
-        private val dstRect = RectF()
+
+        private val scaleDetector = ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    isScaling = true
+                    activeMode = Mode.PAN
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    applyZoom(zoom * detector.scaleFactor, detector.focusX, detector.focusY)
+                    return true
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    isScaling = false
+                }
+            }
+        )
+
+        private fun totalScale(): Float = baseScale * zoom
+
+        private fun imgToScreenX(ix: Float): Float = width / 2f + (ix - bitmap.width / 2f) * totalScale() + panX
+        private fun imgToScreenY(iy: Float): Float = height / 2f + (iy - bitmap.height / 2f) * totalScale() + panY
+
+        fun zoomBy(factor: Float) {
+            val fx = if (initialized) imgToScreenX(selImg.centerX()) else width / 2f
+            val fy = if (initialized) imgToScreenY(selImg.centerY()) else height / 2f
+            applyZoom(zoom * factor, fx, fy)
+        }
+
+        fun resetZoom() {
+            zoom = 1f
+            panX = 0f
+            panY = 0f
+            onZoomChanged(zoom)
+            invalidate()
+        }
+
+        private fun applyZoom(targetZoom: Float, focusX: Float, focusY: Float) {
+            val newZoom = targetZoom.coerceIn(1f, 6f)
+            val oldScale = totalScale()
+            val newScale = baseScale * newZoom
+            if (oldScale > 0f) {
+                val ratio = newScale / oldScale
+                val cx = width / 2f
+                val cy = height / 2f
+                panX = (focusX - cx) * (1f - ratio) + panX * ratio
+                panY = (focusY - cy) * (1f - ratio) + panY * ratio
+            }
+            zoom = newZoom
+            clampPan()
+            onZoomChanged(zoom)
+            invalidate()
+        }
+
+        private fun clampPan() {
+            if (width <= 0 || height <= 0) return
+            val dispW = bitmap.width * totalScale()
+            val dispH = bitmap.height * totalScale()
+            val maxPanX = max(0f, (dispW - width) / 2f)
+            val maxPanY = max(0f, (dispH - height) / 2f)
+            panX = panX.coerceIn(-maxPanX, maxPanX)
+            panY = panY.coerceIn(-maxPanY, maxPanY)
+        }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            dstRect.set(0f, 0f, w.toFloat(), h.toFloat())
-            if (!initialized && w > 0 && h > 0) {
-                val bw = min(w * 0.40f, 180f * d)
-                val bh = min(h * 0.16f, 110f * d)
-                sel.set((w - bw) / 2f, (h - bh) / 2f, (w + bw) / 2f, (h + bh) / 2f)
-                initialized = true
+            if (w > 0 && h > 0 && !bitmap.isRecycled) {
+                baseScale = min(w.toFloat() / bitmap.width, h.toFloat() / bitmap.height)
+                if (!initialized) {
+                    val bw = bitmap.width * 0.28f
+                    val bh = bitmap.height * 0.12f
+                    selImg.set(
+                        (bitmap.width - bw) / 2f,
+                        (bitmap.height - bh) / 2f,
+                        (bitmap.width + bw) / 2f,
+                        (bitmap.height + bh) / 2f
+                    )
+                    initialized = true
+                }
+                clampPan()
             }
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             if (bitmap.isRecycled) return
-            canvas.drawBitmap(bitmap, null, dstRect, null)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
+
+            val scale = totalScale()
+            drawMatrix.reset()
+            drawMatrix.postTranslate(-bitmap.width / 2f, -bitmap.height / 2f)
+            drawMatrix.postScale(scale, scale)
+            drawMatrix.postTranslate(width / 2f + panX, height / 2f + panY)
+            canvas.drawBitmap(bitmap, drawMatrix, null)
+
+            // Map selection rect from image pixels to screen coordinates
+            selScreen.set(
+                imgToScreenX(selImg.left),
+                imgToScreenY(selImg.top),
+                imgToScreenX(selImg.right),
+                imgToScreenY(selImg.bottom)
+            )
 
             val vw = width.toFloat()
             val vh = height.toFloat()
-            canvas.drawRect(0f, 0f, vw, sel.top, scrimPaint)
-            canvas.drawRect(0f, sel.bottom, vw, vh, scrimPaint)
-            canvas.drawRect(0f, sel.top, sel.left, sel.bottom, scrimPaint)
-            canvas.drawRect(sel.right, sel.top, vw, sel.bottom, scrimPaint)
+            canvas.drawRect(0f, 0f, vw, selScreen.top, scrimPaint)
+            canvas.drawRect(0f, selScreen.bottom, vw, vh, scrimPaint)
+            canvas.drawRect(0f, selScreen.top, selScreen.left, selScreen.bottom, scrimPaint)
+            canvas.drawRect(selScreen.right, selScreen.top, vw, selScreen.bottom, scrimPaint)
 
-            canvas.drawRect(sel, borderPaint)
+            canvas.drawRect(selScreen, borderPaint)
             val r = 6.5f * d
             val corners = arrayOf(
-                sel.left to sel.top,
-                sel.right to sel.top,
-                sel.left to sel.bottom,
-                sel.right to sel.bottom
+                selScreen.left to selScreen.top,
+                selScreen.right to selScreen.top,
+                selScreen.left to selScreen.bottom,
+                selScreen.right to selScreen.bottom
             )
             for ((cx, cy) in corners) {
                 canvas.drawCircle(cx, cy, r, handlePaint)
@@ -183,8 +341,8 @@ class OverlayCropView(
                 val info = "${cropRect.width()}×${cropRect.height()} px"
                 val tw = labelText.measureText(info)
                 val pad = 5f * d
-                val bx = sel.left.coerceIn(8f * d, max(8f * d, vw - tw - pad * 2 - 8f * d))
-                val by = (sel.top - 26f * d).coerceAtLeast(8f * d)
+                val bx = selScreen.left.coerceIn(8f * d, max(8f * d, vw - tw - pad * 2 - 8f * d))
+                val by = (selScreen.top - 26f * d).coerceAtLeast(8f * d)
                 canvas.drawRoundRect(
                     RectF(bx, by, bx + tw + pad * 2, by + 20f * d),
                     6f * d, 6f * d, labelBg
@@ -195,14 +353,20 @@ class OverlayCropView(
 
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            scaleDetector.onTouchEvent(event)
+            if (event.pointerCount >= 2) {
+                activeMode = Mode.PAN
+                return true
+            }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
                     lastY = event.y
-                    activeHandle = hitTest(event.x, event.y)
+                    activeMode = hitTest(event.x, event.y)
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (isScaling) return true
                     val dx = event.x - lastX
                     val dy = event.y - lastY
                     lastX = event.x
@@ -212,78 +376,80 @@ class OverlayCropView(
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    activeHandle = Handle.NONE
+                    activeMode = Mode.NONE
                     return true
                 }
             }
             return super.onTouchEvent(event)
         }
 
-        private fun hitTest(x: Float, y: Float): Handle {
-            fun near(px: Float, py: Float) = abs(x - px) <= handleRadius && abs(y - py) <= handleRadius
-            if (near(sel.left, sel.top)) return Handle.TL
-            if (near(sel.right, sel.top)) return Handle.TR
-            if (near(sel.left, sel.bottom)) return Handle.BL
-            if (near(sel.right, sel.bottom)) return Handle.BR
-            if (abs(x - sel.left) <= handleRadius && y in sel.top..sel.bottom) return Handle.LEFT
-            if (abs(x - sel.right) <= handleRadius && y in sel.top..sel.bottom) return Handle.RIGHT
-            if (abs(y - sel.top) <= handleRadius && x in sel.left..sel.right) return Handle.TOP
-            if (abs(y - sel.bottom) <= handleRadius && x in sel.left..sel.right) return Handle.BOTTOM
-            if (sel.contains(x, y)) return Handle.MOVE
-            sel.set(x - minBoxPx / 2, y - minBoxPx / 2, x + minBoxPx / 2, y + minBoxPx / 2)
-            clampBox()
-            return Handle.BR
+        private fun hitTest(x: Float, y: Float): Mode {
+            fun near(px: Float, py: Float) = abs(x - px) <= handleHitPx && abs(y - py) <= handleHitPx
+            if (near(selScreen.left, selScreen.top)) return Mode.TL
+            if (near(selScreen.right, selScreen.top)) return Mode.TR
+            if (near(selScreen.left, selScreen.bottom)) return Mode.BL
+            if (near(selScreen.right, selScreen.bottom)) return Mode.BR
+            if (abs(x - selScreen.left) <= handleHitPx && y in selScreen.top..selScreen.bottom) return Mode.LEFT
+            if (abs(x - selScreen.right) <= handleHitPx && y in selScreen.top..selScreen.bottom) return Mode.RIGHT
+            if (abs(y - selScreen.top) <= handleHitPx && x in selScreen.left..selScreen.right) return Mode.TOP
+            if (abs(y - selScreen.bottom) <= handleHitPx && x in selScreen.left..selScreen.right) return Mode.BOTTOM
+            if (selScreen.contains(x, y)) return Mode.MOVE
+            return Mode.PAN
         }
 
-        private fun applyDrag(dx: Float, dy: Float) {
-            when (activeHandle) {
-                Handle.MOVE -> {
-                    val w = sel.width()
-                    val h = sel.height()
-                    val nl = (sel.left + dx).coerceIn(0f, max(0f, width - w))
-                    val nt = (sel.top + dy).coerceIn(0f, max(0f, height - h))
-                    sel.set(nl, nt, nl + w, nt + h)
+        private fun applyDrag(dxScreen: Float, dyScreen: Float) {
+            if (activeMode == Mode.PAN) {
+                if (zoom > 1.01f) {
+                    panX += dxScreen
+                    panY += dyScreen
+                    clampPan()
                 }
-                Handle.TL -> {
-                    sel.left = (sel.left + dx).coerceIn(0f, sel.right - minBoxPx)
-                    sel.top = (sel.top + dy).coerceIn(0f, sel.bottom - minBoxPx)
+                return
+            }
+            val s = totalScale().coerceAtLeast(0.01f)
+            val dx = dxScreen / s
+            val dy = dyScreen / s
+            val bw = bitmap.width.toFloat()
+            val bh = bitmap.height.toFloat()
+
+            when (activeMode) {
+                Mode.MOVE -> {
+                    val w = selImg.width()
+                    val h = selImg.height()
+                    val nl = (selImg.left + dx).coerceIn(0f, max(0f, bw - w))
+                    val nt = (selImg.top + dy).coerceIn(0f, max(0f, bh - h))
+                    selImg.set(nl, nt, nl + w, nt + h)
                 }
-                Handle.TR -> {
-                    sel.right = (sel.right + dx).coerceIn(sel.left + minBoxPx, width.toFloat())
-                    sel.top = (sel.top + dy).coerceIn(0f, sel.bottom - minBoxPx)
+                Mode.TL -> {
+                    selImg.left = (selImg.left + dx).coerceIn(0f, selImg.right - minCropImgPx)
+                    selImg.top = (selImg.top + dy).coerceIn(0f, selImg.bottom - minCropImgPx)
                 }
-                Handle.BL -> {
-                    sel.left = (sel.left + dx).coerceIn(0f, sel.right - minBoxPx)
-                    sel.bottom = (sel.bottom + dy).coerceIn(sel.top + minBoxPx, height.toFloat())
+                Mode.TR -> {
+                    selImg.right = (selImg.right + dx).coerceIn(selImg.left + minCropImgPx, bw)
+                    selImg.top = (selImg.top + dy).coerceIn(0f, selImg.bottom - minCropImgPx)
                 }
-                Handle.BR -> {
-                    sel.right = (sel.right + dx).coerceIn(sel.left + minBoxPx, width.toFloat())
-                    sel.bottom = (sel.bottom + dy).coerceIn(sel.top + minBoxPx, height.toFloat())
+                Mode.BL -> {
+                    selImg.left = (selImg.left + dx).coerceIn(0f, selImg.right - minCropImgPx)
+                    selImg.bottom = (selImg.bottom + dy).coerceIn(selImg.top + minCropImgPx, bh)
                 }
-                Handle.LEFT -> sel.left = (sel.left + dx).coerceIn(0f, sel.right - minBoxPx)
-                Handle.RIGHT -> sel.right = (sel.right + dx).coerceIn(sel.left + minBoxPx, width.toFloat())
-                Handle.TOP -> sel.top = (sel.top + dy).coerceIn(0f, sel.bottom - minBoxPx)
-                Handle.BOTTOM -> sel.bottom = (sel.bottom + dy).coerceIn(sel.top + minBoxPx, height.toFloat())
-                Handle.NONE -> {}
+                Mode.BR -> {
+                    selImg.right = (selImg.right + dx).coerceIn(selImg.left + minCropImgPx, bw)
+                    selImg.bottom = (selImg.bottom + dy).coerceIn(selImg.top + minCropImgPx, bh)
+                }
+                Mode.LEFT -> selImg.left = (selImg.left + dx).coerceIn(0f, selImg.right - minCropImgPx)
+                Mode.RIGHT -> selImg.right = (selImg.right + dx).coerceIn(selImg.left + minCropImgPx, bw)
+                Mode.TOP -> selImg.top = (selImg.top + dy).coerceIn(0f, selImg.bottom - minCropImgPx)
+                Mode.BOTTOM -> selImg.bottom = (selImg.bottom + dy).coerceIn(selImg.top + minCropImgPx, bh)
+                else -> {}
             }
         }
 
-        private fun clampBox() {
-            val l = sel.left.coerceIn(0f, max(0f, width - minBoxPx))
-            val t = sel.top.coerceIn(0f, max(0f, height - minBoxPx))
-            val r = sel.right.coerceIn(l + minBoxPx, width.toFloat())
-            val b = sel.bottom.coerceIn(t + minBoxPx, height.toFloat())
-            sel.set(l, t, r, b)
-        }
-
         fun imageCropRect(): Rect? {
-            if (width <= 0 || height <= 0 || bitmap.isRecycled) return null
-            val sx = bitmap.width.toFloat() / width
-            val sy = bitmap.height.toFloat() / height
-            val left = (sel.left * sx).toInt().coerceIn(0, bitmap.width - 2)
-            val top = (sel.top * sy).toInt().coerceIn(0, bitmap.height - 2)
-            val right = (sel.right * sx).toInt().coerceIn(left + 2, bitmap.width)
-            val bottom = (sel.bottom * sy).toInt().coerceIn(top + 2, bitmap.height)
+            if (bitmap.isRecycled) return null
+            val left = selImg.left.toInt().coerceIn(0, bitmap.width - 2)
+            val top = selImg.top.toInt().coerceIn(0, bitmap.height - 2)
+            val right = selImg.right.toInt().coerceIn(left + 2, bitmap.width)
+            val bottom = selImg.bottom.toInt().coerceIn(top + 2, bitmap.height)
             return Rect(left, top, right, bottom)
         }
 
@@ -291,7 +457,7 @@ class OverlayCropView(
             val r = imageCropRect() ?: return null
             return try {
                 Bitmap.createBitmap(bitmap, r.left, r.top, r.width(), r.height())
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 null
             }
         }

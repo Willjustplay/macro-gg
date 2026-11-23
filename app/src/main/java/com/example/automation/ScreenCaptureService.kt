@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -22,6 +23,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.DisplayMetrics
+import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.example.R
@@ -38,8 +40,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * - Overlay screenshot & crop tool
  * - Real-time pixel color detection & Color Spy
  *
- * Throttles frame copies (~8 FPS max) and reuses a single Bitmap buffer to prevent OOM
- * when running on top of 60/120 FPS games, and safely resizes VirtualDisplay on rotation.
+ * Uses trailing-edge throttling (~8 FPS max) so static screens NEVER stay stuck on an old frame,
+ * reuses Bitmap buffers to prevent OOM over heavy games, and listens to DisplayManager so
+ * Portrait <-> Landscape switches resize VirtualDisplay reliably.
  */
 class ScreenCaptureService : Service() {
 
@@ -48,7 +51,26 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
+    private var displayManager: DisplayManager? = null
     private var lastFrameCopyMs: Long = 0L
+    private var pendingImage: Image? = null
+    private var pendingFlushScheduled = false
+
+    private val flushPendingRunnable = Runnable {
+        pendingFlushScheduled = false
+        val img = pendingImage ?: return@Runnable
+        pendingImage = null
+        copyImageToLatestBitmap(img, captureWidth, captureHeight)
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != Display.DEFAULT_DISPLAY) return
+            checkAndHandleRotation()
+        }
+    }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -67,8 +89,6 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // Always promote to foreground immediately when started via startForegroundService
-        // to avoid ForegroundServiceDidNotStartInTimeException.
         if (!startForegroundNotificationSafe()) {
             stopSelf()
             return START_NOT_STICKY
@@ -102,11 +122,20 @@ class ScreenCaptureService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        checkAndHandleRotation()
+    }
+
+    private fun checkAndHandleRotation() {
         val vd = virtualDisplay ?: return
         val handler = captureHandler ?: return
         val (w, h, density) = readDisplayMetrics()
         if (w != captureWidth || h != captureHeight) {
-            resizeVirtualDisplaySafely(vd, handler, w, h, density)
+            handler.post {
+                val curVd = virtualDisplay ?: return@post
+                if (w != captureWidth || h != captureHeight) {
+                    resizeVirtualDisplaySafely(curVd, handler, w, h, density)
+                }
+            }
         }
     }
 
@@ -181,6 +210,10 @@ class ScreenCaptureService : Service() {
             mediaProjection = projection
             projection.registerCallback(projectionCallback, handler)
 
+            val dm = getSystemService(DisplayManager::class.java)
+            displayManager = dm
+            dm?.registerDisplayListener(displayListener, handler)
+
             val reader = createImageReader(width, height, handler)
             val vd = projection.createVirtualDisplay(
                 "MacroGGScreenDisplay",
@@ -202,7 +235,7 @@ class ScreenCaptureService : Service() {
             val pending = pendingOnReady
             pendingOnReady = null
             if (pending != null) {
-                handler.postDelayed({ pending() }, 250L)
+                handler.postDelayed({ pending() }, 280L)
             }
         } catch (t: Throwable) {
             ExecutionLogBus.error("Gagal membuat VirtualDisplay: ${t.message}")
@@ -211,10 +244,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    /**
-     * Resizes the existing VirtualDisplay on portrait <-> landscape rotation instead of
-     * calling projection.createVirtualDisplay() again (which throws SecurityException on Android 14+).
-     */
     private fun resizeVirtualDisplaySafely(
         vd: VirtualDisplay,
         handler: Handler,
@@ -223,6 +252,11 @@ class ScreenCaptureService : Service() {
         density: Int
     ) {
         try {
+            handler.removeCallbacks(flushPendingRunnable)
+            pendingFlushScheduled = false
+            try { pendingImage?.close() } catch (_: Throwable) {}
+            pendingImage = null
+
             val oldReader = imageReader
             val newReader = createImageReader(width, height, handler)
             vd.resize(width, height, density)
@@ -247,7 +281,8 @@ class ScreenCaptureService : Service() {
     }
 
     private fun createImageReader(width: Int, height: Int, handler: Handler): ImageReader {
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        // maxImages = 3 so holding 1 trailing-edge pending image never stalls the producer
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         reader.setOnImageAvailableListener({ ir ->
             val image = try {
                 ir.acquireLatestImage()
@@ -255,57 +290,80 @@ class ScreenCaptureService : Service() {
                 null
             } ?: return@setOnImageAvailableListener
 
-            try {
-                // Throttle heavy pixel copy to ~8 FPS max (unless a snapshot was never taken yet).
-                // Always close the acquired Image so the surface queue never blocks the game.
-                val now = SystemClock.uptimeMillis()
-                val hasExisting = synchronized(frameLock) { latestBitmap != null && !latestBitmap!!.isRecycled }
-                if (hasExisting && now - lastFrameCopyMs < MIN_FRAME_INTERVAL_MS) {
-                    return@setOnImageAvailableListener
-                }
-                lastFrameCopyMs = now
+            val now = SystemClock.uptimeMillis()
+            val hasExisting = synchronized(frameLock) { latestBitmap != null && !latestBitmap!!.isRecycled }
+            val elapsed = now - lastFrameCopyMs
 
-                val plane = image.planes[0]
-                val buffer = plane.buffer
-                val pixelStride = plane.pixelStride
-                if (pixelStride <= 0) return@setOnImageAvailableListener
-                val rowStride = plane.rowStride
-                val rowPadding = rowStride - pixelStride * width
-                val bitmapWidth = (width + rowPadding / pixelStride).coerceAtLeast(width)
-
-                synchronized(frameLock) {
-                    if (bitmapWidth == width) {
-                        var dst = latestBitmap
-                        if (dst == null || dst.isRecycled || dst.width != width || dst.height != height) {
-                            dst?.recycle()
-                            dst = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                            latestBitmap = dst
-                        }
-                        dst.copyPixelsFromBuffer(buffer)
-                    } else {
-                        var scratch = scratchBitmap
-                        if (scratch == null || scratch.isRecycled || scratch.width != bitmapWidth || scratch.height != height) {
-                            scratch?.recycle()
-                            scratch = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
-                            scratchBitmap = scratch
-                        }
-                        scratch.copyPixelsFromBuffer(buffer)
-                        val oldLatest = latestBitmap
-                        latestBitmap = Bitmap.createBitmap(scratch, 0, 0, width, height)
-                        oldLatest?.recycle()
-                    }
+            if (!hasExisting || elapsed >= MIN_FRAME_INTERVAL_MS) {
+                handler.removeCallbacks(flushPendingRunnable)
+                pendingFlushScheduled = false
+                try { pendingImage?.close() } catch (_: Throwable) {}
+                pendingImage = null
+                copyImageToLatestBitmap(image, width, height)
+            } else {
+                // Keep only the latest pending frame and flush once cooldown expires so static screens are never stale
+                try { pendingImage?.close() } catch (_: Throwable) {}
+                pendingImage = image
+                if (!pendingFlushScheduled) {
+                    pendingFlushScheduled = true
+                    handler.postDelayed(flushPendingRunnable, (MIN_FRAME_INTERVAL_MS - elapsed).coerceAtLeast(16L))
                 }
-            } catch (_: Throwable) {
-                // Swallow transient frame / OOM errors safely instead of crashing
-            } finally {
-                try { image.close() } catch (_: Throwable) {}
             }
         }, handler)
         return reader
     }
 
+    private fun copyImageToLatestBitmap(image: Image, width: Int, height: Int) {
+        try {
+            lastFrameCopyMs = SystemClock.uptimeMillis()
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            buffer.rewind()
+            val pixelStride = plane.pixelStride
+            if (pixelStride <= 0) return
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * width
+            val bitmapWidth = (width + rowPadding / pixelStride).coerceAtLeast(width)
+
+            synchronized(frameLock) {
+                if (bitmapWidth == width) {
+                    var dst = latestBitmap
+                    if (dst == null || dst.isRecycled || dst.width != width || dst.height != height) {
+                        dst?.recycle()
+                        dst = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        latestBitmap = dst
+                    }
+                    dst.copyPixelsFromBuffer(buffer)
+                } else {
+                    var scratch = scratchBitmap
+                    if (scratch == null || scratch.isRecycled || scratch.width != bitmapWidth || scratch.height != height) {
+                        scratch?.recycle()
+                        scratch = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
+                        scratchBitmap = scratch
+                    }
+                    scratch.copyPixelsFromBuffer(buffer)
+                    val oldLatest = latestBitmap
+                    latestBitmap = Bitmap.createBitmap(scratch, 0, 0, width, height)
+                    oldLatest?.recycle()
+                }
+            }
+        } catch (_: Throwable) {
+            // Swallow transient frame / OOM errors safely
+        } finally {
+            try { image.close() } catch (_: Throwable) {}
+        }
+    }
+
     private fun stopCaptureResources() {
         _isCapturing.value = false
+        try { displayManager?.unregisterDisplayListener(displayListener) } catch (_: Throwable) {}
+        displayManager = null
+
+        try { captureHandler?.removeCallbacks(flushPendingRunnable) } catch (_: Throwable) {}
+        pendingFlushScheduled = false
+        try { pendingImage?.close() } catch (_: Throwable) {}
+        pendingImage = null
+
         try { virtualDisplay?.release() } catch (_: Throwable) {}
         virtualDisplay = null
 
@@ -341,7 +399,7 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val CHANNEL_ID = "macrogg_screen_capture"
         private const val NOTIFICATION_ID = 4102
-        private const val MIN_FRAME_INTERVAL_MS = 120L
+        private const val MIN_FRAME_INTERVAL_MS = 110L
         const val ACTION_START = "com.example.action.START_CAPTURE"
         const val ACTION_STOP = "com.example.action.STOP_CAPTURE"
         const val EXTRA_RESULT_CODE = "result_code"

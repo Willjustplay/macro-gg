@@ -107,7 +107,7 @@ data class ImageAction(
     /** File name of the template inside the image library (e.g. "tombol_ok.png"). */
     val imageName: String,
     /** Similarity 0.5..1.0 (normalized cross-correlation). */
-    val threshold: Float = 0.85f,
+    val threshold: Float = 0.80f,
     /** Keep searching up to this long. 0 = check only once. */
     val timeoutMs: Long = 3000,
     /** Restrict search area. null = whole screen. */

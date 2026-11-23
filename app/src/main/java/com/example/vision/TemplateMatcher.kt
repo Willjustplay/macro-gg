@@ -40,7 +40,7 @@ class GrayImage(val width: Int, val height: Int, val data: FloatArray) {
                 var di = y * w
                 for (x in 0 until w) {
                     val p = src[si++]
-                    // ITU-R BT.601 luma, integer approximation
+                    // ITU-R BT.601 luma
                     out[di++] = (((p shr 16) and 0xFF) * 299 + ((p shr 8) and 0xFF) * 587 + (p and 0xFF) * 114) / 1000f
                 }
             }
@@ -48,7 +48,7 @@ class GrayImage(val width: Int, val height: Int, val data: FloatArray) {
         }
     }
 
-    /** Box-filter downsample by integer [factor]. */
+    /** Box-filter downsample by power-of-2 integer [factor]. */
     fun downsample(factor: Int): GrayImage {
         if (factor <= 1) return this
         val nw = max(1, width / factor)
@@ -90,14 +90,27 @@ data class MatchResult(
     val centerY: Int get() = y + height / 2
 }
 
-/** Template prepared once (gray + pyramid levels) and cached across searches. */
+data class SearchOutcome(
+    val match: MatchResult?,
+    val bestScore: Double
+)
+
+/** Template prepared once (gray + power-of-2 pyramid levels) and cached across searches. */
 class PreparedTemplate(val name: String, frame: Frame) {
     val width = frame.width
     val height = frame.height
     val gray: GrayImage = GrayImage.fromFrame(frame)
 
-    /** Coarse factor so the template is roughly 12px on its short side at the coarsest level. */
-    val coarseFactor: Int = (min(width, height) / 12).coerceIn(1, 16)
+    /**
+     * Strictly power-of-2 coarse downsample factor (1, 2, 4, or 8) so every pyramid step
+     * halves the factor cleanly (8 -> 4 -> 2 -> 1) with zero integer-division coordinate drift.
+     */
+    val coarseFactor: Int = when {
+        min(width, height) >= 120 -> 8
+        min(width, height) >= 56 -> 4
+        min(width, height) >= 24 -> 2
+        else -> 1
+    }
 
     private val levels = HashMap<Int, TemplateLevel>()
 
@@ -124,18 +137,17 @@ class TemplateLevel(val img: GrayImage) {
 }
 
 /**
- * Coarse-to-fine normalized cross-correlation template matcher.
+ * Coarse-to-fine normalized cross-correlation (NCC) template matcher.
  *
- * 1. Search the whole (down-sampled) region at the coarsest level using integral images for
- *    window statistics → keep the best non-overlapping candidates.
- * 2. Refine each candidate on progressively finer levels inside a small ±2px window.
- * 3. Score at full resolution; the best candidate above the threshold wins.
- *
- * Typical cost on a 1080×2400 screen is a few tens of milliseconds, no OpenCV needed.
+ * 1. Exhaustive NCC search on power-of-2 downsampled image using integral images for fast
+ *    window variance + numerically stable zero-mean cross-correlation.
+ * 2. Exact 2x pyramid refinement (8 -> 4 -> 2 -> 1) with generous ±3px search radius to absorb
+ *    any sub-block phase offset.
+ * 3. Full-resolution NCC verification; returns matches above threshold and best observed score.
  */
 object TemplateMatcher {
-    private const val FLAT_EPS = 1e-3
-    private const val MAX_CANDIDATES = 8
+    private const val FLAT_EPS = 1e-2
+    private const val MAX_CANDIDATES = 16
 
     fun find(
         frame: Frame,
@@ -146,6 +158,48 @@ object TemplateMatcher {
         regionRight: Int = frame.width,
         regionBottom: Int = frame.height
     ): MatchResult? = findAll(frame, template, threshold, 1, regionLeft, regionTop, regionRight, regionBottom).firstOrNull()
+
+    fun findWithStats(
+        frame: Frame,
+        template: PreparedTemplate,
+        threshold: Double,
+        regionLeft: Int = 0,
+        regionTop: Int = 0,
+        regionRight: Int = frame.width,
+        regionBottom: Int = frame.height
+    ): SearchOutcome {
+        val left = regionLeft.coerceIn(0, frame.width)
+        val top = regionTop.coerceIn(0, frame.height)
+        val right = regionRight.coerceIn(left, frame.width)
+        val bottom = regionBottom.coerceIn(top, frame.height)
+        val rw = right - left
+        val rh = bottom - top
+        if (rw < template.width || rh < template.height) return SearchOutcome(null, 0.0)
+
+        val fullGray = GrayImage.fromFrame(frame, left, top, rw, rh)
+        val factor = template.coarseFactor
+        val coarseImg = fullGray.downsample(factor)
+        val coarseTpl = template.level(factor)
+        if (coarseImg.width < coarseTpl.img.width || coarseImg.height < coarseTpl.img.height) {
+            return SearchOutcome(null, 0.0)
+        }
+
+        val coarseMin = (threshold - 0.35).coerceAtLeast(0.15)
+        val candidates = coarseSearch(coarseImg, coarseTpl, coarseMin, MAX_CANDIDATES)
+        var bestScore = 0.0
+        var bestMatch: MatchResult? = null
+
+        for (c in candidates) {
+            val refined = refineCandidate(fullGray, template, factor, c.first, c.second)
+            if (refined.third > bestScore) {
+                bestScore = refined.third
+                if (refined.third >= threshold) {
+                    bestMatch = MatchResult(refined.first + left, refined.second + top, template.width, template.height, refined.third)
+                }
+            }
+        }
+        return SearchOutcome(bestMatch, bestScore)
+    }
 
     fun findAll(
         frame: Frame,
@@ -171,38 +225,23 @@ object TemplateMatcher {
         val coarseTpl = template.level(factor)
         if (coarseImg.width < coarseTpl.img.width || coarseImg.height < coarseTpl.img.height) return emptyList()
 
-        // Coarse level is blurrier → accept candidates with a generous margin.
-        val coarseMin = (threshold - 0.25).coerceAtLeast(0.2)
+        val coarseMin = (threshold - 0.35).coerceAtLeast(0.15)
         val wanted = max(MAX_CANDIDATES, maxResults * 3)
         val candidates = coarseSearch(coarseImg, coarseTpl, coarseMin, wanted)
 
         val results = ArrayList<MatchResult>()
         for (c in candidates) {
-            var cx = c.first
-            var cy = c.second
-            var f = factor
-            // Refine through factors f/2, f/4 ... 1
-            while (f > 1) {
-                val next = max(1, f / 2)
-                val scale = f / next
-                val px = cx * scale
-                val py = cy * scale
-                val refined = refineAt(fullGray, template, next, px, py, radius = scale + 1)
-                cx = refined.first
-                cy = refined.second
-                f = next
-            }
-            val (fx, fy, score) = refineFull(fullGray, template, cx, cy, radius = 2)
+            val (fx, fy, score) = refineCandidate(fullGray, template, factor, c.first, c.second)
             if (score >= threshold) {
                 results += MatchResult(fx + left, fy + top, template.width, template.height, score)
             }
         }
-        // Non-maximum suppression on final results
+
         results.sortByDescending { it.score }
         val picked = ArrayList<MatchResult>()
         for (r in results) {
             val overlaps = picked.any { p ->
-                abs(p.x - r.x) < template.width / 2 && abs(p.y - r.y) < template.height / 2
+                abs(p.x - r.x) < max(4, template.width / 2) && abs(p.y - r.y) < max(4, template.height / 2)
             }
             if (!overlaps) picked += r
             if (picked.size >= maxResults) break
@@ -210,7 +249,29 @@ object TemplateMatcher {
         return picked
     }
 
-    /** Exhaustive NCC over all positions; returns top candidate positions with NMS. */
+    private fun refineCandidate(
+        fullGray: GrayImage,
+        template: PreparedTemplate,
+        startFactor: Int,
+        startX: Int,
+        startY: Int
+    ): Triple<Int, Int, Double> {
+        var cx = startX
+        var cy = startY
+        var f = startFactor
+        while (f > 1) {
+            val next = f / 2 // Exact because startFactor is a power of 2
+            val px = cx * 2
+            val py = cy * 2
+            val refined = refineAt(fullGray, template, next, px, py, radius = 3)
+            cx = refined.first
+            cy = refined.second
+            f = next
+        }
+        return refineFull(fullGray, template, cx, cy, radius = 3)
+    }
+
+    /** Exhaustive NCC over all coarse positions; returns top candidate positions with NMS. */
     private fun coarseSearch(img: GrayImage, tpl: TemplateLevel, minScore: Double, maxCount: Int): List<Pair<Int, Int>> {
         val tw = tpl.img.width
         val th = tpl.img.height
@@ -219,7 +280,6 @@ object TemplateMatcher {
         val scores = scoreMap(img, tpl, 0, 0, ow, oh)
 
         val found = ArrayList<Triple<Int, Int, Double>>()
-        // Collect local maxima above min score
         for (y in 0 until oh) {
             for (x in 0 until ow) {
                 val s = scores[y * ow + x]
@@ -238,8 +298,10 @@ object TemplateMatcher {
         }
         found.sortByDescending { it.third }
         val picked = ArrayList<Pair<Int, Int>>()
+        val nmsX = max(2, tw / 2)
+        val nmsY = max(2, th / 2)
         for ((x, y, _) in found) {
-            if (picked.none { abs(it.first - x) < max(1, tw / 2) && abs(it.second - y) < max(1, th / 2) }) {
+            if (picked.none { abs(it.first - x) < nmsX && abs(it.second - y) < nmsY }) {
                 picked += x to y
                 if (picked.size >= maxCount) break
             }
@@ -248,18 +310,17 @@ object TemplateMatcher {
     }
 
     /**
-     * NCC score map for top-left positions in [x0, x0+ow) × [y0, y0+oh) using integral images
-     * for window sums. Returns FloatArray of size ow*oh.
+     * Numerically stable NCC score map for top-left positions in [x0, x0+ow) × [y0, y0+oh).
      */
     internal fun scoreMap(img: GrayImage, tpl: TemplateLevel, x0: Int, y0: Int, ow: Int, oh: Int): FloatArray {
         val tw = tpl.img.width
         val th = tpl.img.height
         val iw = img.width
-        // Integral images over the area actually touched
         val aw = ow + tw - 1
         val ah = oh + th - 1
         val sum = DoubleArray((aw + 1) * (ah + 1))
         val sq = DoubleArray((aw + 1) * (ah + 1))
+        val stride = aw + 1
         for (y in 0 until ah) {
             var rowS = 0.0
             var rowQ = 0.0
@@ -268,9 +329,9 @@ object TemplateMatcher {
                 val v = img.data[base + x].toDouble()
                 rowS += v
                 rowQ += v * v
-                val i = (y + 1) * (aw + 1) + (x + 1)
-                sum[i] = sum[i - (aw + 1)] + rowS
-                sq[i] = sq[i - (aw + 1)] + rowQ
+                val i = (y + 1) * stride + (x + 1)
+                sum[i] = sum[i - stride] + rowS
+                sq[i] = sq[i - stride] + rowQ
             }
         }
         val n = tpl.n.toDouble()
@@ -279,7 +340,6 @@ object TemplateMatcher {
         val zm = tpl.zeroMean
         val data = img.data
         val out = FloatArray(ow * oh)
-        val stride = aw + 1
         for (y in 0 until oh) {
             for (x in 0 until ow) {
                 val a = y * stride + x
@@ -288,21 +348,22 @@ object TemplateMatcher {
                 val d = c + tw
                 val ws = sum[d] - sum[b] - sum[c] + sum[a]
                 val wq = sq[d] - sq[b] - sq[c] + sq[a]
-                val wVar = (wq - ws * ws / n).coerceAtLeast(0.0)
+                val wMean = ws / n
+                val wVar = (wq - ws * wMean).coerceAtLeast(0.0)
                 val score: Double
                 if (tFlat || wVar / n < FLAT_EPS) {
-                    // Flat patches: compare brightness only
-                    score = if (tFlat && wVar / n < 4.0) 1.0 - abs(ws / n - tpl.mean) / 255.0 else 0.0
+                    score = if (tFlat && wVar / n < 4.0) 1.0 - abs(wMean - tpl.mean) / 255.0 else 0.0
                 } else {
+                    val wMeanF = wMean.toFloat()
                     var cross = 0.0
                     var ti = 0
                     for (ty in 0 until th) {
                         var ii = (y0 + y + ty) * iw + (x0 + x)
                         for (tx in 0 until tw) {
-                            cross += data[ii++] * zm[ti++]
+                            cross += (data[ii++] - wMeanF) * zm[ti++]
                         }
                     }
-                    score = cross / sqrt(wVar * tEnergy)
+                    score = (cross / sqrt(wVar * tEnergy)).coerceIn(-1.0, 1.0)
                 }
                 out[y * ow + x] = score.toFloat()
             }
@@ -310,12 +371,10 @@ object TemplateMatcher {
         return out
     }
 
-    /** Best position within ±radius of (px,py) at down-sample factor [factor]. */
     private fun refineAt(full: GrayImage, template: PreparedTemplate, factor: Int, px: Int, py: Int, radius: Int): Pair<Int, Int> {
         val tl = template.level(factor)
         val tw = tl.img.width
         val th = tl.img.height
-        // Down-sample just the area we need (from full-res coordinates)
         val levelW = full.width / factor
         val levelH = full.height / factor
         val x0 = (px - radius).coerceIn(0, max(0, levelW - tw))
@@ -324,8 +383,12 @@ object TemplateMatcher {
         val y1 = (py + radius).coerceIn(0, max(0, levelH - th))
         val areaW = x1 - x0 + tw
         val areaH = y1 - y0 + th
-        val sub = full.crop(x0 * factor, y0 * factor, min(areaW * factor, full.width - x0 * factor), min(areaH * factor, full.height - y0 * factor))
-            .downsample(factor)
+        val sub = full.crop(
+            x0 * factor,
+            y0 * factor,
+            min(areaW * factor, full.width - x0 * factor),
+            min(areaH * factor, full.height - y0 * factor)
+        ).downsample(factor)
         val ow = sub.width - tw + 1
         val oh = sub.height - th + 1
         if (ow <= 0 || oh <= 0) return px.coerceIn(0, max(0, levelW - tw)) to py.coerceIn(0, max(0, levelH - th))

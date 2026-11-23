@@ -78,7 +78,7 @@ fun ActionEditorSheet(
     action: Action,
     images: List<ImageAsset>,
     lastPickedPixel: PickedPixel?,
-    onLaunchCropOverlay: () -> Unit,
+    onLaunchCropForAction: (actionId: String) -> Unit,
     onSave: (Action) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -182,14 +182,17 @@ fun ActionEditorSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Pilih Gambar Target", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                        TextButton(onClick = {
-                            onDismiss()
-                            onLaunchCropOverlay()
-                        }) {
+                        Text("Gambar Target", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        Button(
+                            onClick = {
+                                onSave(draft)
+                                onLaunchCropForAction(a.id)
+                            },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
                             Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Crop Layar")
+                            Spacer(Modifier.width(6.dp))
+                            Text("Mode Crop")
                         }
                     }
 

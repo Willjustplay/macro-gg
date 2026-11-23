@@ -237,13 +237,17 @@ private fun MacroGGApp() {
         }
     }
 
-    fun launchOverlay(action: String = FloatingOverlayService.ACTION_START, addToMacro: Boolean = true) {
+    fun launchOverlay(
+        action: String = FloatingOverlayService.ACTION_START,
+        addToMacro: Boolean = true,
+        targetActionId: String? = null
+    ) {
         if (!Settings.canDrawOverlays(context)) {
             scope.launch { snackbarHostState.showSnackbar("Aktifkan izin 'Tampilkan di atas aplikasi lain' terlebih dahulu.") }
             requestOverlayPermission()
             return
         }
-        FloatingOverlayService.start(context, action, addToMacro)
+        FloatingOverlayService.start(context, action, addToMacro, targetActionId)
     }
 
     fun screenMetrics(): Pair<Int, Int> {
@@ -276,9 +280,13 @@ private fun MacroGGApp() {
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay()
                 },
-                onLaunchCropOverlay = { m ->
+                onLaunchCropOverlay = { m, targetActionId ->
                     AutomationCoordinator.selectMacro(m)
-                    launchOverlay(FloatingOverlayService.ACTION_OPEN_CROP, addToMacro = true)
+                    launchOverlay(
+                        action = FloatingOverlayService.ACTION_OPEN_CROP,
+                        addToMacro = targetActionId == null,
+                        targetActionId = targetActionId
+                    )
                 },
                 onLaunchRecorderOverlay = { m ->
                     AutomationCoordinator.selectMacro(m)

@@ -157,7 +157,7 @@ object AutomationCoordinator {
         ExecutionLogBus.info("Swipe ditambahkan ($x1,$y1) → ($x2,$y2).")
     }
 
-    fun addQuickImageAction(imageName: String, threshold: Float = 0.85f, region: Region? = null) {
+    fun addQuickImageAction(imageName: String, threshold: Float = 0.80f, region: Region? = null) {
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.copy(
@@ -171,6 +171,18 @@ object AutomationCoordinator {
             )
         }
         ExecutionLogBus.image("Aksi Deteksi Gambar '$imageName' ditambahkan ke '${_activeMacro.value.name}'.")
+    }
+
+    fun bindImageToAction(actionId: String, imageName: String) {
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                actions = macro.actions.updateAction(actionId) { a ->
+                    if (a is ImageAction) a.copy(imageName = imageName) else a
+                }
+            )
+        }
+        ExecutionLogBus.image("Gambar '$imageName' dipasang ke aksi Deteksi Gambar.")
     }
 
     fun addRecordedGestures(gestures: List<RecordedGesture>) {
