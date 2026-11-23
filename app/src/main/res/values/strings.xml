@@ -1,0 +1,53 @@
+<resources>
+    <string name="app_name">TapLua</string>
+    <string name="accessibility_service_label">TapLua Gesture Engine</string>
+    <string name="accessibility_service_description">Menjalankan gestur klik, tahan, dan swipe secara presisi dari Visual Macro atau script Lua buatan Anda.</string>
+
+    <!-- Navigation -->
+    <string name="nav_dashboard">Beranda</string>
+    <string name="nav_macros">Macro</string>
+    <string name="nav_lua">Lua Studio</string>
+    <string name="nav_logs">Log &amp; Akun</string>
+
+    <!-- Auth -->
+    <string name="auth_title">Otomasi Sentuhan &amp; Lua Studio</string>
+    <string name="auth_subtitle">Masuk dengan akun Google agar koleksi Visual Macro, script Lua kustom, dan riwayat eksekusi Anda tersinkronisasi aman antar perangkat.</string>
+    <string name="auth_button_google">Masuk dengan Google</string>
+    <string name="auth_signing_in">Menghubungkan akun Google…</string>
+    <string name="auth_feature_macros">Visual Macro Klik, Swipe &amp; Wait Color</string>
+    <string name="auth_feature_lua">Engine Lua Ter-Sandbox + Debug Stop Instan</string>
+    <string name="auth_feature_overlay">Floating Bar, Target Visual &amp; Live Log</string>
+
+    <!-- Permissions -->
+    <string name="perm_hub_title">Status Izin Otomasi</string>
+    <string name="perm_accessibility_title">Accessibility Service</string>
+    <string name="perm_accessibility_desc">Mengirim gestur klik dan swipe lintas aplikasi tanpa root.</string>
+    <string name="perm_overlay_title">Tampilkan di Atas Aplikasi</string>
+    <string name="perm_overlay_desc">Menampilkan floating bar, titik target visual, dan live log.</string>
+    <string name="perm_capture_title">Deteksi Warna Layar</string>
+    <string name="perm_capture_desc">Membaca warna piksel HEX real-time via MediaProjection.</string>
+    <string name="perm_status_active">Aktif</string>
+    <string name="perm_status_required">Perlu Aktifkan</string>
+    <string name="perm_status_ondemand">Siap / On-Demand</string>
+
+    <!-- Actions -->
+    <string name="action_launch_overlay">Buka Floating Overlay</string>
+    <string name="action_stop_overlay">Tutup Overlay</string>
+    <string name="action_new_macro">Macro Baru</string>
+    <string name="action_new_script">Script Lua Baru</string>
+    <string name="action_save">Simpan</string>
+    <string name="action_validate_lua">Cek Sintaks</string>
+    <string name="action_run_now">Jalankan</string>
+    <string name="action_stop">Hentikan</string>
+    <string name="action_pause">Jeda</string>
+    <string name="action_resume">Lanjutkan</string>
+    <string name="action_sign_out">Keluar Akun</string>
+
+    <!-- Notifications -->
+    <string name="notif_channel_overlay">TapLua Floating Overlay</string>
+    <string name="notif_channel_capture">TapLua Deteksi Warna Layar</string>
+    <string name="notif_overlay_title">TapLua Overlay Aktif</string>
+    <string name="notif_overlay_text">Kontrol mengambang siap menjalankan macro dan script Lua Anda.</string>
+    <string name="notif_capture_title">TapLua Color Sampler Aktif</string>
+    <string name="notif_capture_text">Membaca piksel layar secara lokal di memori untuk deteksi warna.</string>
+</resources>

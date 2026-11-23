@@ -1,0 +1,6 @@
+{
+  "name": "TapLua",
+  "description": "Aplikasi otomasi klik dan swipe layar Android seperti Macrorify dengan visual macro, deteksi warna piksel, floating overlay + live log, engine script Lua kustom ter-sandbox, dan sinkronisasi cloud.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
