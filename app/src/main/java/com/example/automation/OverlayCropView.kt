@@ -93,12 +93,10 @@ class OverlayCropView(
         zoomBar.addView(zoomLabel)
         zoomBar.addView(makeZoomBtn("+") { canvasView.zoomBy(1.35f) })
 
-        addView(
-            zoomBar,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-                topMargin = dp(38)
-            }
-        )
+        val zoomParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(38)
+        }
+        addView(zoomBar, zoomParams)
 
         // Compact bottom navigation bar with ONLY Batal & Simpan
         val navBar = LinearLayout(context).apply {
@@ -144,12 +142,24 @@ class OverlayCropView(
             }
         })
 
-        addView(
-            navBar,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-                bottomMargin = dp(26)
-            }
-        )
+        val navParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(48)
+        }
+        addView(navBar, navParams)
+
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            zoomParams.topMargin = maxOf(dp(24), bars.top + dp(12))
+            navParams.bottomMargin = maxOf(dp(28), bars.bottom + dp(16))
+            navParams.leftMargin = maxOf(dp(12), bars.left + dp(8))
+            navParams.rightMargin = maxOf(dp(12), bars.right + dp(8))
+            zoomBar.layoutParams = zoomParams
+            navBar.layoutParams = navParams
+            insets
+        }
     }
 
     private class CropCanvasView(
@@ -325,16 +335,10 @@ class OverlayCropView(
 
             canvas.drawRect(selScreen, borderPaint)
             val r = 6.5f * d
-            val corners = arrayOf(
-                selScreen.left to selScreen.top,
-                selScreen.right to selScreen.top,
-                selScreen.left to selScreen.bottom,
-                selScreen.right to selScreen.bottom
-            )
-            for ((cx, cy) in corners) {
-                canvas.drawCircle(cx, cy, r, handlePaint)
-                canvas.drawCircle(cx, cy, r, handleStroke)
-            }
+            drawHandle(canvas, selScreen.left, selScreen.top, r)
+            drawHandle(canvas, selScreen.right, selScreen.top, r)
+            drawHandle(canvas, selScreen.left, selScreen.bottom, r)
+            drawHandle(canvas, selScreen.right, selScreen.bottom, r)
 
             val cropRect = imageCropRect()
             if (cropRect != null) {
@@ -343,12 +347,17 @@ class OverlayCropView(
                 val pad = 5f * d
                 val bx = selScreen.left.coerceIn(8f * d, max(8f * d, vw - tw - pad * 2 - 8f * d))
                 val by = (selScreen.top - 26f * d).coerceAtLeast(8f * d)
-                canvas.drawRoundRect(
-                    RectF(bx, by, bx + tw + pad * 2, by + 20f * d),
-                    6f * d, 6f * d, labelBg
-                )
+                labelRect.set(bx, by, bx + tw + pad * 2, by + 20f * d)
+                canvas.drawRoundRect(labelRect, 6f * d, 6f * d, labelBg)
                 canvas.drawText(info, bx + pad, by + 14f * d, labelText)
             }
+        }
+
+        private val labelRect = RectF()
+
+        private fun drawHandle(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+            canvas.drawCircle(cx, cy, r, handlePaint)
+            canvas.drawCircle(cx, cy, r, handleStroke)
         }
 
         @SuppressLint("ClickableViewAccessibility")

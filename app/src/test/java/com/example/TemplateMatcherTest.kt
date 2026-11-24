@@ -113,4 +113,37 @@ class TemplateMatcherTest {
         assertTrue(ColorUtil.matches(argb, "#2AD0BC", tolerance = 6))
         assertFalse(ColorUtil.matches(argb, "#FF0000", tolerance = 20))
     }
+
+    @Test
+    fun directDownsample_matchesTwoStepDownsampleAndFindsEdgeTemplates() {
+        val screen = makePatternFrame(400, 300, seed = 7)
+        for (factor in listOf(2, 4, 8)) {
+            val expected = com.example.vision.GrayImage.fromFrame(screen, 13, 19, 321, 241).downsample(factor)
+            val direct = com.example.vision.GrayImage.fromFrameDownsampled(screen, 13, 19, 321, 241, factor)
+            assertEquals(expected.width, direct.width)
+            assertEquals(expected.height, direct.height)
+            for (i in expected.data.indices) {
+                assertTrue(
+                    "Mismatch at factor=$factor idx=$i: ${expected.data[i]} vs ${direct.data[i]}",
+                    abs(expected.data[i] - direct.data[i]) < 0.01f
+                )
+            }
+        }
+
+        // Verify local-patch refinement works even when template touches right/bottom edge of frame
+        val canvas = Frame(320, 240, IntArray(320 * 240) { 0xFF0F172A.toInt() })
+        val edgeIcon = makePatternFrame(64, 60, seed = 11)
+        stamp(canvas, edgeIcon, dstX = 320 - 64, dstY = 240 - 60)
+        val tpl = PreparedTemplate("edge.png", edgeIcon)
+        val outcome = TemplateMatcher.findWithStats(canvas, tpl, threshold = 0.90)
+        assertNotNull("Expected match at bottom-right edge", outcome.match)
+        assertTrue("x=${outcome.match!!.x}", abs(outcome.match.x - (320 - 64)) <= 1)
+        assertTrue("y=${outcome.match.y}", abs(outcome.match.y - (240 - 60)) <= 1)
+        assertTrue("score=${outcome.bestScore}", outcome.bestScore >= 0.96)
+
+        // Verify absent template returns cleanly without false positives
+        val blank = Frame(320, 240, IntArray(320 * 240) { 0xFF111827.toInt() })
+        val absent = TemplateMatcher.findWithStats(blank, tpl, threshold = 0.85)
+        assertNull(absent.match)
+    }
 }

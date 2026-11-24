@@ -18,6 +18,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -31,6 +32,7 @@ import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -104,6 +106,7 @@ class FloatingOverlayService : Service() {
     private var focusedMarkerActionId: String? = null
 
     private var macroSettingsView: OverlayMacroSettingsView? = null
+    private var macroSettingsParams: WindowManager.LayoutParams? = null
 
     private var logOverlayView: View? = null
     private var logTextView: TextView? = null
@@ -125,6 +128,7 @@ class FloatingOverlayService : Service() {
     private var targetPickerView: OverlayTargetPickerView? = null
 
     private var markerEditorView: View? = null
+    private var markerEditorParams: WindowManager.LayoutParams? = null
 
     private var matchBoxView: MatchHighlightView? = null
     private var swipePathView: SwipePathOverlayView? = null
@@ -144,11 +148,83 @@ class FloatingOverlayService : Service() {
     }
 
     private fun refreshScreenSize() {
-        val metrics = DisplayMetrics()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            screenWidth = bounds.width().coerceAtLeast(1)
+            screenHeight = bounds.height().coerceAtLeast(1)
+        } else {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            screenWidth = metrics.widthPixels.coerceAtLeast(1)
+            screenHeight = metrics.heightPixels.coerceAtLeast(1)
+        }
+    }
+
+    /**
+     * Reads current system bar (status bar + navigation bar) & display cutout insets
+     * so overlay settings panels never get clipped behind the navigation bar in portrait or landscape.
+     */
+    private fun readSystemBarInsets(): Rect {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val ins = windowManager.currentWindowMetrics.windowInsets.getInsetsIgnoringVisibility(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+            )
+            return Rect(ins.left, ins.top, ins.right, ins.bottom)
+        }
+        val real = DisplayMetrics()
+        val usable = DisplayMetrics()
         @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels.coerceAtLeast(1)
-        screenHeight = metrics.heightPixels.coerceAtLeast(1)
+        windowManager.defaultDisplay.getRealMetrics(real)
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getMetrics(usable)
+
+        val statusResId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        val statusH = if (statusResId > 0) resources.getDimensionPixelSize(statusResId) else dp(28)
+        val navResId = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        val navFallback = if (navResId > 0) resources.getDimensionPixelSize(navResId) else dp(48)
+
+        val bottomGap = (real.heightPixels - usable.heightPixels).coerceAtLeast(0)
+        val sideGap = (real.widthPixels - usable.widthPixels).coerceAtLeast(0)
+        val bottomInset = if (bottomGap > 0) bottomGap else if (real.heightPixels >= real.widthPixels) navFallback else 0
+        val rightInset = if (sideGap > 0) sideGap else if (real.widthPixels > real.heightPixels) navFallback else 0
+        return Rect(0, statusH, rightInset, bottomInset)
+    }
+
+    /**
+     * Configures width, bounded height, IME resize behavior, and system-bar inset avoidance on an
+     * overlay dialog/settings window so it stays completely visible above the navigation bar.
+     */
+    private fun applySafeOverlayBounds(
+        params: WindowManager.LayoutParams,
+        maxWidthDp: Int,
+        maxHeightDp: Int,
+        fixedHeight: Boolean
+    ) {
+        val insets = readSystemBarInsets()
+        val usableW = (screenWidth - insets.left - insets.right).coerceAtLeast(dp(240))
+        val usableH = (screenHeight - insets.top - insets.bottom).coerceAtLeast(dp(200))
+
+        params.width = minOf(dp(maxWidthDp), (usableW - dp(16)).coerceAtLeast(dp(220)))
+        if (fixedHeight) {
+            params.height = minOf(dp(maxHeightDp), (usableH - dp(20)).coerceAtLeast(dp(200)))
+        } else {
+            params.height = WindowManager.LayoutParams.WRAP_CONTENT
+        }
+        params.gravity = Gravity.CENTER
+        params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            params.fitInsetsTypes = WindowInsets.Type.systemBars() or
+                WindowInsets.Type.ime() or
+                WindowInsets.Type.displayCutout()
+            params.setFitInsetsIgnoringVisibility(false)
+            params.x = 0
+            params.y = 0
+        } else {
+            // Center explicitly within the safe area outside status/navigation bars on API 24-29
+            params.x = (insets.left - insets.right) / 2
+            params.y = (insets.top - insets.bottom) / 2
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -204,6 +280,18 @@ class FloatingOverlayService : Service() {
         clampOverlayWindow(controlBarView, controlBarParams)
         clampOverlayWindow(colorSpyView, colorSpyParams)
         clampOverlayWindow(hiddenBubbleView, hiddenBubbleParams)
+        macroSettingsView?.let { panel ->
+            macroSettingsParams?.let { p ->
+                applySafeOverlayBounds(p, maxWidthDp = 340, maxHeightDp = 490, fixedHeight = true)
+                try { windowManager.updateViewLayout(panel, p) } catch (_: Throwable) {}
+            }
+        }
+        markerEditorView?.let { card ->
+            markerEditorParams?.let { p ->
+                applySafeOverlayBounds(p, maxWidthDp = 280, maxHeightDp = 380, fixedHeight = false)
+                try { windowManager.updateViewLayout(card, p) } catch (_: Throwable) {}
+            }
+        }
     }
 
     private fun clampOverlayWindow(view: View?, params: WindowManager.LayoutParams?) {
@@ -628,20 +716,20 @@ class FloatingOverlayService : Service() {
             onClose = { dismissMacroSettingsPanel() }
         )
 
-        val panelWidth = minOf(dp(328), (screenWidth - dp(20)).coerceAtLeast(dp(240)))
         val params = WindowManager.LayoutParams(
-            panelWidth,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.CENTER
             dimAmount = 0.48f
+            applySafeOverlayBounds(this, maxWidthDp = 340, maxHeightDp = 490, fixedHeight = true)
         }
 
         if (safeAddView(panel, params)) {
             macroSettingsView = panel
+            macroSettingsParams = params
         }
     }
 
@@ -650,6 +738,7 @@ class FloatingOverlayService : Service() {
             try { windowManager.removeView(it) } catch (_: Throwable) {}
         }
         macroSettingsView = null
+        macroSettingsParams = null
     }
 
     // ---- Interactive On-Screen Target Placement (Click / Swipe / Zoom / Color, incl. Then/Else) ----
@@ -1422,6 +1511,9 @@ class FloatingOverlayService : Service() {
             isAntiAlias = true
         }
 
+        private val matchRect = RectF()
+        private val labelRect = RectF()
+
         fun setHighlight(h: MatchHighlight) {
             current = h
             invalidate()
@@ -1431,13 +1523,14 @@ class FloatingOverlayService : Service() {
             super.onDraw(canvas)
             val h = current ?: return
             val m = h.match
-            val r = RectF(m.x.toFloat(), m.y.toFloat(), (m.x + m.width).toFloat(), (m.y + m.height).toFloat())
-            canvas.drawRect(r, fillPaint)
-            canvas.drawRect(r, boxPaint)
+            matchRect.set(m.x.toFloat(), m.y.toFloat(), (m.x + m.width).toFloat(), (m.y + m.height).toFloat())
+            canvas.drawRect(matchRect, fillPaint)
+            canvas.drawRect(matchRect, boxPaint)
             val tw = textPaint.measureText(h.label)
-            val ty = (r.top - 22f * d).coerceAtLeast(4f * d)
-            canvas.drawRoundRect(RectF(r.left, ty, r.left + tw + 12f * d, ty + 20f * d), 4f * d, 4f * d, textBg)
-            canvas.drawText(h.label, r.left + 6f * d, ty + 14f * d, textPaint)
+            val ty = (matchRect.top - 22f * d).coerceAtLeast(4f * d)
+            labelRect.set(matchRect.left, ty, matchRect.left + tw + 12f * d, ty + 20f * d)
+            canvas.drawRoundRect(labelRect, 4f * d, 4f * d, textBg)
+            canvas.drawText(h.label, matchRect.left + 6f * d, ty + 14f * d, textPaint)
         }
     }
 
@@ -1810,17 +1903,18 @@ class FloatingOverlayService : Service() {
         card.addView(btnRow)
 
         val params = WindowManager.LayoutParams(
-            dp(260),
+            WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.CENTER
             dimAmount = 0.4f
+            applySafeOverlayBounds(this, maxWidthDp = 280, maxHeightDp = 380, fixedHeight = false)
         }
         if (safeAddView(card, params)) {
             markerEditorView = card
+            markerEditorParams = params
         }
     }
 
@@ -1829,6 +1923,7 @@ class FloatingOverlayService : Service() {
             try { windowManager.removeView(it) } catch (_: Throwable) {}
         }
         markerEditorView = null
+        markerEditorParams = null
     }
 
     private fun clearTargetMarkers() {

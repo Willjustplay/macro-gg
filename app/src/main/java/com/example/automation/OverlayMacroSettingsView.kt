@@ -163,8 +163,11 @@ class OverlayMacroSettingsView(
         tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         addView(tabsRow)
 
+        bodyContainer.setPadding(0, 0, 0, dp(14))
         val scroll = ScrollView(context).apply {
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(370))
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+            clipToPadding = false
+            isScrollbarFadingEnabled = false
             addView(bodyContainer)
         }
         addView(scroll)

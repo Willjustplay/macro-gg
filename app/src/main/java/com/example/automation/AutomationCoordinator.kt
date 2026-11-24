@@ -421,6 +421,7 @@ object AutomationCoordinator {
                 _engineState.value = EngineState.ERROR
                 ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
             } finally {
+                localStore?.flushClockWatermark()
                 ScreenCaptureService.highFrequencyCapture = false
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 if (_engineState.value != EngineState.ERROR) {

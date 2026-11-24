@@ -62,21 +62,75 @@ fun ActionKind.accentColor(): Color = when (this) {
     ActionKind.STOP -> Color(0xFFDC2626)
 }
 
+private data class CachedThumbnail(
+    val lastModified: Long,
+    val bitmap: ImageBitmap
+)
+
+private object ThumbnailCache {
+    // 6 MB cap measured in KB so scrolling large image libraries stays smooth without high RAM usage
+    private val cache = object : android.util.LruCache<String, CachedThumbnail>(6 * 1024) {
+        override fun sizeOf(key: String, value: CachedThumbnail): Int =
+            maxOf(1, (value.bitmap.width * value.bitmap.height * 4) / 1024)
+    }
+
+    fun get(key: String): CachedThumbnail? = synchronized(cache) { cache.get(key) }
+
+    fun put(key: String, entry: CachedThumbnail) {
+        synchronized(cache) { cache.put(key, entry) }
+    }
+
+    fun remove(key: String) {
+        synchronized(cache) { cache.remove(key) }
+    }
+}
+
+private fun decodeSampledThumbnail(file: File, maxDimPx: Int): ImageBitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+    var sample = 1
+    val safeMax = maxDimPx.coerceAtLeast(64)
+    while (bounds.outWidth / (sample * 2) >= safeMax || bounds.outHeight / (sample * 2) >= safeMax) {
+        sample *= 2
+    }
+    val opts = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+    }
+    return BitmapFactory.decodeFile(file.absolutePath, opts)?.asImageBitmap()
+}
+
 @Composable
-fun rememberAssetThumbnail(path: String?, cacheKey: Long = 0L): ImageBitmap? {
-    var bitmap by remember(path, cacheKey) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(path, cacheKey) {
-        if (path.isNullOrBlank()) {
+fun rememberAssetThumbnail(path: String?, cacheKey: Long = 0L, maxDimPx: Int = 256): ImageBitmap? {
+    val memKey = if (path.isNullOrBlank()) null else "$path|$maxDimPx"
+    var bitmap by remember(memKey, cacheKey) {
+        mutableStateOf(memKey?.let { ThumbnailCache.get(it)?.bitmap })
+    }
+    LaunchedEffect(memKey, cacheKey) {
+        if (path.isNullOrBlank() || memKey == null) {
             bitmap = null
             return@LaunchedEffect
         }
-        bitmap = withContext(Dispatchers.IO) {
+        val resolved = withContext(Dispatchers.IO) {
             val file = File(path)
-            if (!file.exists()) return@withContext null
+            if (!file.exists()) {
+                ThumbnailCache.remove(memKey)
+                return@withContext null
+            }
+            val lastMod = file.lastModified()
+            val cached = ThumbnailCache.get(memKey)
+            if (cached != null && cached.lastModified == lastMod) {
+                return@withContext cached.bitmap
+            }
             runCatching {
-                BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
+                decodeSampledThumbnail(file, maxDimPx)?.also { decoded ->
+                    ThumbnailCache.put(memKey, CachedThumbnail(lastMod, decoded))
+                }
             }.getOrNull()
         }
+        bitmap = resolved
     }
     return bitmap
 }

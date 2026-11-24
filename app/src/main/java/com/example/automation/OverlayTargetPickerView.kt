@@ -76,13 +76,11 @@ class OverlayTargetPickerView(
             }
             elevation = dp(4).toFloat()
         }
-        addView(
-            topChip,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                topMargin = dp(40)
-            }
-        )
+        val topParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = dp(40)
+        }
+        addView(topChip, topParams)
 
         // Compact minimal bottom bar: [coords] [Batal] [Simpan]
         val bottomBar = LinearLayout(context).apply {
@@ -134,13 +132,25 @@ class OverlayTargetPickerView(
             )
         })
 
-        addView(
-            bottomBar,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = dp(28)
-            }
-        )
+        val bottomParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(48)
+        }
+        addView(bottomBar, bottomParams)
+
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            topParams.topMargin = maxOf(dp(24), bars.top + dp(12))
+            bottomParams.bottomMargin = maxOf(dp(28), bars.bottom + dp(16))
+            bottomParams.leftMargin = maxOf(dp(12), bars.left + dp(8))
+            bottomParams.rightMargin = maxOf(dp(12), bars.right + dp(8))
+            topChip.layoutParams = topParams
+            bottomBar.layoutParams = bottomParams
+            insets
+        }
 
         refreshReadout()
     }

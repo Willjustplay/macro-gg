@@ -3,18 +3,19 @@ package com.example.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.LruCache
 import com.example.vision.PreparedTemplate
 import com.example.vision.decodeFrame
 import com.example.vision.savePng
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
-import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -40,7 +41,14 @@ class LocalStore(context: Context) {
         classDiscriminator = "type"
     }
 
-    private val templateCache = ConcurrentHashMap<String, PreparedTemplate>()
+    /** Bounded in-memory template cache (max 32 prepared templates) to prevent unbounded RAM growth. */
+    private val templateCache = LruCache<String, PreparedTemplate>(MAX_CACHED_TEMPLATES)
+
+    @Volatile
+    private var cachedMaxSeenMs: Long = prefs.getLong(KEY_MAX_SEEN_EPOCH_MS, 0L)
+
+    @Volatile
+    private var lastPersistedMaxSeenMs: Long = cachedMaxSeenMs
 
     private val _macros = MutableStateFlow<List<Macro>>(emptyList())
     val macros: StateFlow<List<Macro>> = _macros.asStateFlow()
@@ -59,22 +67,38 @@ class LocalStore(context: Context) {
 
     init {
         effectiveNowMs()
+        flushClockWatermark()
         reloadAll()
         seedExamplesIfFirstRun()
     }
 
     /**
      * Monotonic wall-clock watermark to prevent trivial device-clock rollback from bypassing
-     * macro expiration deadlines offline.
+     * macro expiration deadlines offline. Uses in-memory cache and throttles disk persistence
+     * to every 30s so tight macro execution loops incur zero SharedPreferences I/O.
      */
     fun effectiveNowMs(): Long {
         val sys = System.currentTimeMillis()
-        val maxSeen = prefs.getLong(KEY_MAX_SEEN_EPOCH_MS, 0L)
-        if (sys > maxSeen) {
-            prefs.edit().putLong(KEY_MAX_SEEN_EPOCH_MS, sys).apply()
+        val cur = cachedMaxSeenMs
+        if (sys > cur) {
+            cachedMaxSeenMs = sys
+            if (sys - lastPersistedMaxSeenMs >= WATERMARK_PERSIST_INTERVAL_MS) {
+                lastPersistedMaxSeenMs = sys
+                prefs.edit().putLong(KEY_MAX_SEEN_EPOCH_MS, sys).apply()
+            }
             return sys
         }
-        return maxSeen
+        return cur
+    }
+
+    /** Forces immediate persistence of the latest monotonic wall-clock watermark. */
+    fun flushClockWatermark() {
+        val cur = maxOf(cachedMaxSeenMs, System.currentTimeMillis())
+        cachedMaxSeenMs = cur
+        if (cur > lastPersistedMaxSeenMs) {
+            lastPersistedMaxSeenMs = cur
+            prefs.edit().putLong(KEY_MAX_SEEN_EPOCH_MS, cur).apply()
+        }
     }
 
     fun reloadAll() {
@@ -112,7 +136,10 @@ class LocalStore(context: Context) {
         val updated = macro.copy(updatedAt = System.currentTimeMillis())
         val file = File(macrosDir, "${sanitizeFileName(updated.id)}.json")
         file.writeText(json.encodeToString(updated))
-        _macros.value = loadMacros()
+        _macros.update { list ->
+            (list.filterNot { it.id == updated.id } + updated).sortedByDescending { it.updatedAt }
+        }
+        flushClockWatermark()
         return updated
     }
 
@@ -125,7 +152,7 @@ class LocalStore(context: Context) {
     fun deleteMacro(id: String) {
         val existing = getMacroById(id)
         File(macrosDir, "${sanitizeFileName(id)}.json").delete()
-        _macros.value = loadMacros()
+        _macros.update { list -> list.filterNot { it.id == id } }
         if (existing != null && existing.logoImage.isNotBlank()) {
             cleanupUnusedMacroIcon(existing.logoImage)
         }
@@ -246,13 +273,15 @@ class LocalStore(context: Context) {
         val updated = script.copy(updatedAt = System.currentTimeMillis())
         val file = File(scriptsDir, "${sanitizeFileName(updated.id)}.json")
         file.writeText(json.encodeToString(updated))
-        _scripts.value = loadScripts()
+        _scripts.update { list ->
+            (list.filterNot { it.id == updated.id } + updated).sortedByDescending { it.updatedAt }
+        }
         return updated
     }
 
     fun deleteScript(id: String) {
         File(scriptsDir, "${sanitizeFileName(id)}.json").delete()
-        _scripts.value = loadScripts()
+        _scripts.update { list -> list.filterNot { it.id == id } }
     }
 
     // ---- Target Image Library & Folders ----
@@ -502,11 +531,11 @@ class LocalStore(context: Context) {
 
     fun loadTemplate(name: String): PreparedTemplate? {
         val normalized = normalizeImageName(name)
-        templateCache[normalized]?.let { return it }
+        templateCache.get(normalized)?.let { return it }
         val file = resolveExistingImageFile(normalized) ?: return null
         val frame = file.decodeFrame() ?: return null
         val prepared = PreparedTemplate(normalized, frame)
-        templateCache[normalized] = prepared
+        templateCache.put(normalized, prepared)
         return prepared
     }
 
@@ -719,6 +748,8 @@ class LocalStore(context: Context) {
         private const val KEY_SETTINGS = "app_settings_json"
         private const val KEY_SEEDED = "seeded_v2"
         private const val KEY_MAX_SEEN_EPOCH_MS = "max_seen_epoch_ms"
+        private const val MAX_CACHED_TEMPLATES = 32
+        private const val WATERMARK_PERSIST_INTERVAL_MS = 30_000L
 
         @Volatile
         private var instance: LocalStore? = null

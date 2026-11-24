@@ -111,12 +111,22 @@ class OverlayRecorderView(
             (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
         })
 
-        addView(
-            bar,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-                topMargin = dp(38)
-            }
-        )
+        val barParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(38)
+        }
+        addView(bar, barParams)
+
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            barParams.topMargin = maxOf(dp(24), bars.top + dp(12))
+            barParams.leftMargin = maxOf(dp(10), bars.left + dp(8))
+            barParams.rightMargin = maxOf(dp(10), bars.right + dp(8))
+            bar.layoutParams = barParams
+            insets
+        }
     }
 
     private fun updateStatus() {
