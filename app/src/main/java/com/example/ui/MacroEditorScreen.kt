@@ -118,6 +118,8 @@ import com.example.data.ImageAction
 import com.example.data.ImageAsset
 import com.example.data.Macro
 import com.example.data.MacroSecurity
+import com.example.data.ResolutionScaleMode
+import com.example.data.ResolutionScaler
 import com.example.data.Slot
 import com.example.data.StuckRecoveryMode
 import com.example.data.TextAction
@@ -586,6 +588,8 @@ fun MacroEditorScreen(
         MacroSettingsSheet(
             macro = macro,
             logoPath = logoPath,
+            screenW = screenW,
+            screenH = screenH,
             onChangeLogo = {
                 showMacroSettings = false
                 onChangeLogo()
@@ -1223,6 +1227,8 @@ private fun AddActionPickerSheet(
 private fun MacroSettingsSheet(
     macro: Macro,
     logoPath: String?,
+    screenW: Int,
+    screenH: Int,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
     onTogglePassivePull: () -> Unit,
@@ -1238,6 +1244,14 @@ private fun MacroSettingsSheet(
     var maxMin by remember(macro.id) { mutableStateOf(macro.maxDurationMin.toString()) }
     var stuckSec by remember(macro.id) { mutableStateOf(macro.autoRecoverStuckSec.toString()) }
     var recoveryMode by remember(macro.id) { mutableStateOf(macro.stuckRecoveryMode) }
+    var autoScale by remember(macro.id) { mutableStateOf(macro.autoScaleResolution) }
+    var sourceWText by remember(macro.id) {
+        mutableStateOf(if (macro.sourceWidth > 0) macro.sourceWidth.toString() else "")
+    }
+    var sourceHText by remember(macro.id) {
+        mutableStateOf(if (macro.sourceHeight > 0) macro.sourceHeight.toString() else "")
+    }
+    var scaleMode by remember(macro.id) { mutableStateOf(macro.scaleMode) }
     val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -1466,6 +1480,138 @@ private fun MacroSettingsSheet(
             }
 
             HorizontalDivider()
+
+            // Auto-Scale Resolusi Layar (Phone <-> Redfinger / different screen sizes)
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                "Auto-Scale Resolusi Layar",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Otomatis menyesuaikan titik klik, swipe, zoom, rekaman, area & gambar saat dipindah ke perangkat lain (mis. Redfinger).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = autoScale, onCheckedChange = { autoScale = it })
+                    }
+
+                    if (autoScale) {
+                        val parsedSrcW = sourceWText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                        val parsedSrcH = sourceHText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                        val previewTransform = ResolutionScaler.forMacro(
+                            macro.copy(
+                                sourceWidth = parsedSrcW,
+                                sourceHeight = parsedSrcH,
+                                autoScaleResolution = autoScale,
+                                scaleMode = scaleMode
+                            ),
+                            screenW,
+                            screenH
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = sourceWText,
+                                onValueChange = { sourceWText = it.filter(Char::isDigit).take(4) },
+                                label = { Text("Lebar asal (px)") },
+                                placeholder = { Text("$screenW") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = sourceHText,
+                                onValueChange = { sourceHText = it.filter(Char::isDigit).take(4) },
+                                label = { Text("Tinggi asal (px)") },
+                                placeholder = { Text("$screenH") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = {
+                                    val wVal = sourceWText.ifBlank { screenW.toString() }
+                                    val hVal = sourceHText.ifBlank { screenH.toString() }
+                                    sourceWText = hVal
+                                    sourceHText = wVal
+                                }
+                            ) {
+                                Icon(Icons.Filled.SwapHoriz, contentDescription = "Tukar Portrait/Landscape")
+                            }
+                        }
+
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(
+                                selected = parsedSrcW == screenW && parsedSrcH == screenH,
+                                onClick = {
+                                    sourceWText = screenW.toString()
+                                    sourceHText = screenH.toString()
+                                },
+                                label = { Text("Layar Ini (${screenW}×${screenH})", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            ResolutionScaler.COMMON_PRESETS.forEach { (pw, ph) ->
+                                if (pw != screenW || ph != screenH) {
+                                    FilterChip(
+                                        selected = (parsedSrcW == pw && parsedSrcH == ph) || (parsedSrcW == ph && parsedSrcH == pw),
+                                        onClick = {
+                                            sourceWText = pw.toString()
+                                            sourceHText = ph.toString()
+                                        },
+                                        label = { Text("${pw}×${ph}", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                        }
+
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ResolutionScaleMode.entries.forEach { m ->
+                                FilterChip(
+                                    selected = scaleMode == m,
+                                    onClick = { scaleMode = m },
+                                    label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = when {
+                                parsedSrcW <= 0 || parsedSrcH <= 0 ->
+                                    "Resolusi asal belum disetel (akan diisi otomatis saat menambah aksi atau ekspor .zip). Layar ini: ${screenW}×${screenH}."
+                                previewTransform.isScaling ->
+                                    "Skala aktif: ${previewTransform.describe()} • ${scaleMode.description}"
+                                else ->
+                                    "Resolusi asal cocok dengan layar ini (${screenW}×${screenH}) — berjalan 1:1. ${scaleMode.description}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (previewTransform.isScaling) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider()
             Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             OutlinedTextField(
                 value = stuckSec,
@@ -1489,6 +1635,8 @@ private fun MacroSettingsSheet(
                 OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Batal") }
                 Button(
                     onClick = {
+                        val savedSrcW = (sourceWText.toIntOrNull() ?: 0).coerceIn(0, 10000)
+                        val savedSrcH = (sourceHText.toIntOrNull() ?: 0).coerceIn(0, 10000)
                         onSave(
                             macro.copy(
                                 name = name.trim().ifBlank { "Macro Baru" },
@@ -1498,7 +1646,11 @@ private fun MacroSettingsSheet(
                                 randomDelayMs = (randomDelay.toLongOrNull() ?: 0L).coerceAtLeast(0L),
                                 maxDurationMin = (maxMin.toIntOrNull() ?: 0).coerceIn(0, 1440),
                                 autoRecoverStuckSec = (stuckSec.toIntOrNull() ?: 0).coerceIn(0, 3600),
-                                stuckRecoveryMode = recoveryMode
+                                stuckRecoveryMode = recoveryMode,
+                                sourceWidth = savedSrcW,
+                                sourceHeight = savedSrcH,
+                                autoScaleResolution = autoScale,
+                                scaleMode = scaleMode
                             )
                         )
                     },

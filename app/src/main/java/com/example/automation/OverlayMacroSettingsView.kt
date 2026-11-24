@@ -32,6 +32,8 @@ import com.example.data.MacroSecurity
 import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.Region
+import com.example.data.ResolutionScaleMode
+import com.example.data.ResolutionScaler
 import com.example.data.RestartAction
 import com.example.data.RunMacroAction
 import com.example.data.Slot
@@ -321,6 +323,10 @@ class OverlayMacroSettingsView(
             if (expLabel != null) {
                 add("⏳ Masa berlaku: $expLabel (${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)})")
             }
+            val scaleTransform = ResolutionScaler.forMacro(macro, screenW, screenH)
+            if (scaleTransform.isScaling) {
+                add("📐 Auto-Scale aktif: ${scaleTransform.describe()}")
+            }
             add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit atau mengubah status Aktif/Pasif.")
         }.joinToString("\n\n")
 
@@ -366,6 +372,69 @@ class OverlayMacroSettingsView(
         val jitterField = addNumberRow(bodyContainer, "Acak posisi (±px)", macro.jitterPx.toString())
         val randomDelayField = addNumberRow(bodyContainer, "Acak jeda (+ms)", macro.randomDelayMs.toString())
         val maxMinField = addNumberRow(bodyContainer, "Stop otomatis (menit, 0=off)", macro.maxDurationMin.toString())
+
+        // Auto-Scale Resolusi Layar section
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("Auto-Scale Resolusi Layar"))
+        val autoScaleCheck = CheckBox(context).apply {
+            text = "Aktifkan Auto-Scale (antar HP / Redfinger)"
+            isChecked = macro.autoScaleResolution
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+        }
+        bodyContainer.addView(autoScaleCheck)
+
+        val srcWField = addNumberRow(
+            bodyContainer,
+            "Lebar asal (px, 0=otomatis)",
+            macro.sourceWidth.takeIf { it > 0 }?.toString() ?: ""
+        )
+        val srcHField = addNumberRow(
+            bodyContainer,
+            "Tinggi asal (px, 0=otomatis)",
+            macro.sourceHeight.takeIf { it > 0 }?.toString() ?: ""
+        )
+        val scalePresetsRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        scalePresetsRow.addView(makeBtn("Layar Ini (${screenW}×${screenH})", "#1E293B", marginEndDp = 5) {
+            srcWField.setText(screenW.toString())
+            srcHField.setText(screenH.toString())
+        })
+        scalePresetsRow.addView(makeBtn("⇄ Putar", "#1E293B", marginEndDp = 0) {
+            val curW = srcWField.text.toString().ifBlank { screenW.toString() }
+            val curH = srcHField.text.toString().ifBlank { screenH.toString() }
+            srcWField.setText(curH)
+            srcHField.setText(curW)
+        })
+        bodyContainer.addView(scalePresetsRow)
+
+        var chosenScaleMode = macro.scaleMode
+        val scaleModeRow = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(4)
+            }
+        }
+        val scaleModeBtns = mutableListOf<Pair<ResolutionScaleMode, TextView>>()
+        ResolutionScaleMode.entries.forEach { mode ->
+            val btn = makeBtn(mode.label, if (mode == chosenScaleMode) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                chosenScaleMode = mode
+                scaleModeBtns.forEach { (m, tv) ->
+                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenScaleMode) "#0284C7" else "#1E293B"))
+                }
+            }.apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(4)
+                }
+            }
+            scaleModeBtns += mode to btn
+            scaleModeRow.addView(btn)
+        }
+        bodyContainer.addView(scaleModeRow)
 
         // Auto-Recover Stuck Macro section
         bodyContainer.addView(dividerLine())
@@ -425,7 +494,11 @@ class OverlayMacroSettingsView(
                 randomDelayMs = (randomDelayField.text.toString().toLongOrNull() ?: macro.randomDelayMs).coerceAtLeast(0L),
                 maxDurationMin = (maxMinField.text.toString().toIntOrNull() ?: macro.maxDurationMin).coerceIn(0, 1440),
                 autoRecoverStuckSec = (stuckSecField.text.toString().toIntOrNull() ?: macro.autoRecoverStuckSec).coerceIn(0, 3600),
-                stuckRecoveryMode = chosenRecovery
+                stuckRecoveryMode = chosenRecovery,
+                sourceWidth = (srcWField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
+                sourceHeight = (srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
+                autoScaleResolution = autoScaleCheck.isChecked,
+                scaleMode = chosenScaleMode
             )
             macro = updated
             onUpdateMacro(updated)

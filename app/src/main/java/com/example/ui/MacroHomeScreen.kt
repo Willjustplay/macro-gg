@@ -86,6 +86,7 @@ import com.example.data.ImageAction
 import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.RecordAction
+import com.example.data.ResolutionScaler
 import com.example.data.TextAction
 import com.example.data.countActions
 import com.example.data.walk
@@ -98,6 +99,8 @@ fun MacroHomeScreen(
     isOverlayActive: Boolean,
     activeMacroId: String,
     nowMs: Long,
+    screenW: Int,
+    screenH: Int,
     resolveLogoPath: (String) -> String?,
     onOpenAccessibility: () -> Unit,
     onRequestOverlay: () -> Unit,
@@ -443,6 +446,8 @@ fun MacroHomeScreen(
                     macro = macro,
                     isActive = macro.id == activeMacroId && isOverlayActive,
                     nowMs = nowMs,
+                    screenW = screenW,
+                    screenH = screenH,
                     logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
                     modifier = Modifier.animateItem(),
                     onEdit = { onEditMacro(macro) },
@@ -504,6 +509,8 @@ private fun MacroListCard(
     macro: Macro,
     isActive: Boolean,
     nowMs: Long,
+    screenW: Int,
+    screenH: Int,
     logoPath: String?,
     modifier: Modifier = Modifier,
     onEdit: () -> Unit,
@@ -523,6 +530,9 @@ private fun MacroListCard(
     val hasColor = allActions.any { it is ColorAction }
     val hasRecord = allActions.any { it is RecordAction }
     val hasRandom = allActions.any { it.chancePercent < 100 }
+    val scaleTransform = remember(macro.sourceWidth, macro.sourceHeight, macro.autoScaleResolution, macro.scaleMode, screenW, screenH) {
+        ResolutionScaler.forMacro(macro, screenW, screenH)
+    }
 
     val isExpired = MacroSecurity.isExpired(macro, nowMs)
     val isTampered = MacroSecurity.isTampered(macro)
@@ -680,8 +690,8 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive badges row (shown cleanly when active)
-            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered) {
+            // Security / Expiry / Passive / Auto-Scale badges row (shown cleanly when active)
+            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (macro.isLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -690,6 +700,9 @@ private fun MacroListCard(
                             text = if (macro.passiveEnabled) "🔗 Pasif ON" else "⛔ Pasif OFF",
                             color = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
                         )
+                    }
+                    if (scaleTransform.isScaling) {
+                        FeatureTag("📐 Auto-Scale", Color(0xFF06B6D4))
                     }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)

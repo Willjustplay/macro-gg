@@ -103,6 +103,8 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
             loopCount = 0, // Infinite until stopped
             loopDelayMs = 150L,
             jitterPx = s.defaultJitterPx,
+            sourceWidth = screenW.coerceAtLeast(0),
+            sourceHeight = screenH.coerceAtLeast(0),
             actions = listOf(
                 ClickAction(x = screenW / 2, y = screenH / 2, durationMs = s.defaultTapDurationMs, delayAfterMs = 200L)
             )

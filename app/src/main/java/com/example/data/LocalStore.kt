@@ -3,7 +3,10 @@ package com.example.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
+import android.util.DisplayMetrics
 import android.util.LruCache
+import android.view.WindowManager
 import com.example.vision.PreparedTemplate
 import com.example.vision.decodeFrame
 import com.example.vision.savePng
@@ -107,6 +110,25 @@ class LocalStore(context: Context) {
         _imageFolders.value = loadImageFolders()
         _images.value = loadImages()
         _settings.value = loadSettings()
+    }
+
+    /** Returns the device's current real physical display size (width x height in pixels). */
+    fun currentScreenSize(): Pair<Int, Int> {
+        return runCatching {
+            val wm = appContext.getSystemService(WindowManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = wm.maximumWindowMetrics.bounds
+                bounds.width().coerceAtLeast(1) to bounds.height().coerceAtLeast(1)
+            } else {
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(metrics)
+                metrics.widthPixels.coerceAtLeast(1) to metrics.heightPixels.coerceAtLeast(1)
+            }
+        }.getOrElse {
+            val dm = appContext.resources.displayMetrics
+            dm.widthPixels.coerceAtLeast(1) to dm.heightPixels.coerceAtLeast(1)
+        }
     }
 
     // ---- Settings ----
@@ -560,15 +582,22 @@ class LocalStore(context: Context) {
         val imagesExported: Int
     )
 
+    private fun ensureExportSourceResolution(macro: Macro): Macro {
+        if (macro.sourceWidth > 0 && macro.sourceHeight > 0) return macro
+        val (dw, dh) = currentScreenSize()
+        val (sw, sh) = ResolutionScaler.inferSourceSizeForDevice(macro, dw, dh)
+        return if (sw > 0 && sh > 0) macro.copy(sourceWidth = sw, sourceHeight = sh) else macro
+    }
+
     /**
      * Exports a macro, all linked sub-macros, and all PNG target images they reference
      * into a portable .zip bundle (macro.json, linked_macros folder, and images folder).
      */
     fun exportMacroZip(macro: Macro, output: OutputStream): ExportSummary {
-        val latest = getMacroById(macro.id) ?: macro
+        val latest = ensureExportSourceResolution(getMacroById(macro.id) ?: macro)
         val res = MacroBundleCodec.writeMacroZip(
             root = latest,
-            lookupMacro = ::getMacroById,
+            lookupMacro = { id -> getMacroById(id)?.let(::ensureExportSourceResolution) },
             loadImage = { imgName ->
                 resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
             },
@@ -585,7 +614,8 @@ class LocalStore(context: Context) {
         var imagesWritten = 0
         val writtenIcons = HashSet<String>()
         ZipOutputStream(output).use { zip ->
-            for (macro in _macros.value) {
+            for (rawMacro in _macros.value) {
+                val macro = ensureExportSourceResolution(rawMacro)
                 zip.putNextEntry(ZipEntry("macros/${sanitizeFileName(macro.id)}.json"))
                 zip.write(json.encodeToString(macro).toByteArray(Charsets.UTF_8))
                 zip.closeEntry()

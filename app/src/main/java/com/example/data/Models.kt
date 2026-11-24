@@ -36,6 +36,19 @@ enum class ExpiryUnit(val label: String) {
     MONTHS("Bulan")
 }
 
+/** How coordinates, gestures, regions & templates scale across different screen resolutions. */
+@Serializable
+enum class ResolutionScaleMode(val label: String, val description: String) {
+    PROPORTIONAL(
+        "Proporsional (Penuh)",
+        "Skala sesuai persentase lebar & tinggi layar penuh (cocok untuk kebanyakan game & aplikasi)."
+    ),
+    CENTER_FIT(
+        "Skala Tengah (Game 16:9)",
+        "Skala seragam dari tengah layar mengikuti sisi pendek (cocok untuk game berbingkai / rasio tetap)."
+    )
+}
+
 /**
  * A single building block of a macro (Macrorify-style component).
  * Condition actions ([ImageAction], [TextAction], [ColorAction]) and [LoopAction] contain nested actions.
@@ -375,6 +388,13 @@ data class Macro(
     val originId: String = "",
     /** Integrity seal over protection fields to detect manual JSON tampering. */
     val securitySeal: String = "",
+    /** Real-pixel screen resolution where this macro's coordinates were created (0 = unspecified/legacy). */
+    val sourceWidth: Int = 0,
+    val sourceHeight: Int = 0,
+    /** Automatically scale clicks, swipes, gestures, regions & image templates to the active device screen. */
+    val autoScaleResolution: Boolean = true,
+    /** Projection mode used when source and target aspect ratios differ. */
+    val scaleMode: ResolutionScaleMode = ResolutionScaleMode.PROPORTIONAL,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

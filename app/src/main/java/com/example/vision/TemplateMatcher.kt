@@ -3,6 +3,7 @@ package com.example.vision
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** Immutable ARGB pixel buffer (row-major). Pure Kotlin so it can be unit-tested on the JVM. */
@@ -108,6 +109,41 @@ class GrayImage(val width: Int, val height: Int, val data: FloatArray) {
         return GrayImage(nw, nh, out)
     }
 
+    /** Center-aligned bilinear resize for cross-resolution template auto-scaling. */
+    fun resizeBilinear(newWidth: Int, newHeight: Int): GrayImage {
+        val nw = newWidth.coerceAtLeast(1)
+        val nh = newHeight.coerceAtLeast(1)
+        if (nw == width && nh == height) return this
+        val out = FloatArray(nw * nh)
+        val xRatio = width.toFloat() / nw.toFloat()
+        val yRatio = height.toFloat() / nh.toFloat()
+        val maxSrcX = (width - 1).toFloat()
+        val maxSrcY = (height - 1).toFloat()
+        for (y in 0 until nh) {
+            val srcY = ((y + 0.5f) * yRatio - 0.5f).coerceIn(0f, maxSrcY)
+            val y0 = srcY.toInt()
+            val y1 = min(y0 + 1, height - 1)
+            val wy = srcY - y0
+            val row0 = y0 * width
+            val row1 = y1 * width
+            val dstRow = y * nw
+            for (x in 0 until nw) {
+                val srcX = ((x + 0.5f) * xRatio - 0.5f).coerceIn(0f, maxSrcX)
+                val x0 = srcX.toInt()
+                val x1 = min(x0 + 1, width - 1)
+                val wx = srcX - x0
+                val v00 = data[row0 + x0]
+                val v10 = data[row0 + x1]
+                val v01 = data[row1 + x0]
+                val v11 = data[row1 + x1]
+                val top = v00 + (v10 - v00) * wx
+                val bot = v01 + (v11 - v01) * wx
+                out[dstRow + x] = top + (bot - top) * wy
+            }
+        }
+        return GrayImage(nw, nh, out)
+    }
+
     fun crop(left: Int, top: Int, w: Int, h: Int): GrayImage {
         val out = FloatArray(w * h)
         for (row in 0 until h) System.arraycopy(data, (top + row) * width + left, out, row * w, w)
@@ -134,10 +170,11 @@ data class SearchOutcome(
 )
 
 /** Template prepared once (gray + power-of-2 pyramid levels) and cached across searches. */
-class PreparedTemplate(val name: String, frame: Frame) {
-    val width = frame.width
-    val height = frame.height
-    val gray: GrayImage = GrayImage.fromFrame(frame)
+class PreparedTemplate private constructor(val name: String, val gray: GrayImage) {
+    constructor(name: String, frame: Frame) : this(name, GrayImage.fromFrame(frame))
+
+    val width = gray.width
+    val height = gray.height
 
     /**
      * Strictly power-of-2 coarse downsample factor (1, 2, 4, or 8) so every pyramid step
@@ -151,9 +188,22 @@ class PreparedTemplate(val name: String, frame: Frame) {
     }
 
     private val levels = HashMap<Int, TemplateLevel>()
+    private val scaledVariants = HashMap<Long, PreparedTemplate>()
 
     @Synchronized
     fun level(factor: Int): TemplateLevel = levels.getOrPut(factor) { TemplateLevel(gray.downsample(factor)) }
+
+    /** Returns a cached bilinear-resized copy of this template for cross-resolution matching. */
+    @Synchronized
+    fun scaled(scaleX: Double, scaleY: Double): PreparedTemplate {
+        val nw = (width * scaleX).roundToInt().coerceAtLeast(4)
+        val nh = (height * scaleY).roundToInt().coerceAtLeast(4)
+        if (nw == width && nh == height) return this
+        val key = (nw.toLong() shl 32) or (nh.toLong() and 0xFFFF_FFFFL)
+        return scaledVariants.getOrPut(key) {
+            PreparedTemplate("$name@${nw}x$nh", gray.resizeBilinear(nw, nh))
+        }
+    }
 }
 
 /** Zero-mean template data + its energy, ready for NCC. */

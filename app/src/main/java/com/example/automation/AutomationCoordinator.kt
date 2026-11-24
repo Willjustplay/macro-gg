@@ -14,6 +14,7 @@ import com.example.data.MacroSecurity
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.ResolutionScaler
 import com.example.data.RunMacroAction
 import com.example.data.SwipeAction
 import com.example.data.TextAction
@@ -153,40 +154,82 @@ object AutomationCoordinator {
         return false
     }
 
-    fun addQuickClickMarker(x: Int, y: Int): ClickAction? {
+    private fun resolveScreenSize(screenW: Int, screenH: Int): Pair<Int, Int> {
+        if (screenW > 0 && screenH > 0) return screenW to screenH
+        return store?.currentScreenSize() ?: (ScreenCaptureService.captureWidth to ScreenCaptureService.captureHeight)
+    }
+
+    private fun liveScreenSize(fallbackW: Int, fallbackH: Int): Pair<Int, Int> {
+        if (ScreenCaptureService.isCapturing.value && ScreenCaptureService.captureWidth > 0 && ScreenCaptureService.captureHeight > 0) {
+            return ScreenCaptureService.captureWidth to ScreenCaptureService.captureHeight
+        }
+        return store?.currentScreenSize() ?: (fallbackW.coerceAtLeast(1) to fallbackH.coerceAtLeast(1))
+    }
+
+    fun addQuickClickMarker(x: Int, y: Int, screenW: Int = 0, screenH: Int = 0): ClickAction? {
         if (rejectIfActiveMacroLocked()) return null
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         val settings = store?.settings?.value
         val tapMs = settings?.defaultTapDurationMs ?: 50L
-        val created = ClickAction(x = x, y = y, durationMs = tapMs, delayAfterMs = 300L)
+        var created: ClickAction? = null
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions + created)
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val (ox, oy) = t.unscalePoint(x, y)
+            val action = ClickAction(x = ox, y = oy, durationMs = tapMs, delayAfterMs = 300L)
+            created = action
+            base.copy(actions = base.actions + action)
         }
         ExecutionLogBus.info("Titik klik ditambahkan di ($x, $y).")
         return created
     }
 
-    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int): SwipeAction? {
+    fun addQuickSwipeMarker(
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        screenW: Int = 0,
+        screenH: Int = 0
+    ): SwipeAction? {
         if (rejectIfActiveMacroLocked()) return null
-        val created = SwipeAction(x1 = x1, y1 = y1, x2 = x2, y2 = y2, durationMs = 350L, delayAfterMs = 300L)
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
+        var created: SwipeAction? = null
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions + created)
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val (ox1, oy1) = t.unscalePoint(x1, y1)
+            val (ox2, oy2) = t.unscalePoint(x2, y2)
+            val action = SwipeAction(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2, durationMs = 350L, delayAfterMs = 300L)
+            created = action
+            base.copy(actions = base.actions + action)
         }
         ExecutionLogBus.info("Swipe ditambahkan ($x1,$y1) → ($x2,$y2).")
         return created
     }
 
-    fun addQuickImageAction(imageName: String, threshold: Float = 0.80f, region: Region? = null) {
+    fun addQuickImageAction(
+        imageName: String,
+        threshold: Float = 0.80f,
+        region: Region? = null,
+        screenW: Int = 0,
+        screenH: Int = 0
+    ) {
         if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions + ImageAction(
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedRegion = region?.let { t.unscaleRegion(it) }
+            base.copy(
+                actions = base.actions + ImageAction(
                     imageName = imageName,
                     threshold = threshold,
                     timeoutMs = 3000L,
-                    region = region,
+                    region = storedRegion,
                     clickOnFound = true
                 )
             )
@@ -206,14 +249,18 @@ object AutomationCoordinator {
         ExecutionLogBus.image("Gambar '$imageName' dipasang ke aksi Deteksi Gambar.")
     }
 
-    fun bindRegionToAction(actionId: String, region: Region) {
+    fun bindRegionToAction(actionId: String, region: Region, screenW: Int = 0, screenH: Int = 0) {
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions.updateAction(actionId) { a ->
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedRegion = t.unscaleRegion(region)
+            base.copy(
+                actions = base.actions.updateAction(actionId) { a ->
                     when (a) {
-                        is TextAction -> a.copy(region = region)
-                        is ImageAction -> a.copy(region = region)
+                        is TextAction -> a.copy(region = storedRegion)
+                        is ImageAction -> a.copy(region = storedRegion)
                         else -> a
                     }
                 }
@@ -222,30 +269,65 @@ object AutomationCoordinator {
         ExecutionLogBus.info("Area baca (${region.left},${region.top})–(${region.right},${region.bottom}) disimpan.")
     }
 
-    fun addRecordedGestures(gestures: List<RecordedGesture>) {
+    fun addRecordedGestures(gestures: List<RecordedGesture>, screenW: Int = 0, screenH: Int = 0) {
         if (gestures.isEmpty()) return
         if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions + RecordAction(gestures = gestures))
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedGestures = gestures.map { t.unscaleRecordedGesture(it) }
+            base.copy(actions = base.actions + RecordAction(gestures = storedGestures))
         }
         ExecutionLogBus.action("Rekaman (${gestures.size} gestur) ditambahkan ke '${_activeMacro.value.name}'.")
     }
 
-    fun addQuickZoomMarker(cx: Int, cy: Int, zoomIn: Boolean = true) {
+    fun addQuickZoomMarker(cx: Int, cy: Int, zoomIn: Boolean = true, screenW: Int = 0, screenH: Int = 0) {
         if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions + ZoomAction(cx = cx, cy = cy, zoomIn = zoomIn))
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val (ox, oy) = t.unscalePoint(cx, cy)
+            base.copy(actions = base.actions + ZoomAction(cx = ox, cy = oy, zoomIn = zoomIn))
         }
         ExecutionLogBus.info("${if (zoomIn) "Zoom In" else "Zoom Out"} ditambahkan di ($cx, $cy).")
     }
 
-    fun addActionFromOverlay(ref: ContainerRef, action: Action) {
+    fun addActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
         if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions.insertInto(ref, action))
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedAction = when (action) {
+                is ClickAction -> {
+                    val (ox, oy) = t.unscalePoint(action.x, action.y)
+                    action.copy(x = ox, y = oy)
+                }
+                is LongPressAction -> {
+                    val (ox, oy) = t.unscalePoint(action.x, action.y)
+                    action.copy(x = ox, y = oy)
+                }
+                is SwipeAction -> {
+                    val (ox1, oy1) = t.unscalePoint(action.x1, action.y1)
+                    val (ox2, oy2) = t.unscalePoint(action.x2, action.y2)
+                    action.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
+                }
+                is ZoomAction -> {
+                    val (ox, oy) = t.unscalePoint(action.cx, action.cy)
+                    action.copy(cx = ox, cy = oy)
+                }
+                is ColorAction -> {
+                    val (ox, oy) = t.unscalePoint(action.x, action.y)
+                    action.copy(x = ox, y = oy)
+                }
+                else -> action
+            }
+            base.copy(actions = base.actions.insertInto(ref, storedAction))
         }
     }
 
@@ -256,17 +338,60 @@ object AutomationCoordinator {
         }
     }
 
-    fun updateMarkerPosition(actionId: String, newX: Int, newY: Int, isEndNode: Boolean = false) {
+    fun updateMarkerPosition(
+        actionId: String,
+        newX: Int,
+        newY: Int,
+        isEndNode: Boolean = false,
+        screenW: Int = 0,
+        screenH: Int = 0
+    ) {
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions.updateAction(actionId) { a ->
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val (ox, oy) = t.unscalePoint(newX, newY)
+            base.copy(
+                actions = base.actions.updateAction(actionId) { a ->
                     when (a) {
-                        is ClickAction -> a.copy(x = newX, y = newY)
-                        is LongPressAction -> a.copy(x = newX, y = newY)
-                        is SwipeAction -> if (isEndNode) a.copy(x2 = newX, y2 = newY) else a.copy(x1 = newX, y1 = newY)
-                        is ZoomAction -> a.copy(cx = newX, cy = newY)
-                        is ColorAction -> a.copy(x = newX, y = newY)
+                        is ClickAction -> a.copy(x = ox, y = oy)
+                        is LongPressAction -> a.copy(x = ox, y = oy)
+                        is SwipeAction -> if (isEndNode) a.copy(x2 = ox, y2 = oy) else a.copy(x1 = ox, y1 = oy)
+                        is ZoomAction -> a.copy(cx = ox, cy = oy)
+                        is ColorAction -> a.copy(x = ox, y = oy)
                         else -> a
+                    }
+                }
+            )
+        }
+    }
+
+    fun updateTargetFromScreen(
+        actionId: String,
+        screenX1: Int,
+        screenY1: Int,
+        screenX2: Int,
+        screenY2: Int,
+        hexColor: String?,
+        screenW: Int,
+        screenH: Int
+    ) {
+        if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
+        updateActiveMacro(persist = true) { macro ->
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val (ox1, oy1) = t.unscalePoint(screenX1, screenY1)
+            val (ox2, oy2) = t.unscalePoint(screenX2, screenY2)
+            base.copy(
+                actions = base.actions.updateAction(actionId) { cur ->
+                    when (cur) {
+                        is ClickAction -> cur.copy(x = ox1, y = oy1)
+                        is LongPressAction -> cur.copy(x = ox1, y = oy1)
+                        is SwipeAction -> cur.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
+                        is ZoomAction -> cur.copy(cx = ox1, cy = oy1)
+                        is ColorAction -> cur.copy(x = ox1, y = oy1, color = hexColor ?: cur.color)
+                        else -> cur
                     }
                 }
             )
@@ -373,8 +498,8 @@ object AutomationCoordinator {
                 "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
             )
             val runtime = object : MacroRuntime {
-                override val screenWidth: Int = screenWidth
-                override val screenHeight: Int = screenHeight
+                override val screenWidth: Int get() = liveScreenSize(screenWidth, screenHeight).first
+                override val screenHeight: Int get() = liveScreenSize(screenWidth, screenHeight).second
                 override fun isStopped(): Boolean = stopRequested.get() || !isActive
                 override suspend fun waitIfPaused() = this@AutomationCoordinator.waitIfPaused()
                 override suspend fun sleep(ms: Long) = cooperativeDelay(ms)

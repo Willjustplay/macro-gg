@@ -503,7 +503,19 @@ private fun WjustMacroApp() {
                 screenW = sw,
                 screenH = sh,
                 snackbarHostState = snackbarHostState,
-                onUpdateMacro = { updated -> viewModel.saveMacro(updated) },
+                onUpdateMacro = { updated ->
+                    val toSave = if (
+                        updated.actions != editingMacro.actions &&
+                        (updated.sourceWidth <= 0 || updated.sourceHeight <= 0) &&
+                        com.example.data.ResolutionScaler.hasCoordinateActions(updated)
+                    ) {
+                        val (iw, ih) = com.example.data.ResolutionScaler.inferSourceSizeForDevice(updated, sw, sh)
+                        updated.copy(sourceWidth = iw, sourceHeight = ih)
+                    } else {
+                        updated
+                    }
+                    viewModel.saveMacro(toSave)
+                },
                 onRecropImage = viewModel::recropImage,
                 onChangeLogo = { requestChangeLogo(editingMacro) },
                 onOpenSecurity = { requestOpenSecurity(editingMacro) },
@@ -549,6 +561,7 @@ private fun WjustMacroApp() {
                 }
             )
         } else {
+            val (homeSw, homeSh) = screenMetrics()
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 contentWindowInsets = WindowInsets.safeDrawing,
@@ -591,6 +604,8 @@ private fun WjustMacroApp() {
                             isOverlayActive = isOverlayActive,
                             activeMacroId = activeMacro.id,
                             nowMs = viewModel.effectiveNowMs(),
+                            screenW = homeSw,
+                            screenH = homeSh,
                             resolveLogoPath = viewModel::macroIconPath,
                             onOpenAccessibility = {
                                 if (permissions.accessibilityEnabled) {

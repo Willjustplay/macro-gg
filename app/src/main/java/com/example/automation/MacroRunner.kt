@@ -20,6 +20,7 @@ import com.example.data.TextAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.Region
+import com.example.data.ResolutionScaler
 import com.example.data.kind
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
@@ -65,6 +66,7 @@ private enum class FlowControl {
  * - Multi-point clicks with burst repeat & jitter
  * - Long press, swipe, 2-finger pinch Zoom In/Out, wait with random jitter
  * - Per-action success probability ([Action.chancePercent]) for random events
+ * - Automatic screen resolution scaling ([ResolutionScaler]) across devices & cloud phones
  * - Image, OCR Text/Value, and Color detection with full Then/Else branches + Found/NotFound flow modes
  * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection & Passive Mode support
  * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
@@ -91,6 +93,10 @@ class MacroRunner(
         if (depth >= MAX_CHAIN_DEPTH) {
             runtime.log(LogLevel.WARN, "Batas kedalaman macro terhubung ($MAX_CHAIN_DEPTH) tercapai — dihentikan untuk mencegah loop tak hingga.")
             return FlowControl.NEXT
+        }
+        val initialTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+        if (initialTransform.isScaling) {
+            runtime.log(LogLevel.INFO, "Auto-Scale '${macro.name}': ${initialTransform.describe()}")
         }
         val startedAt = runtime.nowMs()
         val maxDurationMs = if (macro.maxDurationMin > 0) macro.maxDurationMin * 60_000L else Long.MAX_VALUE
@@ -216,13 +222,16 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
+        val transform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+        val scaledJitter = transform.scaleDistance(macro.jitterPx)
         return when (action) {
             is ClickAction -> {
+                val (sx, sy) = transform.scalePoint(action.x, action.y)
                 val times = action.repeat.coerceAtLeast(1)
                 for (i in 0 until times) {
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     runtime.waitIfPaused()
-                    val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
+                    val (tx, ty) = applyJitter(sx, sy, scaledJitter)
                     runtime.log(LogLevel.ACTION, "Klik ($tx, $ty) ${action.durationMs}ms" + if (times > 1) " [${i + 1}/$times]" else "")
                     if (runtime.click(tx, ty, action.durationMs)) {
                         runtime.onActionExecuted()
@@ -236,7 +245,8 @@ class MacroRunner(
             }
 
             is LongPressAction -> {
-                val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
+                val (sx, sy) = transform.scalePoint(action.x, action.y)
+                val (tx, ty) = applyJitter(sx, sy, scaledJitter)
                 val dur = action.durationMs.coerceAtLeast(250L)
                 runtime.log(LogLevel.ACTION, "Tahan ($tx, $ty) ${dur}ms")
                 if (runtime.click(tx, ty, dur)) {
@@ -247,8 +257,10 @@ class MacroRunner(
             }
 
             is SwipeAction -> {
-                runtime.log(LogLevel.ACTION, "Swipe (${action.x1},${action.y1}) → (${action.x2},${action.y2}) ${action.durationMs}ms")
-                if (runtime.swipe(action.x1, action.y1, action.x2, action.y2, action.durationMs)) {
+                val (sx1, sy1) = transform.scalePoint(action.x1, action.y1)
+                val (sx2, sy2) = transform.scalePoint(action.x2, action.y2)
+                runtime.log(LogLevel.ACTION, "Swipe ($sx1,$sy1) → ($sx2,$sy2) ${action.durationMs}ms")
+                if (runtime.swipe(sx1, sy1, sx2, sy2, action.durationMs)) {
                     runtime.onActionExecuted()
                     markProgress()
                 }
@@ -256,9 +268,11 @@ class MacroRunner(
             }
 
             is ZoomAction -> {
+                val (scx, scy) = transform.scalePoint(action.cx, action.cy)
+                val scaledDist = transform.scaleDistance(action.distancePx)
                 val label = if (action.zoomIn) "Zoom In" else "Zoom Out"
-                runtime.log(LogLevel.ACTION, "$label di (${action.cx},${action.cy}) jarak=${action.distancePx}px")
-                if (runtime.zoom(action.cx, action.cy, action.zoomIn, action.distancePx, action.durationMs)) {
+                runtime.log(LogLevel.ACTION, "$label di ($scx,$scy) jarak=${scaledDist}px")
+                if (runtime.zoom(scx, scy, action.zoomIn, scaledDist, action.durationMs)) {
                     runtime.onActionExecuted()
                     markProgress()
                 }
@@ -335,7 +349,8 @@ class MacroRunner(
                     val waitMs = (g.delayBeforeMs / speed).roundToLong().coerceAtLeast(0L)
                     if (waitMs > 0) runtime.sleep(waitMs)
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
-                    if (runtime.playRecordedGesture(g, speed)) {
+                    val scaledGesture = transform.scaleRecordedGesture(g)
+                    if (runtime.playRecordedGesture(scaledGesture, speed)) {
                         runtime.onActionExecuted()
                         markProgress()
                     }
@@ -370,7 +385,6 @@ class MacroRunner(
         }
 
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
-        val region = action.region
         var matched: MatchResult? = null
         var bestScore = 0.0
         var sawFrame = false
@@ -381,19 +395,31 @@ class MacroRunner(
             val frame = runtime.captureFrame()
             if (frame != null) {
                 sawFrame = true
-                val outcome = if (region != null && region.width >= template.width && region.height >= template.height) {
-                    TemplateMatcher.findWithStats(
-                        frame, template, action.threshold.toDouble(),
-                        region.left, region.top, region.right, region.bottom
-                    )
-                } else {
-                    TemplateMatcher.findWithStats(frame, template, action.threshold.toDouble())
+                val frameTransform = ResolutionScaler.forMacro(macro, frame.width, frame.height)
+                val scaledRegion = action.region?.let { frameTransform.scaleRegion(it) }
+                val candidates = frameTransform.templateScaleCandidates().map { (sx, sy) ->
+                    template.scaled(sx, sy)
                 }
-                if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
-                if (outcome.match != null) {
-                    matched = outcome.match
-                    break
+                for (cand in candidates) {
+                    if (cand.width > frame.width || cand.height > frame.height) continue
+                    val outcome = if (scaledRegion != null && scaledRegion.width >= cand.width && scaledRegion.height >= cand.height) {
+                        TemplateMatcher.findWithStats(
+                            frame, cand, action.threshold.toDouble(),
+                            scaledRegion.left, scaledRegion.top, scaledRegion.right, scaledRegion.bottom
+                        )
+                    } else if (scaledRegion == null) {
+                        TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
+                    } else {
+                        // Scaled region was slightly tighter than candidate due to rounding; search full frame fallback
+                        TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
+                    }
+                    if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
+                    if (outcome.match != null) {
+                        matched = outcome.match
+                        break
+                    }
                 }
+                if (matched != null) break
             }
             if (runtime.nowMs() >= deadline) break
             runtime.sleep(120L)
@@ -405,7 +431,13 @@ class MacroRunner(
             runtime.onMatchFound(matched, "${action.imageName} $pct%")
             markProgress()
             if (action.clickOnFound) {
-                val (tx, ty) = applyJitter(matched.centerX + action.offsetX, matched.centerY + action.offsetY, macro.jitterPx)
+                val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+                val (ox, oy) = clickTransform.scaleDelta(action.offsetX, action.offsetY)
+                val (tx, ty) = applyJitter(
+                    matched.centerX + ox,
+                    matched.centerY + oy,
+                    clickTransform.scaleDistance(macro.jitterPx)
+                )
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
             return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
@@ -428,12 +460,14 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
+        val transform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+        val (sx, sy) = transform.scalePoint(action.x, action.y)
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var matched = false
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
             checkStuckRecovery(macro)?.let { return it }
-            val argb = runtime.samplePixelArgb(action.x, action.y)
+            val argb = runtime.samplePixelArgb(sx, sy)
             if (argb != null && ColorUtil.matches(argb, action.color, action.tolerance)) {
                 matched = true
                 break
@@ -443,10 +477,10 @@ class MacroRunner(
         }
 
         if (matched) {
-            runtime.log(LogLevel.COLOR, "Warna ${action.color} cocok di (${action.x},${action.y})")
+            runtime.log(LogLevel.COLOR, "Warna ${action.color} cocok di ($sx,$sy)")
             markProgress()
             if (action.clickOnFound) {
-                val (tx, ty) = applyJitter(action.x, action.y, macro.jitterPx)
+                val (tx, ty) = applyJitter(sx, sy, transform.scaleDistance(macro.jitterPx))
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
             return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
@@ -463,6 +497,8 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
+        val transform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+        val scaledRegion = action.region?.let { transform.scaleRegion(it) }
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var lastOutcome = TextConditionEvaluator.evaluate(action, emptyList())
         var sawBlocks = false
@@ -470,7 +506,7 @@ class MacroRunner(
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
             checkStuckRecovery(macro)?.let { return it }
-            val blocks = runtime.recognizeText(action.region)
+            val blocks = runtime.recognizeText(scaledRegion)
             if (blocks.isNotEmpty()) sawBlocks = true
             val outcome = TextConditionEvaluator.evaluate(action, blocks)
             lastOutcome = outcome
@@ -495,12 +531,12 @@ class MacroRunner(
             markProgress()
             if (action.clickOnFound) {
                 val cx = lastOutcome.matchedBlock?.centerX
-                    ?: action.region?.let { it.left + it.width / 2 }
+                    ?: scaledRegion?.let { it.left + it.width / 2 }
                     ?: (runtime.screenWidth / 2)
                 val cy = lastOutcome.matchedBlock?.centerY
-                    ?: action.region?.let { it.top + it.height / 2 }
+                    ?: scaledRegion?.let { it.top + it.height / 2 }
                     ?: (runtime.screenHeight / 2)
-                val (tx, ty) = applyJitter(cx, cy, macro.jitterPx)
+                val (tx, ty) = applyJitter(cx, cy, transform.scaleDistance(macro.jitterPx))
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
             return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)

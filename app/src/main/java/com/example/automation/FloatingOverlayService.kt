@@ -54,6 +54,7 @@ import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.ResolutionScaler
 import com.example.data.Slot
 import com.example.data.SwipeAction
 import com.example.data.TextAction
@@ -431,7 +432,12 @@ class FloatingOverlayService : Service() {
 
         topRow.addView(makeCompactButton("+", "#1D4ED8") {
             refreshScreenSize()
-            val created = AutomationCoordinator.addQuickClickMarker(screenWidth / 2, screenHeight / 2)
+            val created = AutomationCoordinator.addQuickClickMarker(
+                screenWidth / 2,
+                screenHeight / 2,
+                screenWidth,
+                screenHeight
+            )
             if (created != null) {
                 launchTargetPicker(created.id, reopenSettingsActionId = null)
             } else {
@@ -468,7 +474,9 @@ class FloatingOverlayService : Service() {
                 screenWidth / 2,
                 (screenHeight * 0.62f).toInt(),
                 screenWidth / 2,
-                (screenHeight * 0.38f).toInt()
+                (screenHeight * 0.38f).toInt(),
+                screenWidth,
+                screenHeight
             )
             if (created != null) {
                 launchTargetPicker(created.id, reopenSettingsActionId = null)
@@ -665,7 +673,8 @@ class FloatingOverlayService : Service() {
                 Toast.makeText(this, "Setelan macro disimpan", Toast.LENGTH_SHORT).show()
             },
             onAddAction = { ref, newAction ->
-                AutomationCoordinator.addActionFromOverlay(ref, newAction)
+                refreshScreenSize()
+                AutomationCoordinator.addActionFromOverlay(ref, newAction, screenWidth, screenHeight)
                 macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
             onUpdateAction = { actionId, transform ->
@@ -709,7 +718,7 @@ class FloatingOverlayService : Service() {
                     durationMs = tapMs,
                     delayAfterMs = 250L
                 )
-                AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created)
+                AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
                 dismissMacroSettingsPanel()
                 launchTargetPicker(created.id, reopenSettingsActionId = parentId)
             },
@@ -749,7 +758,8 @@ class FloatingOverlayService : Service() {
         dismissMarkerEditor()
         refreshScreenSize()
 
-        val found = AutomationCoordinator.activeMacro.value.actions
+        val activeMacro = AutomationCoordinator.activeMacro.value
+        val found = activeMacro.actions
             .walkWithSlot()
             .firstOrNull { it.first.id == actionId }
         if (found == null) {
@@ -757,6 +767,7 @@ class FloatingOverlayService : Service() {
             return
         }
         val (action, slot) = found
+        val scaleTransform = ResolutionScaler.forMacro(activeMacro, screenWidth, screenHeight)
         val slotSuffix = when (slot) {
             Slot.THEN -> " — Jika Ditemukan"
             Slot.ELSE -> " — Jika Tidak Ditemukan"
@@ -780,27 +791,33 @@ class FloatingOverlayService : Service() {
         val title: String
         when (action) {
             is ClickAction -> {
-                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
+                isDual = false; x1 = sx; y1 = sy; x2 = sx; y2 = sy
                 sampleColor = false; initHex = null
                 title = "🎯 Posisi Klik$slotSuffix"
             }
             is LongPressAction -> {
-                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
+                isDual = false; x1 = sx; y1 = sy; x2 = sx; y2 = sy
                 sampleColor = false; initHex = null
                 title = "🎯 Posisi Tahan$slotSuffix"
             }
             is SwipeAction -> {
-                isDual = true; x1 = action.x1; y1 = action.y1; x2 = action.x2; y2 = action.y2
+                val (sx1, sy1) = scaleTransform.scalePoint(action.x1, action.y1)
+                val (sx2, sy2) = scaleTransform.scalePoint(action.x2, action.y2)
+                isDual = true; x1 = sx1; y1 = sy1; x2 = sx2; y2 = sy2
                 sampleColor = false; initHex = null
                 title = "🎯 Garis Swipe A→B$slotSuffix"
             }
             is ZoomAction -> {
-                isDual = false; x1 = action.cx; y1 = action.cy; x2 = x1; y2 = y1
+                val (sx, sy) = scaleTransform.scalePoint(action.cx, action.cy)
+                isDual = false; x1 = sx; y1 = sy; x2 = sx; y2 = sy
                 sampleColor = false; initHex = null
                 title = "🎯 Pusat Zoom$slotSuffix"
             }
             is ColorAction -> {
-                isDual = false; x1 = action.x; y1 = action.y; x2 = x1; y2 = y1
+                val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
+                isDual = false; x1 = sx; y1 = sy; x2 = sx; y2 = sy
                 sampleColor = true; initHex = action.color
                 title = "🎯 Titik Warna$slotSuffix"
             }
@@ -828,16 +845,17 @@ class FloatingOverlayService : Service() {
             initialHexColor = initHex,
             pixelSampler = if (sampleColor) { px, py -> ScreenCaptureService.samplePixelHex(px, py) } else null,
             onSave = { nx1, ny1, nx2, ny2, hex ->
-                AutomationCoordinator.updateActionFromOverlay(actionId) { cur ->
-                    when (cur) {
-                        is ClickAction -> cur.copy(x = nx1, y = ny1)
-                        is LongPressAction -> cur.copy(x = nx1, y = ny1)
-                        is SwipeAction -> cur.copy(x1 = nx1, y1 = ny1, x2 = nx2, y2 = ny2)
-                        is ZoomAction -> cur.copy(cx = nx1, cy = ny1)
-                        is ColorAction -> cur.copy(x = nx1, y = ny1, color = hex ?: cur.color)
-                        else -> cur
-                    }
-                }
+                refreshScreenSize()
+                AutomationCoordinator.updateTargetFromScreen(
+                    actionId = actionId,
+                    screenX1 = nx1,
+                    screenY1 = ny1,
+                    screenX2 = nx2,
+                    screenY2 = ny2,
+                    hexColor = hex,
+                    screenW = screenWidth,
+                    screenH = screenHeight
+                )
                 if (sampleColor && hex != null) {
                     AutomationCoordinator.publishPickedPixel(nx1, ny1, hex)
                 }
@@ -1110,7 +1128,12 @@ class FloatingOverlayService : Service() {
                     !regionTargetActionId.isNullOrBlank() -> {
                         cropped.recycle()
                         val region = Region(rect.left, rect.top, rect.right, rect.bottom)
-                        AutomationCoordinator.bindRegionToAction(regionTargetActionId, region)
+                        AutomationCoordinator.bindRegionToAction(
+                            regionTargetActionId,
+                            region,
+                            screenW = snapshot.width,
+                            screenH = snapshot.height
+                        )
                         Toast.makeText(this, "Area baca disimpan (${region.width}×${region.height})", Toast.LENGTH_SHORT).show()
                     }
                     !overwriteImageName.isNullOrBlank() -> {
@@ -1128,7 +1151,11 @@ class FloatingOverlayService : Service() {
                     addToMacro -> {
                         val saved = store.saveImage("target", cropped, targetFolder)
                         cropped.recycle()
-                        AutomationCoordinator.addQuickImageAction(saved.name)
+                        AutomationCoordinator.addQuickImageAction(
+                            saved.name,
+                            screenW = snapshot.width,
+                            screenH = snapshot.height
+                        )
                         Toast.makeText(this, "Deteksi Gambar ditambahkan: ${saved.displayName}", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
@@ -1203,7 +1230,8 @@ class FloatingOverlayService : Service() {
             onFinish = { gestures ->
                 dismissTouchRecorder()
                 if (gestures.isNotEmpty()) {
-                    AutomationCoordinator.addRecordedGestures(gestures)
+                    refreshScreenSize()
+                    AutomationCoordinator.addRecordedGestures(gestures, screenWidth, screenHeight)
                     Toast.makeText(this, "Rekaman disimpan (${gestures.size} gestur)", Toast.LENGTH_SHORT).show()
                 }
             },
@@ -1572,6 +1600,8 @@ class FloatingOverlayService : Service() {
         if (isRunning || (!showAllMarkersPreview && focusedMarkerActionId == null)) {
             return
         }
+        refreshScreenSize()
+        val scaleTransform = ResolutionScaler.forMacro(AutomationCoordinator.activeMacro.value, screenWidth, screenHeight)
         val markerSize = dp(36)
         val half = markerSize / 2
         val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -1586,7 +1616,11 @@ class FloatingOverlayService : Service() {
         val swipeSegments = enabledEntries
             .map { it.first }
             .filterIsInstance<SwipeAction>()
-            .map { SwipeSegment(it.id, it.x1.toFloat(), it.y1.toFloat(), it.x2.toFloat(), it.y2.toFloat()) }
+            .map {
+                val (sx1, sy1) = scaleTransform.scalePoint(it.x1, it.y1)
+                val (sx2, sy2) = scaleTransform.scalePoint(it.x2, it.y2)
+                SwipeSegment(it.id, sx1.toFloat(), sy1.toFloat(), sx2.toFloat(), sy2.toFloat())
+            }
         updateSwipePathOverlay(swipeSegments, isRunning, half.toFloat())
 
         var markerNumber = 0
@@ -1606,6 +1640,7 @@ class FloatingOverlayService : Service() {
             when (action) {
                 is ClickAction -> {
                     markerNumber++
+                    val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
                     val fillHex = when (slot) {
                         Slot.THEN -> "#CC059669"
                         Slot.ELSE -> "#CCB45309"
@@ -1616,93 +1651,110 @@ class FloatingOverlayService : Service() {
                         label = "$prefix$markerNumber",
                         colorHex = fillHex,
                         strokeHex = strokeHex,
-                        cx = action.x,
-                        cy = action.y,
+                        cx = sx,
+                        cy = sy,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, false, screenWidth, screenHeight)
+                        }
                     )
                 }
                 is LongPressAction -> {
                     markerNumber++
+                    val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
                     addMarker(
                         label = "${prefix}${markerNumber}L",
                         colorHex = "#CC4F46E5",
                         strokeHex = strokeHex,
-                        cx = action.x,
-                        cy = action.y,
+                        cx = sx,
+                        cy = sy,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, false, screenWidth, screenHeight)
+                        }
                     )
                 }
                 is SwipeAction -> {
                     markerNumber++
+                    val (sx1, sy1) = scaleTransform.scalePoint(action.x1, action.y1)
+                    val (sx2, sy2) = scaleTransform.scalePoint(action.x2, action.y2)
                     addMarker(
                         label = "${prefix}${markerNumber}A",
                         colorHex = "#CC0284C7",
                         strokeHex = strokeHex,
-                        cx = action.x1,
-                        cy = action.y1,
+                        cx = sx1,
+                        cy = sy1,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
                         onDragging = { nx, ny -> swipePathView?.updateEndpoint(action.id, nx.toFloat(), ny.toFloat(), isEndNode = false) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = false) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = false, screenWidth, screenHeight)
+                        }
                     )
                     addMarker(
                         label = "${prefix}${markerNumber}B",
                         colorHex = "#CC0369A1",
                         strokeHex = strokeHex,
-                        cx = action.x2,
-                        cy = action.y2,
+                        cx = sx2,
+                        cy = sy2,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
                         onDragging = { nx, ny -> swipePathView?.updateEndpoint(action.id, nx.toFloat(), ny.toFloat(), isEndNode = true) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = true) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, isEndNode = true, screenWidth, screenHeight)
+                        }
                     )
                 }
                 is ZoomAction -> {
                     markerNumber++
+                    val (sx, sy) = scaleTransform.scalePoint(action.cx, action.cy)
                     addMarker(
                         label = if (action.zoomIn) "${prefix}Z+" else "${prefix}Z−",
                         colorHex = "#CC0891B2",
                         strokeHex = strokeHex,
-                        cx = action.cx,
-                        cy = action.cy,
+                        cx = sx,
+                        cy = sy,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMacroSettingsPanel(initialTab = 1, initialEditActionId = action.id) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, false, screenWidth, screenHeight)
+                        }
                     )
                 }
                 is ColorAction -> {
                     markerNumber++
+                    val (sx, sy) = scaleTransform.scalePoint(action.x, action.y)
                     addMarker(
                         label = "${prefix}${markerNumber}C",
                         colorHex = "#CC7C3AED",
                         strokeHex = strokeHex,
-                        cx = action.x,
-                        cy = action.y,
+                        cx = sx,
+                        cy = sy,
                         size = markerSize,
                         half = half,
                         flags = baseFlags,
                         isRunning = isRunning,
                         onTap = { showMarkerQuickEditor(action) },
-                        onDragCommit = { nx, ny -> AutomationCoordinator.updateMarkerPosition(action.id, nx, ny) }
+                        onDragCommit = { nx, ny ->
+                            AutomationCoordinator.updateMarkerPosition(action.id, nx, ny, false, screenWidth, screenHeight)
+                        }
                     )
                 }
                 else -> Unit
