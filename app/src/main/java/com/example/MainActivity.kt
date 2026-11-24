@@ -70,12 +70,16 @@ import com.example.automation.FloatingOverlayService
 import com.example.automation.MacroAccessibilityService
 import com.example.automation.ScreenCaptureService
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.ui.ImageLibraryScreen
 import com.example.ui.LiveLogPanel
 import com.example.ui.LuaStudioScreen
 import com.example.ui.MacroEditorScreen
 import com.example.ui.MacroHomeScreen
+import com.example.ui.MacroLogoPickerSheet
+import com.example.ui.MacroSecuritySheet
 import com.example.ui.MacroViewModel
+import com.example.ui.PasswordUnlockDialog
 import com.example.ui.SettingsPanel
 import com.example.ui.theme.TapLuaTheme
 import kotlinx.coroutines.launch
@@ -129,10 +133,16 @@ private fun WjustMacroApp() {
     var selectedTab by remember { mutableIntStateOf(0) }
     var toolsSubTab by remember { mutableIntStateOf(0) } // 0=Lua, 1=Log, 2=Pengaturan
     var editingMacroId by remember { mutableStateOf<String?>(null) }
+    var unlockedMacroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var securitySheetMacroId by remember { mutableStateOf<String?>(null) }
+    var logoSheetMacroId by remember { mutableStateOf<String?>(null) }
+    var passwordPromptMacroId by remember { mutableStateOf<String?>(null) }
+    var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingImportGalleryFolder by remember { mutableStateOf("") }
+    var pendingLogoMacro by remember { mutableStateOf<Macro?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -197,6 +207,16 @@ private fun WjustMacroApp() {
         val folder = pendingImportGalleryFolder
         pendingImportGalleryFolder = ""
         if (uris.isNotEmpty()) viewModel.importImagesFromUris(uris, folder = folder)
+    }
+
+    val macroLogoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        val target = pendingLogoMacro
+        pendingLogoMacro = null
+        if (uri != null && target != null) {
+            viewModel.setMacroLogoFromUri(target, uri)
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -286,12 +306,59 @@ private fun WjustMacroApp() {
         return (metrics.widthPixels.takeIf { it > 0 } ?: 1080) to (metrics.heightPixels.takeIf { it > 0 } ?: 2400)
     }
 
+    fun requestEditMacro(m: Macro) {
+        if (m.isLocked && m.id !in unlockedMacroIds) {
+            passwordPromptMacroId = m.id
+            passwordPromptAction = "EDIT"
+        } else {
+            editingMacroId = m.id
+        }
+    }
+
+    fun requestOpenSecurity(m: Macro) {
+        if (com.example.data.MacroSecurity.hasPassword(m)) {
+            passwordPromptMacroId = m.id
+            passwordPromptAction = "SECURITY"
+        } else {
+            securitySheetMacroId = m.id
+        }
+    }
+
+    fun requestChangeLogo(m: Macro) {
+        if (m.isLocked && m.id !in unlockedMacroIds) {
+            passwordPromptMacroId = m.id
+            passwordPromptAction = "LOGO"
+        } else {
+            logoSheetMacroId = m.id
+        }
+    }
+
+    fun requestDuplicateMacro(m: Macro) {
+        if (m.isLocked && m.id !in unlockedMacroIds) {
+            passwordPromptMacroId = m.id
+            passwordPromptAction = "DUPLICATE"
+        } else {
+            viewModel.duplicateMacro(m)
+        }
+    }
+
+    fun launchMacroIfAllowed(m: Macro) {
+        val denial = com.example.data.MacroSecurity.checkDirectRun(m, viewModel.effectiveNowMs())
+        if (denial != null) {
+            scope.launch { snackbarHostState.showSnackbar(com.example.data.MacroSecurity.denialMessage(m, denial)) }
+            return
+        }
+        AutomationCoordinator.selectMacro(m)
+        launchOverlay()
+    }
+
     val editingMacro = editingMacroId?.let { id -> macros.firstOrNull { it.id == id } }
     if (editingMacroId != null && editingMacro == null) {
         editingMacroId = null
     }
 
     BackHandler(enabled = editingMacro != null) {
+        editingMacroId?.let { unlockedMacroIds = unlockedMacroIds - it }
         editingMacroId = null
     }
 
@@ -304,14 +371,15 @@ private fun WjustMacroApp() {
                 images = images,
                 imageFolders = imageFolders,
                 lastPickedPixel = lastPickedPixel,
+                logoPath = if (editingMacro.logoImage.isNotBlank()) viewModel.macroIconPath(editingMacro.logoImage) else null,
                 screenW = sw,
                 screenH = sh,
+                snackbarHostState = snackbarHostState,
                 onUpdateMacro = { updated -> viewModel.saveMacro(updated) },
                 onRecropImage = viewModel::recropImage,
-                onLaunchOverlay = { m ->
-                    AutomationCoordinator.selectMacro(m)
-                    launchOverlay()
-                },
+                onChangeLogo = { requestChangeLogo(editingMacro) },
+                onOpenSecurity = { requestOpenSecurity(editingMacro) },
+                onLaunchOverlay = ::launchMacroIfAllowed,
                 onLaunchCropOverlay = { m, targetActionId ->
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay(
@@ -346,7 +414,10 @@ private fun WjustMacroApp() {
                     AutomationCoordinator.selectMacro(m)
                     launchOverlay(FloatingOverlayService.ACTION_OPEN_RECORDER)
                 },
-                onBack = { editingMacroId = null }
+                onBack = {
+                    unlockedMacroIds = unlockedMacroIds - editingMacro.id
+                    editingMacroId = null
+                }
             )
         } else {
             Scaffold(
@@ -390,6 +461,8 @@ private fun WjustMacroApp() {
                             engineState = engineState,
                             isOverlayActive = isOverlayActive,
                             activeMacroId = activeMacro.id,
+                            nowMs = viewModel.effectiveNowMs(),
+                            resolveLogoPath = viewModel::macroIconPath,
                             onOpenAccessibility = {
                                 if (permissions.accessibilityEnabled) {
                                     scope.launch { snackbarHostState.showSnackbar("Aksesibilitas sudah aktif.") }
@@ -430,12 +503,11 @@ private fun WjustMacroApp() {
                             onImportMacro = {
                                 importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
                             },
-                            onEditMacro = { m -> editingMacroId = m.id },
-                            onLaunchMacroOverlay = { m ->
-                                AutomationCoordinator.selectMacro(m)
-                                launchOverlay()
-                            },
-                            onDuplicateMacro = viewModel::duplicateMacro,
+                            onEditMacro = ::requestEditMacro,
+                            onLaunchMacroOverlay = ::launchMacroIfAllowed,
+                            onChangeMacroLogo = ::requestChangeLogo,
+                            onOpenMacroSecurity = ::requestOpenSecurity,
+                            onDuplicateMacro = ::requestDuplicateMacro,
                             onExportMacro = { m ->
                                 pendingExportMacro = m
                                 val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
@@ -532,6 +604,97 @@ private fun WjustMacroApp() {
                     }
                 }
             }
+        }
+
+        // Password verification modal (guards locked edit, security/passive toggle, logo change, duplicate)
+        val promptMacro = passwordPromptMacroId?.let { id -> macros.firstOrNull { it.id == id } }
+        if (promptMacro != null) {
+            val subtitle = when (passwordPromptAction) {
+                "SECURITY" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah pengaturan Kunci, Tenggat Waktu, atau Mode Pasif."
+                "LOGO" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah foto logo."
+                "DUPLICATE" -> "Masukkan sandi '${promptMacro.name}' untuk menduplikat macro terkunci."
+                else -> "Macro '${promptMacro.name}' dikunci. Masukkan sandi untuk membuka editor."
+            }
+            PasswordUnlockDialog(
+                title = "Sandi Macro Diperlukan",
+                subtitle = subtitle,
+                onVerify = { candidate -> MacroSecurity.verifyPassword(promptMacro, candidate) },
+                onUnlocked = {
+                    val actionType = passwordPromptAction
+                    val target = promptMacro
+                    passwordPromptMacroId = null
+                    passwordPromptAction = ""
+                    when (actionType) {
+                        "EDIT" -> {
+                            unlockedMacroIds = unlockedMacroIds + target.id
+                            editingMacroId = target.id
+                        }
+                        "SECURITY" -> {
+                            securitySheetMacroId = target.id
+                        }
+                        "LOGO" -> {
+                            unlockedMacroIds = unlockedMacroIds + target.id
+                            logoSheetMacroId = target.id
+                        }
+                        "DUPLICATE" -> {
+                            viewModel.duplicateMacro(target)
+                        }
+                    }
+                },
+                onDismiss = {
+                    passwordPromptMacroId = null
+                    passwordPromptAction = ""
+                }
+            )
+        }
+
+        // Macro Security Sheet (Lock + Days/Months Expiry + Passive Mode ON/OFF + Password)
+        val secMacro = securitySheetMacroId?.let { id -> macros.firstOrNull { it.id == id } }
+        if (secMacro != null) {
+            MacroSecuritySheet(
+                macro = secMacro,
+                nowMs = viewModel.effectiveNowMs(),
+                onSave = { updated ->
+                    viewModel.saveMacro(updated)
+                    securitySheetMacroId = null
+                    val summary = buildList {
+                        if (updated.isLocked) add("Terkunci")
+                        if (updated.isPassive) add("Pasif")
+                        if (updated.expiresAtEpochMs > 0L) add("Tenggat ${updated.expiryLabel}")
+                    }.joinToString(", ")
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            if (summary.isBlank()) "Semua proteksi '${updated.name}' dimatikan."
+                            else "Proteksi '${updated.name}' disimpan: $summary."
+                        )
+                    }
+                },
+                onDismiss = { securitySheetMacroId = null }
+            )
+        }
+
+        // Custom Macro Logo Picker Sheet
+        val logoMacro = logoSheetMacroId?.let { id -> macros.firstOrNull { it.id == id } }
+        if (logoMacro != null) {
+            MacroLogoPickerSheet(
+                macro = logoMacro,
+                logoFilePath = if (logoMacro.logoImage.isNotBlank()) viewModel.macroIconPath(logoMacro.logoImage) else null,
+                images = images,
+                onPickFromGallery = {
+                    pendingLogoMacro = logoMacro
+                    logoSheetMacroId = null
+                    macroLogoLauncher.launch("image/*")
+                },
+                onPickFromLibrary = { asset ->
+                    viewModel.setMacroLogoFromLibrary(logoMacro, asset.name)
+                    logoSheetMacroId = null
+                },
+                onRemoveLogo = {
+                    viewModel.removeMacroLogo(logoMacro)
+                    logoSheetMacroId = null
+                },
+                onDismiss = { logoSheetMacroId = null }
+            )
         }
     }
 }

@@ -30,6 +30,7 @@ class LocalStore(context: Context) {
     private val macrosDir = File(rootDir, "macros").apply { mkdirs() }
     private val scriptsDir = File(rootDir, "scripts").apply { mkdirs() }
     private val imagesDir = File(rootDir, "images").apply { mkdirs() }
+    private val macroIconsDir = File(rootDir, "macro_icons").apply { mkdirs() }
     private val prefs = appContext.getSharedPreferences("macrogg_prefs", Context.MODE_PRIVATE)
 
     val json = Json {
@@ -57,8 +58,23 @@ class LocalStore(context: Context) {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
     init {
+        effectiveNowMs()
         reloadAll()
         seedExamplesIfFirstRun()
+    }
+
+    /**
+     * Monotonic wall-clock watermark to prevent trivial device-clock rollback from bypassing
+     * macro expiration deadlines offline.
+     */
+    fun effectiveNowMs(): Long {
+        val sys = System.currentTimeMillis()
+        val maxSeen = prefs.getLong(KEY_MAX_SEEN_EPOCH_MS, 0L)
+        if (sys > maxSeen) {
+            prefs.edit().putLong(KEY_MAX_SEEN_EPOCH_MS, sys).apply()
+            return sys
+        }
+        return maxSeen
     }
 
     fun reloadAll() {
@@ -81,7 +97,7 @@ class LocalStore(context: Context) {
         _settings.value = settings
     }
 
-    // ---- Macros ----
+    // ---- Macros & Custom Macro Logos ----
 
     private fun loadMacros(): List<Macro> {
         return macrosDir.listFiles { f -> f.extension == "json" }
@@ -107,19 +123,112 @@ class LocalStore(context: Context) {
                 ?.let { f -> runCatching { json.decodeFromString<Macro>(f.readText()) }.getOrNull() }
 
     fun deleteMacro(id: String) {
+        val existing = getMacroById(id)
         File(macrosDir, "${sanitizeFileName(id)}.json").delete()
         _macros.value = loadMacros()
+        if (existing != null && existing.logoImage.isNotBlank()) {
+            cleanupUnusedMacroIcon(existing.logoImage)
+        }
     }
 
     fun duplicateMacro(macro: Macro): Macro {
+        val newMacroId = newId()
+        val copiedLogo = if (macro.logoImage.isNotBlank()) {
+            val src = macroIconFile(macro.logoImage)
+            if (src != null && src.exists()) {
+                val destName = "logo_${sanitizeFileName(newMacroId)}.png"
+                runCatching {
+                    src.copyTo(File(macroIconsDir, destName), overwrite = true)
+                    destName
+                }.getOrDefault("")
+            } else ""
+        } else ""
         val copy = macro.copy(
-            id = newId(),
+            id = newMacroId,
             name = "${macro.name} (Salinan)",
+            logoImage = copiedLogo,
             actions = macro.actions.map { it.withNewIds() },
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )
         return saveMacro(copy)
+    }
+
+    fun macroIconFile(iconName: String): File? {
+        val clean = sanitizeIconFileName(iconName)
+        if (clean.isBlank()) return null
+        return File(macroIconsDir, clean)
+    }
+
+    fun macroIconPath(iconName: String): String? =
+        macroIconFile(iconName)?.takeIf { it.exists() }?.absolutePath
+
+    /** Scales & center-crops [bitmap] to a crisp 256x256 PNG stored in macro_icons/. */
+    fun saveMacroLogo(macroId: String, bitmap: Bitmap): String {
+        val size = minOf(bitmap.width, bitmap.height).coerceAtLeast(1)
+        val xOff = ((bitmap.width - size) / 2).coerceAtLeast(0)
+        val yOff = ((bitmap.height - size) / 2).coerceAtLeast(0)
+        val square = Bitmap.createBitmap(bitmap, xOff, yOff, size, size)
+        val targetPx = minOf(size, 256)
+        val finalBmp = if (size != targetPx) {
+            Bitmap.createScaledBitmap(square, targetPx, targetPx, true).also {
+                if (it !== square) square.recycle()
+            }
+        } else {
+            square
+        }
+
+        val prevLogo = getMacroById(macroId)?.logoImage.orEmpty()
+        val fileName = "logo_${sanitizeFileName(macroId)}_${System.currentTimeMillis() % 100000}.png"
+        val outFile = File(macroIconsDir, fileName)
+        try {
+            finalBmp.savePng(outFile)
+        } finally {
+            if (finalBmp !== bitmap) finalBmp.recycle()
+        }
+        if (prevLogo.isNotBlank() && prevLogo != fileName) {
+            cleanupUnusedMacroIcon(prevLogo, excludingMacroId = macroId)
+        }
+        return fileName
+    }
+
+    fun saveMacroLogoBytes(rawFileName: String, bytes: ByteArray): String? {
+        val clean = sanitizeIconFileName(rawFileName)
+        if (clean.isBlank()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val file = File(macroIconsDir, clean)
+        if (bounds.outMimeType == "image/png") {
+            file.writeBytes(bytes)
+        } else {
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            try {
+                bmp.savePng(file)
+            } finally {
+                bmp.recycle()
+            }
+        }
+        return clean
+    }
+
+    fun copyLibraryImageAsMacroLogo(macroId: String, libraryImageName: String): String? {
+        val file = resolveExistingImageFile(libraryImageName) ?: return null
+        val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        return try {
+            saveMacroLogo(macroId, bmp)
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    fun cleanupUnusedMacroIcon(iconName: String, excludingMacroId: String = "") {
+        val clean = sanitizeIconFileName(iconName)
+        if (clean.isBlank()) return
+        val stillUsed = _macros.value.any { it.id != excludingMacroId && sanitizeIconFileName(it.logoImage) == clean }
+        if (!stillUsed) {
+            File(macroIconsDir, clean).delete()
+        }
     }
 
     // ---- Lua Scripts ----
@@ -434,19 +543,31 @@ class LocalStore(context: Context) {
             loadImage = { imgName ->
                 resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
             },
-            output = output
+            output = output,
+            loadMacroIcon = { iconName ->
+                macroIconFile(iconName)?.takeIf { it.exists() }?.let { f -> f.name to f.readBytes() }
+            }
         )
         return ExportSummary(macrosExported = res.macrosExported, imagesExported = res.imagesExported)
     }
 
-    /** Exports every macro, Lua script, and target image into a single backup .zip file. */
+    /** Exports every macro, Lua script, target image, and custom macro logo into a single backup .zip file. */
     fun exportAllBackupZip(output: OutputStream): ExportSummary {
         var imagesWritten = 0
+        val writtenIcons = HashSet<String>()
         ZipOutputStream(output).use { zip ->
             for (macro in _macros.value) {
                 zip.putNextEntry(ZipEntry("macros/${sanitizeFileName(macro.id)}.json"))
                 zip.write(json.encodeToString(macro).toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
+                if (macro.logoImage.isNotBlank()) {
+                    val f = macroIconFile(macro.logoImage)
+                    if (f != null && f.exists() && writtenIcons.add(f.name)) {
+                        zip.putNextEntry(ZipEntry("macro_icons/${f.name}"))
+                        zip.write(f.readBytes())
+                        zip.closeEntry()
+                    }
+                }
             }
             for (script in _scripts.value) {
                 zip.putNextEntry(ZipEntry("scripts/${sanitizeFileName(script.id)}.json"))
@@ -473,7 +594,7 @@ class LocalStore(context: Context) {
     )
 
     /**
-     * Imports either a single macro JSON, a single macro .zip bundle (with linked macros & PNGs),
+     * Imports either a single macro JSON, a single macro .zip bundle (with linked macros, logos & PNGs),
      * or a full backup .zip. Preserves [RunMacroAction] links by remapping old macro IDs to new IDs.
      */
     fun importFromStream(input: InputStream): ImportSummary {
@@ -484,6 +605,9 @@ class LocalStore(context: Context) {
                 saveImageBytes(fileName, bytes)
                 imagesCount++
             }
+        }
+        for ((iconName, bytes) in decoded.macroIcons) {
+            runCatching { saveMacroLogoBytes(iconName, bytes) }
         }
         for (script in decoded.scripts) {
             saveScript(script)
@@ -529,6 +653,7 @@ class LocalStore(context: Context) {
     companion object {
         private const val KEY_SETTINGS = "app_settings_json"
         private const val KEY_SEEDED = "seeded_v2"
+        private const val KEY_MAX_SEEN_EPOCH_MS = "max_seen_epoch_ms"
 
         @Volatile
         private var instance: LocalStore? = null
@@ -554,6 +679,17 @@ class LocalStore(context: Context) {
                     .removeSuffix(".webp").removeSuffix(".WEBP")
             ).ifBlank { "target" }
             return if (folderPart.isBlank()) "$base.png" else "$folderPart/$base.png"
+        }
+
+        fun sanitizeIconFileName(raw: String): String {
+            val base = sanitizeFileName(
+                raw.substringAfterLast('/').substringAfterLast('\\')
+                    .removeSuffix(".png").removeSuffix(".PNG")
+                    .removeSuffix(".jpg").removeSuffix(".JPG")
+                    .removeSuffix(".jpeg").removeSuffix(".JPEG")
+                    .removeSuffix(".webp").removeSuffix(".WEBP")
+            )
+            return if (base.isBlank()) "" else "$base.png"
         }
 
         fun sanitizeFileName(raw: String): String =

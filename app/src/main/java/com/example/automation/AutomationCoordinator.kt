@@ -10,6 +10,7 @@ import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.LuaScript
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.Region
@@ -143,7 +144,17 @@ object AutomationCoordinator {
         }
     }
 
-    fun addQuickClickMarker(x: Int, y: Int): ClickAction {
+    private fun rejectIfActiveMacroLocked(): Boolean {
+        val cur = _activeMacro.value
+        if (cur.isLocked) {
+            ExecutionLogBus.warn("Macro '${cur.name}' dikunci dengan sandi — buka kunci di aplikasi untuk mengubah.")
+            return true
+        }
+        return false
+    }
+
+    fun addQuickClickMarker(x: Int, y: Int): ClickAction? {
+        if (rejectIfActiveMacroLocked()) return null
         val settings = store?.settings?.value
         val tapMs = settings?.defaultTapDurationMs ?: 50L
         val created = ClickAction(x = x, y = y, durationMs = tapMs, delayAfterMs = 300L)
@@ -155,7 +166,8 @@ object AutomationCoordinator {
         return created
     }
 
-    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int): SwipeAction {
+    fun addQuickSwipeMarker(x1: Int, y1: Int, x2: Int, y2: Int): SwipeAction? {
+        if (rejectIfActiveMacroLocked()) return null
         val created = SwipeAction(x1 = x1, y1 = y1, x2 = x2, y2 = y2, durationMs = 350L, delayAfterMs = 300L)
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
@@ -166,6 +178,7 @@ object AutomationCoordinator {
     }
 
     fun addQuickImageAction(imageName: String, threshold: Float = 0.80f, region: Region? = null) {
+        if (rejectIfActiveMacroLocked()) return
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.copy(
@@ -211,6 +224,7 @@ object AutomationCoordinator {
 
     fun addRecordedGestures(gestures: List<RecordedGesture>) {
         if (gestures.isEmpty()) return
+        if (rejectIfActiveMacroLocked()) return
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions + RecordAction(gestures = gestures))
@@ -219,6 +233,7 @@ object AutomationCoordinator {
     }
 
     fun addQuickZoomMarker(cx: Int, cy: Int, zoomIn: Boolean = true) {
+        if (rejectIfActiveMacroLocked()) return
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions + ZoomAction(cx = cx, cy = cy, zoomIn = zoomIn))
@@ -227,6 +242,7 @@ object AutomationCoordinator {
     }
 
     fun addActionFromOverlay(ref: ContainerRef, action: Action) {
+        if (rejectIfActiveMacroLocked()) return
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions.insertInto(ref, action))
@@ -234,6 +250,7 @@ object AutomationCoordinator {
     }
 
     fun moveActionFromOverlay(actionId: String, delta: Int) {
+        if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions.moveAction(actionId, delta))
         }
@@ -257,12 +274,14 @@ object AutomationCoordinator {
     }
 
     fun updateActionFromOverlay(actionId: String, transform: (Action) -> Action) {
+        if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions.updateAction(actionId, transform))
         }
     }
 
     fun removeActionFromOverlay(actionId: String) {
+        if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
             macro.copy(actions = macro.actions.removeAction(actionId))
         }
@@ -320,6 +339,11 @@ object AutomationCoordinator {
         screenHeight: Int = ScreenCaptureService.captureHeight
     ) {
         stop()
+        val effectiveNow = store?.effectiveNowMs() ?: System.currentTimeMillis()
+        MacroSecurity.checkDirectRun(macro, effectiveNow)?.let { denial ->
+            ExecutionLogBus.error(MacroSecurity.denialMessage(macro, denial))
+            return
+        }
         if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
             ExecutionLogBus.error("Accessibility Service belum aktif! Aktifkan di Pengaturan Aksesibilitas.")
@@ -383,6 +407,7 @@ object AutomationCoordinator {
                 override fun onLoopChanged(loop: Int) { _currentLoop.value = loop }
                 override fun onActionExecuted() { _actionsExecuted.value = counter.incrementAndGet() }
                 override fun log(level: LogLevel, message: String) = ExecutionLogBus.log(level, message)
+                override fun nowMs(): Long = localStore?.effectiveNowMs() ?: System.currentTimeMillis()
             }
 
             try {

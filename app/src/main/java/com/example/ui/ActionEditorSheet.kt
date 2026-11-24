@@ -782,12 +782,17 @@ fun ActionEditorSheet(
                     } else {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             others.forEach { target ->
+                                val tag = when {
+                                    com.example.data.MacroSecurity.isExpired(target) -> " (Habis)"
+                                    target.isPassive -> " (Pasif)"
+                                    else -> ""
+                                }
                                 FilterChip(
                                     selected = a.targetMacroId == target.id,
                                     onClick = {
                                         draft = a.copy(targetMacroId = target.id, targetMacroName = target.name)
                                     },
-                                    label = { Text(target.name) }
+                                    label = { Text(target.name + tag) }
                                 )
                             }
                         }
@@ -837,10 +842,70 @@ fun ActionEditorSheet(
 
                 is RestartAction, is StopAction -> {
                     Text(
-                        "Aksi kontrol alur tidak memerlukan pengaturan tambahan.",
+                        "Aksi kontrol alur (dapat diatur peluang Random Event di bawah jika ingin acak).",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            // Shared Random Event probability control (applies to every action type)
+            HorizontalDivider()
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Peluang Keberhasilan (Random Event)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                if (draft.chancePercent == 100) "100% — Aksi selalu dijalankan"
+                                else "Aksi dijalankan acak dengan peluang ${draft.chancePercent}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                "${draft.chancePercent}%",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    Slider(
+                        value = draft.chancePercent.toFloat(),
+                        onValueChange = { draft = draft.withChancePercent(it.roundToInt()) },
+                        valueRange = 0f..100f
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(100, 75, 50, 25, 10).forEach { pct ->
+                            FilterChip(
+                                selected = draft.chancePercent == pct,
+                                onClick = { draft = draft.withChancePercent(pct) },
+                                label = { Text("$pct%", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
                 }
             }
 

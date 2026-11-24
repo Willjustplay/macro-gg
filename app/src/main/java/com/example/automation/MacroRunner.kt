@@ -7,6 +7,7 @@ import com.example.data.ImageAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
@@ -19,6 +20,7 @@ import com.example.data.TextAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.Region
+import com.example.data.kind
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
 import com.example.vision.MatchResult
@@ -62,8 +64,10 @@ private enum class FlowControl {
  * Recursive Macrorify-style macro executor supporting:
  * - Multi-point clicks with burst repeat & jitter
  * - Long press, swipe, 2-finger pinch Zoom In/Out, wait with random jitter
- * - Image detection (template matching) & Color detection with full Then/Else branches + Found/NotFound flow modes
- * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection
+ * - Per-action success probability ([Action.chancePercent]) for random events
+ * - Image, OCR Text/Value, and Color detection with full Then/Else branches + Found/NotFound flow modes
+ * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection & Passive Mode support
+ * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
  * - Recorded gesture playback with speed multiplier
  * - Auto-Fix Stuck Macro Watchdog ([Macro.autoRecoverStuckSec] & [StuckRecoveryMode])
  */
@@ -74,7 +78,12 @@ class MacroRunner(
     private var lastProgressMs: Long = 0L
 
     suspend fun run(macro: Macro) {
-        lastProgressMs = runtime.nowMs()
+        val now = runtime.nowMs()
+        MacroSecurity.checkDirectRun(macro, now)?.let { denial ->
+            runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, denial))
+            return
+        }
+        lastProgressMs = now
         runInternal(macro, depth = 0)
     }
 
@@ -89,7 +98,12 @@ class MacroRunner(
 
         var iteration = 0
         while (!runtime.isStopped() && iteration < maxLoops) {
-            if (runtime.nowMs() - startedAt >= maxDurationMs) {
+            val now = runtime.nowMs()
+            if (MacroSecurity.isExpired(macro, now)) {
+                runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
+                return FlowControl.STOP_MACRO
+            }
+            if (now - startedAt >= maxDurationMs) {
                 runtime.log(LogLevel.INFO, "Batas waktu ${macro.maxDurationMin} menit tercapai.")
                 break
             }
@@ -153,6 +167,17 @@ class MacroRunner(
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
             checkStuckRecovery(macro)?.let { return it }
             if (!action.enabled) continue
+
+            // Per-action Random Event probability roll (0..100%)
+            val chance = action.chancePercent.coerceIn(0, 100)
+            if (chance < 100) {
+                val roll = random.nextInt(100)
+                if (roll >= chance) {
+                    runtime.log(LogLevel.INFO, "Random Event dilewati (${action.kind.label}, peluang $chance%).")
+                    continue
+                }
+                runtime.log(LogLevel.INFO, "Random Event aktif (${action.kind.label}, peluang $chance%).")
+            }
 
             val flow = executeAction(action, macro, startedAt, maxDurationMs, depth)
             if (flow != FlowControl.NEXT) return flow
@@ -258,10 +283,16 @@ class MacroRunner(
                     runtime.log(LogLevel.WARN, "Macro tujuan '${action.targetMacroName}' tidak ditemukan.")
                     return FlowControl.NEXT
                 }
+                // Linked execution allows Passive macros, while still blocking Expired or Tampered macros.
+                MacroSecurity.checkLinkedRun(target, runtime.nowMs())?.let { denial ->
+                    runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(target, denial))
+                    return FlowControl.NEXT
+                }
+                val tag = if (target.isPassive) "macro pasif" else "macro"
                 runtime.log(
                     LogLevel.INFO,
-                    if (action.returnAfter) "Memanggil macro '${target.name}'..."
-                    else "Berpindah ke macro '${target.name}'..."
+                    if (action.returnAfter) "Memanggil $tag '${target.name}'..."
+                    else "Berpindah ke $tag '${target.name}'..."
                 )
                 markProgress()
                 val subFlow = runInternal(target, depth + 1)

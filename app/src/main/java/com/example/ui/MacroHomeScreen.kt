@@ -31,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AdsClick
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
@@ -42,6 +43,8 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
@@ -80,6 +83,7 @@ import com.example.automation.EngineState
 import com.example.data.ColorAction
 import com.example.data.ImageAction
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.RecordAction
 import com.example.data.TextAction
 import com.example.data.countActions
@@ -92,6 +96,8 @@ fun MacroHomeScreen(
     engineState: EngineState,
     isOverlayActive: Boolean,
     activeMacroId: String,
+    nowMs: Long,
+    resolveLogoPath: (String) -> String?,
     onOpenAccessibility: () -> Unit,
     onRequestOverlay: () -> Unit,
     onActivateScreenCapture: () -> Unit,
@@ -103,6 +109,8 @@ fun MacroHomeScreen(
     onImportMacro: () -> Unit,
     onEditMacro: (Macro) -> Unit,
     onLaunchMacroOverlay: (Macro) -> Unit,
+    onChangeMacroLogo: (Macro) -> Unit,
+    onOpenMacroSecurity: (Macro) -> Unit,
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit
@@ -431,9 +439,13 @@ fun MacroHomeScreen(
                 MacroListCard(
                     macro = macro,
                     isActive = macro.id == activeMacroId && isOverlayActive,
+                    nowMs = nowMs,
+                    logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
                     modifier = Modifier.animateItem(),
                     onEdit = { onEditMacro(macro) },
                     onLaunchOverlay = { onLaunchMacroOverlay(macro) },
+                    onChangeLogo = { onChangeMacroLogo(macro) },
+                    onOpenSecurity = { onOpenMacroSecurity(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
                     onExport = { onExportMacro(macro) },
                     onDelete = { onDeleteMacro(macro) }
@@ -486,9 +498,13 @@ private fun PermissionPill(
 private fun MacroListCard(
     macro: Macro,
     isActive: Boolean,
+    nowMs: Long,
+    logoPath: String?,
     modifier: Modifier = Modifier,
     onEdit: () -> Unit,
     onLaunchOverlay: () -> Unit,
+    onChangeLogo: () -> Unit,
+    onOpenSecurity: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit
@@ -499,8 +515,15 @@ private fun MacroListCard(
     val hasText = allActions.any { it is TextAction }
     val hasColor = allActions.any { it is ColorAction }
     val hasRecord = allActions.any { it is RecordAction }
+    val hasRandom = allActions.any { it.chancePercent < 100 }
+
+    val isExpired = MacroSecurity.isExpired(macro, nowMs)
+    val isTampered = MacroSecurity.isTampered(macro)
+    val remainingLabel = MacroSecurity.remainingTimeLabel(macro, nowMs)
+    val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     val badgeColor = when {
+        isExpired || isTampered -> Color(0xFFEF4444)
         hasImage -> Color(0xFF10B981)
         hasText -> Color(0xFF22D3EE)
         hasColor -> Color(0xFFA78BFA)
@@ -518,32 +541,46 @@ private fun MacroListCard(
             .clickable(onClick = onEdit),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isActive) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
-            } else {
-                MaterialTheme.colorScheme.surface
+            containerColor = when {
+                isExpired || isTampered -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.14f)
+                isActive -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
+                else -> MaterialTheme.colorScheme.surface
             }
         ),
         border = BorderStroke(
-            width = if (isActive) 1.5.dp else 1.dp,
-            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+            width = if (isActive || isExpired) 1.5.dp else 1.dp,
+            color = when {
+                isExpired || isTampered -> MaterialTheme.colorScheme.error.copy(alpha = 0.65f)
+                isActive -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+            }
         )
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(44.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(badgeColor.copy(alpha = 0.15f)),
+                        .background(if (logoBmp != null) Color(0xFF0A1020) else badgeColor.copy(alpha = 0.15f))
+                        .clickable(onClick = onChangeLogo),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = badgeIcon,
-                        contentDescription = null,
-                        tint = badgeColor,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    if (logoBmp != null) {
+                        Image(
+                            bitmap = logoBmp,
+                            contentDescription = "Logo ${macro.name}",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            imageVector = badgeIcon,
+                            contentDescription = null,
+                            tint = badgeColor,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -553,8 +590,17 @@ private fun MacroListCard(
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
+                        if (macro.isLocked) {
+                            Icon(
+                                Icons.Filled.Lock,
+                                contentDescription = "Terkunci",
+                                tint = Color(0xFFA78BFA),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                         if (isActive) {
                             Box(
                                 Modifier
@@ -577,6 +623,16 @@ private fun MacroListCard(
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
+                            text = { Text("Ubah Foto Logo") },
+                            leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null) },
+                            onClick = { menuOpen = false; onChangeLogo() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Kunci, Tenggat & Pasif") },
+                            leadingIcon = { Icon(Icons.Filled.Lock, null) },
+                            onClick = { menuOpen = false; onOpenSecurity() }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Duplikat") },
                             leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
                             onClick = { menuOpen = false; onDuplicate() }
@@ -595,6 +651,19 @@ private fun MacroListCard(
                 }
             }
 
+            // Security / Expiry / Passive badges row (shown cleanly when active)
+            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
+                    if (macro.isLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
+                    if (macro.isPassive) FeatureTag("🔗 Pasif", Color(0xFF22D3EE))
+                    if (remainingLabel != null) {
+                        val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)
+                        FeatureTag((if (isExpired) "⏰ " else "⏳ ") + remainingLabel, expColor)
+                    }
+                }
+            }
+
             // Feature tags + action buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -606,7 +675,8 @@ private fun MacroListCard(
                     if (hasText) FeatureTag("Teks", Color(0xFF22D3EE))
                     if (hasColor) FeatureTag("Warna", Color(0xFFA78BFA))
                     if (hasRecord) FeatureTag("Rekaman", Color(0xFFEF4444))
-                    if (!hasImage && !hasText && !hasColor && !hasRecord) FeatureTag("Clicker", Color(0xFF22D3EE))
+                    if (hasRandom) FeatureTag("🎲 Acak", Color(0xFFF59E0B))
+                    if (!hasImage && !hasText && !hasColor && !hasRecord && !hasRandom) FeatureTag("Clicker", Color(0xFF22D3EE))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -615,19 +685,51 @@ private fun MacroListCard(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
-                        Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Icon(
+                            imageVector = if (macro.isLocked) Icons.Filled.Lock else Icons.Filled.Edit,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
                         Spacer(Modifier.width(4.dp))
                         Text("Edit", style = MaterialTheme.typography.labelMedium)
                     }
-                    Button(
-                        onClick = onLaunchOverlay,
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Mulai", style = MaterialTheme.typography.labelMedium)
+                    when {
+                        isExpired || isTampered -> {
+                            OutlinedButton(
+                                onClick = onLaunchOverlay,
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.55f)),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Text("Habis", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                        macro.isPassive -> {
+                            FilledTonalButton(
+                                onClick = onLaunchOverlay,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Pasif", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                        else -> {
+                            Button(
+                                onClick = onLaunchOverlay,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Mulai", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
                     }
                 }
             }

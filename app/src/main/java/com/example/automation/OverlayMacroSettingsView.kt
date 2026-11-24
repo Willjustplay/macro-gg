@@ -27,6 +27,7 @@ import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.Region
@@ -53,7 +54,8 @@ import kotlin.math.roundToInt
  * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
  *   Auto-Recover Stuck Macro watchdog, and optional marker preview toggle.
  * - Tab "Aksi": full action tree (including Then/Else/Loop branches), add any action kind,
- *   1-tap visual image swapping, OCR Text & Numeric action editor, and visual target placement.
+ *   random event chance %, 1-tap visual image swapping, OCR Text & Numeric action editor,
+ *   and visual target placement. Locked macros hide actions & settings until unlocked in-app.
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
@@ -99,9 +101,9 @@ class OverlayMacroSettingsView(
         orientation = VERTICAL
         setPadding(dp(12), dp(10), dp(12), dp(10))
         background = GradientDrawable().apply {
-            setColor(Color.parseColor("#F50F172A"))
+            setColor(Color.parseColor("#F50A1020"))
             cornerRadius = dp(16).toFloat()
-            setStroke(dp(1), Color.parseColor("#2DD4BF"))
+            setStroke(dp(1), Color.parseColor("#22D3EE"))
         }
         elevation = dp(10).toFloat()
 
@@ -175,11 +177,16 @@ class OverlayMacroSettingsView(
     }
 
     private fun updateHeader() {
-        titleView.text = macro.name.ifBlank { "Macro Aktif" }
+        val lockIcon = if (macro.isLocked) "🔒 " else ""
+        titleView.text = lockIcon + macro.name.ifBlank { "Macro Aktif" }
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
         val recStr = if (macro.autoRecoverStuckSec > 0) " • AutoFix ${macro.autoRecoverStuckSec}d" else ""
-        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr"
-        tabActionsBtn.text = "Daftar Aksi (${macro.actions.size})"
+        val extra = buildList {
+            if (macro.isPassive) add("Pasif")
+            MacroSecurity.remainingTimeLabel(macro, store.effectiveNowMs())?.let { add(it) }
+        }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
+        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$extra"
+        tabActionsBtn.text = if (macro.isLocked) "🔒 Terkunci" else "Daftar Aksi (${macro.actions.size})"
 
         styleTab(tabSettingsBtn, activeTab == 0)
         styleTab(tabActionsBtn, activeTab == 1)
@@ -187,7 +194,7 @@ class OverlayMacroSettingsView(
 
     private fun styleTab(tv: TextView, selected: Boolean) {
         (tv.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (selected) "#0D9488" else "#1E293B")
+            Color.parseColor(if (selected) "#0891B2" else "#1E293B")
         )
         tv.setTextColor(if (selected) Color.WHITE else Color.parseColor("#94A3B8"))
     }
@@ -195,6 +202,14 @@ class OverlayMacroSettingsView(
     private fun rebuildBody() {
         updateHeader()
         bodyContainer.removeAllViews()
+
+        if (macro.isLocked) {
+            if (activeTab == 0) {
+                buildMacroSwitcherRow()
+            }
+            buildLockedOverlayNotice()
+            return
+        }
 
         val pickerRef = addPickerRef
         val swapId = quickImageSwapActionId
@@ -222,10 +237,7 @@ class OverlayMacroSettingsView(
         }
     }
 
-    // ---- TAB 1: Complete Macro Settings ----
-
-    private fun buildMacroSettingsForm() {
-        // Quick switch between saved macros
+    private fun buildMacroSwitcherRow() {
         val allMacros = store.macros.value
         if (allMacros.size > 1) {
             bodyContainer.addView(sectionLabel("Ganti Macro Aktif"))
@@ -237,7 +249,12 @@ class OverlayMacroSettingsView(
             val row = LinearLayout(context).apply { orientation = HORIZONTAL }
             for (m in allMacros) {
                 val sel = m.id == macro.id
-                row.addView(makeBtn(m.name.take(16), if (sel) "#0D9488" else "#1E293B", marginEndDp = 5) {
+                val prefix = when {
+                    m.isLocked -> "🔒 "
+                    m.isPassive -> "🔗 "
+                    else -> ""
+                }
+                row.addView(makeBtn((prefix + m.name).take(18), if (sel) "#0891B2" else "#1E293B", marginEndDp = 5) {
                     if (!sel) {
                         macro = m
                         onSwitchMacro(m)
@@ -248,6 +265,41 @@ class OverlayMacroSettingsView(
             hScroll.addView(row)
             bodyContainer.addView(hScroll)
         }
+    }
+
+    private fun buildLockedOverlayNotice() {
+        val now = store.effectiveNowMs()
+        val expLabel = MacroSecurity.remainingTimeLabel(macro, now)
+        val lines = buildList {
+            add("🔒 Macro ini dikunci dengan sandi.")
+            add("Daftar aksi & setelan disembunyikan agar tidak dapat diubah atau disalin.")
+            if (macro.isPassive) {
+                add("🔗 Mode Pasif aktif: hanya berjalan jika dipanggil oleh macro aktif lain.")
+            }
+            if (expLabel != null) {
+                add("⏳ Masa berlaku: $expLabel (${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)})")
+            }
+            add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit.")
+        }.joinToString("\n\n")
+
+        val box = TextView(context).apply {
+            text = lines
+            setTextColor(Color.parseColor("#E2E8F0"))
+            textSize = 11.5f
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#18243E"))
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(1), Color.parseColor("#A78BFA"))
+            }
+        }
+        bodyContainer.addView(box)
+    }
+
+    // ---- TAB 1: Complete Macro Settings ----
+
+    private fun buildMacroSettingsForm() {
+        buildMacroSwitcherRow()
 
         val nameField = addTextRow(bodyContainer, "Nama Macro", macro.name)
 
@@ -603,6 +655,13 @@ class OverlayMacroSettingsView(
         })
         bodyContainer.addView(nav)
 
+        val chanceF = addNumberRow(bodyContainer, "Peluang Random Event (0-100%)", action.chancePercent.toString())
+        fun saveEdited(transform: (Action) -> Action) {
+            val pct = (chanceF.text.toString().toIntOrNull() ?: action.chancePercent).coerceIn(0, 100)
+            onUpdateAction(action.id) { cur -> transform(cur).withChancePercent(pct) }
+            editingActionId = null
+        }
+
         when (action) {
             is ClickAction -> {
                 addPickTargetBtn("🎯 Atur Posisi Klik di Layar") { onPickTargetOnScreen(action.id) }
@@ -613,7 +672,7 @@ class OverlayMacroSettingsView(
                 val repIntF = addNumberRow(bodyContainer, "Interval klik (ms)", action.repeatIntervalMs.toString())
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             x = xF.text.toString().toIntOrNull() ?: action.x,
                             y = yF.text.toString().toIntOrNull() ?: action.y,
@@ -623,7 +682,6 @@ class OverlayMacroSettingsView(
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -634,7 +692,7 @@ class OverlayMacroSettingsView(
                 val durF = addNumberRow(bodyContainer, "Durasi tahan (ms)", action.durationMs.toString())
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             x = xF.text.toString().toIntOrNull() ?: action.x,
                             y = yF.text.toString().toIntOrNull() ?: action.y,
@@ -642,7 +700,6 @@ class OverlayMacroSettingsView(
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -655,7 +712,7 @@ class OverlayMacroSettingsView(
                 val durF = addNumberRow(bodyContainer, "Durasi swipe (ms)", action.durationMs.toString())
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             x1 = x1F.text.toString().toIntOrNull() ?: action.x1,
                             y1 = y1F.text.toString().toIntOrNull() ?: action.y1,
@@ -665,7 +722,6 @@ class OverlayMacroSettingsView(
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -698,7 +754,7 @@ class OverlayMacroSettingsView(
                 val durF = addNumberRow(bodyContainer, "Durasi (ms)", action.durationMs.toString())
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             zoomIn = zoomInFlag,
                             cx = cxF.text.toString().toIntOrNull() ?: action.cx,
@@ -708,7 +764,6 @@ class OverlayMacroSettingsView(
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -716,13 +771,12 @@ class OverlayMacroSettingsView(
                 val durF = addNumberRow(bodyContainer, "Tunggu (ms)", action.durationMs.toString())
                 val rndF = addNumberRow(bodyContainer, "Acak tambahan (ms)", action.randomMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             durationMs = (durF.text.toString().toLongOrNull() ?: action.durationMs).coerceAtLeast(0L),
                             randomMs = (rndF.text.toString().toLongOrNull() ?: action.randomMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -825,7 +879,7 @@ class OverlayMacroSettingsView(
                             rB.text.toString().toIntOrNull() ?: reg.bottom
                         )
                     } else null
-                    onUpdateAction(action.id) { cur ->
+                    saveEdited { cur ->
                         val imgCur = (cur as? ImageAction) ?: action
                         imgCur.copy(
                             imageName = selectedImg,
@@ -840,7 +894,6 @@ class OverlayMacroSettingsView(
                             region = newRegion
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -967,7 +1020,7 @@ class OverlayMacroSettingsView(
                         )
                     } else null
                     val parsedNum = numField.text.toString().replace(',', '.').toDoubleOrNull() ?: action.targetNumber
-                    onUpdateAction(action.id) { cur ->
+                    saveEdited { cur ->
                         val txtCur = (cur as? TextAction) ?: action
                         txtCur.copy(
                             compareMode = compareMode,
@@ -981,7 +1034,6 @@ class OverlayMacroSettingsView(
                             region = newRegion
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -1008,7 +1060,7 @@ class OverlayMacroSettingsView(
                 addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
 
                 addSaveActionBtn {
-                    onUpdateAction(action.id) { cur ->
+                    saveEdited { cur ->
                         val colCur = (cur as? ColorAction) ?: action
                         colCur.copy(
                             x = xF.text.toString().toIntOrNull() ?: colCur.x,
@@ -1022,7 +1074,6 @@ class OverlayMacroSettingsView(
                             notFound = notFoundMode
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -1033,12 +1084,11 @@ class OverlayMacroSettingsView(
                     rebuildBody()
                 }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
                 addSaveActionBtn {
-                    onUpdateAction(action.id) { cur ->
+                    saveEdited { cur ->
                         ((cur as? LoopAction) ?: action).copy(
                             count = (cntF.text.toString().toIntOrNull() ?: action.count).coerceIn(1, 9999)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -1054,13 +1104,19 @@ class OverlayMacroSettingsView(
                         textSize = 11f
                     })
                 } else {
+                    val now = store.effectiveNowMs()
                     val mBtns = mutableListOf<Pair<String, TextView>>()
                     otherMacros.forEach { m ->
-                        val b = makeBtn(m.name, if (m.id == targetId) "#0D9488" else "#1E293B") {
+                        val suffix = when {
+                            MacroSecurity.isExpired(m, now) -> " [Habis]"
+                            m.isPassive -> " [Pasif]"
+                            else -> ""
+                        }
+                        val b = makeBtn(m.name + suffix, if (m.id == targetId) "#0891B2" else "#1E293B") {
                             targetId = m.id
                             targetName = m.name
                             mBtns.forEach { (id, tv) ->
-                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (id == targetId) "#0D9488" else "#1E293B"))
+                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (id == targetId) "#0891B2" else "#1E293B"))
                             }
                         }.apply {
                             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
@@ -1078,7 +1134,7 @@ class OverlayMacroSettingsView(
                 bodyContainer.addView(retCheck)
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             targetMacroId = targetId,
                             targetMacroName = targetName,
@@ -1086,7 +1142,6 @@ class OverlayMacroSettingsView(
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
@@ -1115,22 +1170,24 @@ class OverlayMacroSettingsView(
                 bodyContainer.addView(spdRow)
                 val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
                 addSaveActionBtn {
-                    onUpdateAction(action.id) {
+                    saveEdited {
                         action.copy(
                             speed = speed,
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
-                    editingActionId = null
                 }
             }
 
             is RestartAction, is StopAction -> {
                 bodyContainer.addView(TextView(context).apply {
-                    text = "Aksi kontrol alur tidak memerlukan pengaturan tambahan."
+                    text = "Aksi kontrol alur (dapat diatur peluang Random Event di atas)."
                     setTextColor(Color.parseColor("#94A3B8"))
                     textSize = 11.5f
                 })
+                addSaveActionBtn {
+                    saveEdited { cur -> cur }
+                }
             }
         }
     }

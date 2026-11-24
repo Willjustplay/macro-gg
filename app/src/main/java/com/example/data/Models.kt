@@ -29,9 +29,16 @@ enum class StuckRecoveryMode(val label: String) {
     STOP_MACRO("Hentikan macro")
 }
 
+/** Unit for macro expiration duration. */
+@Serializable
+enum class ExpiryUnit(val label: String) {
+    DAYS("Hari"),
+    MONTHS("Bulan")
+}
+
 /**
  * A single building block of a macro (Macrorify-style component).
- * Condition actions ([ImageAction], [ColorAction]) and [LoopAction] contain nested actions.
+ * Condition actions ([ImageAction], [TextAction], [ColorAction]) and [LoopAction] contain nested actions.
  */
 @Serializable
 sealed class Action {
@@ -39,8 +46,11 @@ sealed class Action {
     abstract val enabled: Boolean
     /** Pause after the action finishes. */
     abstract val delayAfterMs: Long
+    /** Execution success probability 0..100% for random events (100 = always runs). */
+    abstract val chancePercent: Int
 
     abstract fun withEnabled(value: Boolean): Action
+    abstract fun withChancePercent(value: Int): Action
     abstract fun withNewIds(): Action
 }
 
@@ -50,6 +60,7 @@ data class ClickAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val x: Int,
     val y: Int,
     val durationMs: Long = 50,
@@ -59,6 +70,7 @@ data class ClickAction(
     val repeatIntervalMs: Long = 100
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -68,11 +80,13 @@ data class LongPressAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val x: Int,
     val y: Int,
     val durationMs: Long = 800
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -82,6 +96,7 @@ data class SwipeAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val x1: Int,
     val y1: Int,
     val x2: Int,
@@ -89,6 +104,7 @@ data class SwipeAction(
     val durationMs: Long = 350
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -99,6 +115,7 @@ data class ZoomAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val cx: Int,
     val cy: Int,
     val zoomIn: Boolean = true,
@@ -106,6 +123,7 @@ data class ZoomAction(
     val durationMs: Long = 400
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -115,11 +133,13 @@ data class WaitAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100,
     val durationMs: Long = 1000,
     /** Extra random 0..randomMs added on every run (human-like timing). */
     val randomMs: Long = 0
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -129,6 +149,7 @@ data class ImageAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     /** File name of the template inside the image library (e.g. "tombol_ok.png"). */
     val imageName: String,
     /** Similarity 0.5..1.0 (normalized cross-correlation). */
@@ -147,6 +168,7 @@ data class ImageAction(
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(
         id = newId(),
         thenActions = thenActions.map { it.withNewIds() },
@@ -160,6 +182,7 @@ data class ColorAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val x: Int,
     val y: Int,
     /** #RRGGBB */
@@ -173,6 +196,7 @@ data class ColorAction(
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(
         id = newId(),
         thenActions = thenActions.map { it.withNewIds() },
@@ -198,6 +222,7 @@ data class TextAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     /** Expected text substring/exact value when [compareMode] is text-based. */
     val query: String = "",
     /** Threshold number when [compareMode] is numeric (<, <=, >, >=, =). */
@@ -213,6 +238,7 @@ data class TextAction(
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(
         id = newId(),
         thenActions = thenActions.map { it.withNewIds() },
@@ -226,10 +252,12 @@ data class LoopAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100,
     val count: Int = 3,
     val actions: List<Action> = emptyList()
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId(), actions = actions.map { it.withNewIds() })
 }
 
@@ -240,12 +268,14 @@ data class RunMacroAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val targetMacroId: String = "",
     val targetMacroName: String = "",
     /** If true, returns to continue the caller macro after target completes; if false, switches permanently. */
     val returnAfter: Boolean = true
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -270,11 +300,13 @@ data class RecordAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
     override val delayAfterMs: Long = 300,
+    override val chancePercent: Int = 100,
     val gestures: List<RecordedGesture> = emptyList(),
     /** Playback speed multiplier (2.0 = twice as fast). */
     val speed: Float = 1f
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -283,9 +315,11 @@ data class RecordAction(
 data class StopAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
-    override val delayAfterMs: Long = 0
+    override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -294,9 +328,11 @@ data class StopAction(
 data class RestartAction(
     override val id: String = newId(),
     override val enabled: Boolean = true,
-    override val delayAfterMs: Long = 0
+    override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(id = newId())
 }
 
@@ -317,6 +353,21 @@ data class Macro(
     /** Auto-recover if no progress/action succeeds for N seconds (0 = off). */
     val autoRecoverStuckSec: Int = 0,
     val stuckRecoveryMode: StuckRecoveryMode = StuckRecoveryMode.RESTART_MACRO,
+    /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
+    val logoImage: String = "",
+    /** Prevents viewing/editing/duplicating macro actions without password. */
+    val isLocked: Boolean = false,
+    /** Salted SHA-256 password hash guarding lock, expiry, and passive mode settings. */
+    val lockPasswordHash: String = "",
+    val lockSalt: String = "",
+    /** Optional UTC epoch ms deadline after which the macro cannot be used (0 = unlimited). */
+    val expiresAtEpochMs: Long = 0L,
+    /** Human-readable duration label configured for expiry (e.g. "7 Hari", "1 Bulan"). */
+    val expiryLabel: String = "",
+    /** Passive mode: cannot run directly; only runnable when called by an active macro via RunMacroAction. */
+    val isPassive: Boolean = false,
+    /** Integrity seal over protection fields to detect manual JSON tampering. */
+    val securitySeal: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -368,28 +419,31 @@ private fun formatTargetNum(v: Double): String =
     if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
 
 /** Short human summary shown in lists and on the overlay log. */
-fun Action.summary(): String = when (this) {
-    is ClickAction -> "($x, $y)" + if (repeat > 1) " ×$repeat" else ""
-    is LongPressAction -> "($x, $y) ${durationMs}ms"
-    is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
-    is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
-    is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
-    is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
-    is TextAction -> {
-        val cond = if (compareMode.isNumeric) {
-            "Nilai ${compareMode.shortLabel} ${formatTargetNum(targetNumber)}"
-        } else {
-            "${compareMode.shortLabel} \"${query.ifBlank { "..." }}\""
+fun Action.summary(): String {
+    val base = when (this) {
+        is ClickAction -> "($x, $y)" + if (repeat > 1) " ×$repeat" else ""
+        is LongPressAction -> "($x, $y) ${durationMs}ms"
+        is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
+        is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
+        is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
+        is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+        is TextAction -> {
+            val cond = if (compareMode.isNumeric) {
+                "Nilai ${compareMode.shortLabel} ${formatTargetNum(targetNumber)}"
+            } else {
+                "${compareMode.shortLabel} \"${query.ifBlank { "..." }}\""
+            }
+            val area = if (region != null) " • area" else ""
+            "$cond$area" + if (clickOnFound) " • klik" else ""
         }
-        val area = if (region != null) " • area" else ""
-        "$cond$area" + if (clickOnFound) " • klik" else ""
+        is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
+        is LoopAction -> "${count}× (${actions.size} aksi)"
+        is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
+        is RecordAction -> "${gestures.size} gestur" + if (speed != 1f) " • ${speed}x" else ""
+        is RestartAction -> "Kembali ke aksi pertama"
+        is StopAction -> "Akhiri macro"
     }
-    is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
-    is LoopAction -> "${count}× (${actions.size} aksi)"
-    is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
-    is RecordAction -> "${gestures.size} gestur" + if (speed != 1f) " • ${speed}x" else ""
-    is RestartAction -> "Kembali ke aksi pertama"
-    is StopAction -> "Akhiri macro"
+    return if (chancePercent in 0..99) "$base • 🎲 ${chancePercent}%" else base
 }
 
 /** Create a sensible default action for the given kind (center of screen). */

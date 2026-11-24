@@ -49,6 +49,7 @@ import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.RecordedGesture
 import com.example.data.Region
 import com.example.data.Slot
@@ -343,7 +344,11 @@ class FloatingOverlayService : Service() {
         topRow.addView(makeCompactButton("+", "#1D4ED8") {
             refreshScreenSize()
             val created = AutomationCoordinator.addQuickClickMarker(screenWidth / 2, screenHeight / 2)
-            launchTargetPicker(created.id, reopenSettingsActionId = null)
+            if (created != null) {
+                launchTargetPicker(created.id, reopenSettingsActionId = null)
+            } else {
+                Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat diubah", Toast.LENGTH_SHORT).show()
+            }
         })
 
         // Hide Buttons Mode toggle
@@ -377,15 +382,27 @@ class FloatingOverlayService : Service() {
                 screenWidth / 2,
                 (screenHeight * 0.38f).toInt()
             )
-            launchTargetPicker(created.id, reopenSettingsActionId = null)
+            if (created != null) {
+                launchTargetPicker(created.id, reopenSettingsActionId = null)
+            } else {
+                Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat diubah", Toast.LENGTH_SHORT).show()
+            }
         })
 
         toolsRow.addView(makeCompactButton("✂", "#0F766E") {
-            launchScreenshotCrop(addToMacro = true, targetActionId = null)
+            if (AutomationCoordinator.activeMacro.value.isLocked) {
+                Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat ditambah aksi", Toast.LENGTH_SHORT).show()
+            } else {
+                launchScreenshotCrop(addToMacro = true, targetActionId = null)
+            }
         })
 
         toolsRow.addView(makeCompactButton("●", "#B91C1C") {
-            openTouchRecorder()
+            if (AutomationCoordinator.activeMacro.value.isLocked) {
+                Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat ditambah rekaman", Toast.LENGTH_SHORT).show()
+            } else {
+                openTouchRecorder()
+            }
         })
 
         toolsRow.addView(makeCompactButton("⚙", "#0284C7") {
@@ -812,6 +829,15 @@ class FloatingOverlayService : Service() {
         refreshScreenSize()
         val state = AutomationCoordinator.engineState.value
         if (state == EngineState.IDLE || state == EngineState.ERROR) {
+            if (AutomationCoordinator.activeMode.value == AutomationMode.MACRO) {
+                val active = AutomationCoordinator.activeMacro.value
+                MacroSecurity.checkDirectRun(active, store.effectiveNowMs())?.let { denial ->
+                    val msg = MacroSecurity.denialMessage(active, denial)
+                    ExecutionLogBus.error(msg)
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    return
+                }
+            }
             val needsCapture = AutomationCoordinator.activeMode.value == AutomationMode.MACRO &&
                 AutomationCoordinator.macroNeedsScreenCapture(AutomationCoordinator.activeMacro.value)
             if (needsCapture && !ScreenCaptureService.isCapturing.value) {

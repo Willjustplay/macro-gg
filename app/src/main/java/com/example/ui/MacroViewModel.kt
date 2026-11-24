@@ -120,6 +120,68 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         _messages.tryEmit("Macro dihapus.")
     }
 
+    fun effectiveNowMs(): Long = store.effectiveNowMs()
+
+    fun macroIconPath(logoImage: String): String? = store.macroIconPath(logoImage)
+
+    fun setMacroLogoFromUri(macro: Macro, uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bmp = appContext.contentResolver.openInputStream(uri)?.use { input ->
+                        BitmapFactory.decodeStream(input)
+                    } ?: error("Format foto tidak didukung.")
+                    val iconName = try {
+                        store.saveMacroLogo(macro.id, bmp)
+                    } finally {
+                        bmp.recycle()
+                    }
+                    val latest = store.getMacroById(macro.id) ?: macro
+                    store.saveMacro(latest.copy(logoImage = iconName))
+                }
+            }
+            result.onSuccess { saved ->
+                if (AutomationCoordinator.activeMacro.value.id == saved.id) {
+                    AutomationCoordinator.selectMacro(saved)
+                }
+                _messages.emit("Foto logo '${saved.name}' diperbarui.")
+            }.onFailure { err ->
+                _messages.emit("Gagal memasang foto logo: ${err.message}")
+            }
+        }
+    }
+
+    fun setMacroLogoFromLibrary(macro: Macro, libraryImageName: String) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val iconName = store.copyLibraryImageAsMacroLogo(macro.id, libraryImageName)
+                        ?: error("Gambar tidak ditemukan di pustaka.")
+                    val latest = store.getMacroById(macro.id) ?: macro
+                    store.saveMacro(latest.copy(logoImage = iconName))
+                }
+            }
+            result.onSuccess { saved ->
+                if (AutomationCoordinator.activeMacro.value.id == saved.id) {
+                    AutomationCoordinator.selectMacro(saved)
+                }
+                _messages.emit("Foto logo '${saved.name}' diperbarui.")
+            }.onFailure { err ->
+                _messages.emit("Gagal memasang foto logo: ${err.message}")
+            }
+        }
+    }
+
+    fun removeMacroLogo(macro: Macro) {
+        val prev = macro.logoImage
+        val latest = store.getMacroById(macro.id) ?: macro
+        val saved = saveMacro(latest.copy(logoImage = ""))
+        if (prev.isNotBlank()) {
+            store.cleanupUnusedMacroIcon(prev, excludingMacroId = saved.id)
+        }
+        _messages.tryEmit("Foto logo '${saved.name}' dihapus.")
+    }
+
     // ---- Export / Import ----
 
     fun exportMacroToUri(macro: Macro, uri: Uri) {

@@ -42,6 +42,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.ContentCopy
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
@@ -113,6 +115,7 @@ import com.example.data.ContainerRef
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
 import com.example.data.Macro
+import com.example.data.MacroSecurity
 import com.example.data.Slot
 import com.example.data.StuckRecoveryMode
 import com.example.data.TextAction
@@ -138,10 +141,14 @@ fun MacroEditorScreen(
     images: List<ImageAsset>,
     imageFolders: List<String>,
     lastPickedPixel: PickedPixel?,
+    logoPath: String?,
     screenW: Int,
     screenH: Int,
+    snackbarHostState: androidx.compose.material3.SnackbarHostState? = null,
     onUpdateMacro: (Macro) -> Unit,
     onRecropImage: (String, Bitmap) -> Unit,
+    onChangeLogo: () -> Unit,
+    onOpenSecurity: () -> Unit,
     onLaunchOverlay: (Macro) -> Unit,
     onLaunchCropOverlay: (Macro, String?) -> Unit,
     onLaunchTargetPickerOverlay: (Macro, String) -> Unit,
@@ -171,6 +178,7 @@ fun MacroEditorScreen(
     val scrollStepPx = with(density) { 16.dp.toPx() }
 
     val imageByName = remember(images) { images.associateBy { it.name } }
+    val macroLogoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     fun mutateActions(block: (List<Action>) -> List<Action>) {
         dragPreviewActions = null
@@ -255,6 +263,11 @@ fun MacroEditorScreen(
     }
 
     Scaffold(
+        snackbarHost = {
+            if (snackbarHostState != null) {
+                androidx.compose.material3.SnackbarHost(snackbarHostState)
+            }
+        },
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -263,23 +276,46 @@ fun MacroEditorScreen(
                     }
                 },
                 title = {
-                    Column {
-                        Text(
-                            macro.name.ifBlank { "Macro Baru" },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
-                        Text(
-                            "$loopStr • Jeda ${macro.loopDelayMs}ms" + if (macro.jitterPx > 0) " • Acak ±${macro.jitterPx}px" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (macroLogoBmp != null) {
+                            Image(
+                                bitmap = macroLogoBmp,
+                                contentDescription = "Ubah Foto Logo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(onClick = onChangeLogo)
+                            )
+                        }
+                        Column {
+                            Text(
+                                macro.name.ifBlank { "Macro Baru" },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
+                            Text(
+                                "$loopStr • Jeda ${macro.loopDelayMs}ms" + if (macro.jitterPx > 0) " • Acak ±${macro.jitterPx}px" else "",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 },
                 actions = {
+                    IconButton(onClick = onOpenSecurity) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = "Kunci, Tenggat & Mode Pasif",
+                            tint = if (MacroSecurity.hasAnyProtection(macro)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     IconButton(onClick = { showMacroSettings = true }) {
                         Icon(Icons.Filled.Tune, contentDescription = "Pengaturan Macro")
                     }
@@ -542,10 +578,19 @@ fun MacroEditorScreen(
         )
     }
 
-    // Macro Settings Sheet (name, loopCount, loopDelay, jitter, randomDelay, maxDuration)
+    // Macro Settings Sheet (logo, security, name, loopCount, loopDelay, jitter, randomDelay, maxDuration, watchdog)
     if (showMacroSettings) {
         MacroSettingsSheet(
             macro = macro,
+            logoPath = logoPath,
+            onChangeLogo = {
+                showMacroSettings = false
+                onChangeLogo()
+            },
+            onOpenSecurity = {
+                showMacroSettings = false
+                onOpenSecurity()
+            },
             onSave = { updated ->
                 onUpdateMacro(updated)
                 showMacroSettings = false
@@ -1171,6 +1216,9 @@ private fun AddActionPickerSheet(
 @Composable
 private fun MacroSettingsSheet(
     macro: Macro,
+    logoPath: String?,
+    onChangeLogo: () -> Unit,
+    onOpenSecurity: () -> Unit,
     onSave: (Macro) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1183,6 +1231,7 @@ private fun MacroSettingsSheet(
     var maxMin by remember(macro.id) { mutableStateOf(macro.maxDurationMin.toString()) }
     var stuckSec by remember(macro.id) { mutableStateOf(macro.autoRecoverStuckSec.toString()) }
     var recoveryMode by remember(macro.id) { mutableStateOf(macro.stuckRecoveryMode) }
+    val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1195,6 +1244,112 @@ private fun MacroSettingsSheet(
         ) {
             Text("Pengaturan Macro", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             HorizontalDivider()
+
+            // Custom Macro Logo Photo row
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onChangeLogo)
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0A1020)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (logoBmp != null) {
+                            Image(
+                                bitmap = logoBmp,
+                                contentDescription = "Logo Macro",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.AddPhotoAlternate,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Foto Logo Macro", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (macro.logoImage.isNotBlank()) "Foto khusus terpasang — ketuk untuk ganti"
+                            else "Pasang foto khusus untuk logo macro ini",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = onChangeLogo,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("Ubah", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+
+            // Lock, Expiry & Passive Mode shortcut row
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            ) {
+                val secSummary = buildList {
+                    if (macro.isLocked) add("Terkunci")
+                    if (macro.isPassive) add("Pasif")
+                    MacroSecurity.remainingTimeLabel(macro)?.let { add(it) }
+                }.joinToString(" • ").ifBlank { "Tidak ada proteksi aktif" }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenSecurity)
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Kunci, Tenggat & Mode Pasif", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            secSummary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = onOpenSecurity,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("Atur", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
 
             OutlinedTextField(
                 value = name,

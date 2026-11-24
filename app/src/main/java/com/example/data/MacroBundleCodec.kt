@@ -30,7 +30,8 @@ object MacroBundleCodec {
     data class DecodedBundle(
         val macros: List<Macro>,
         val scripts: List<LuaScript>,
-        val images: Map<String, ByteArray>
+        val images: Map<String, ByteArray>,
+        val macroIcons: Map<String, ByteArray> = emptyMap()
     )
 
     /**
@@ -56,17 +57,23 @@ object MacroBundleCodec {
      * Writes a portable .zip containing:
      * - `macro.json` (root macro)
      * - `linked_macros/<id>.json` (any linked sub-macros)
-     * - `images/<filename>.png` (every referenced image across root, nested branches, and linked macros)
+     * - `images/<filename>.png` (every referenced target image across root, nested branches, and linked macros)
+     * - `macro_icons/<filename>.png` (any custom macro logo photos)
      */
     fun writeMacroZip(
         root: Macro,
         lookupMacro: (String) -> Macro?,
         loadImage: (imageName: String) -> Pair<String, ByteArray>?,
-        output: OutputStream
+        output: OutputStream,
+        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null }
     ): ExportResult {
         val bundle = collectMacroBundle(root, lookupMacro)
         val referencedImages = LinkedHashSet<String>()
-        bundle.forEach { m -> referencedImages += m.imageNames() }
+        val referencedIcons = LinkedHashSet<String>()
+        bundle.forEach { m ->
+            referencedImages += m.imageNames()
+            if (m.logoImage.isNotBlank()) referencedIcons += m.logoImage
+        }
 
         var imagesWritten = 0
         ZipOutputStream(output).use { zip ->
@@ -89,6 +96,17 @@ object MacroBundleCodec {
                     zip.write(bytes)
                     zip.closeEntry()
                     imagesWritten++
+                }
+            }
+
+            val writtenIcons = HashSet<String>()
+            for (iconName in referencedIcons) {
+                val resolved = loadMacroIcon(iconName) ?: continue
+                val (fileName, bytes) = resolved
+                if (fileName.isNotBlank() && bytes.isNotEmpty() && writtenIcons.add(fileName)) {
+                    zip.putNextEntry(ZipEntry("macro_icons/$fileName"))
+                    zip.write(bytes)
+                    zip.closeEntry()
                 }
             }
         }
@@ -117,6 +135,7 @@ object MacroBundleCodec {
         val rawMacros = ArrayList<Macro>()
         val scripts = ArrayList<LuaScript>()
         val images = LinkedHashMap<String, ByteArray>()
+        val macroIcons = LinkedHashMap<String, ByteArray>()
 
         ZipInputStream(buffered).use { zis ->
             while (true) {
@@ -137,6 +156,17 @@ object MacroBundleCodec {
                     name.startsWith("scripts/") && name.endsWith(".json") -> {
                         runCatching { json.decodeFromString<LuaScript>(bytes.toString(Charsets.UTF_8)) }
                             .getOrNull()?.let { scripts += it.copy(id = idGenerator()) }
+                    }
+                    name.startsWith("macro_icons/") && (
+                        name.endsWith(".png", ignoreCase = true) ||
+                            name.endsWith(".jpg", ignoreCase = true) ||
+                            name.endsWith(".jpeg", ignoreCase = true) ||
+                            name.endsWith(".webp", ignoreCase = true)
+                        ) -> {
+                        val iconName = name.substringAfterLast('/').trim()
+                        if (iconName.isNotBlank() && bytes.isNotEmpty()) {
+                            macroIcons[iconName] = bytes
+                        }
                     }
                     name.endsWith(".png", ignoreCase = true) ||
                         name.endsWith(".jpg", ignoreCase = true) ||
@@ -168,7 +198,12 @@ object MacroBundleCodec {
             m.copy(id = idRemap[m.id] ?: idGenerator(), actions = mappedActions)
         }
 
-        return DecodedBundle(macros = remappedMacros, scripts = scripts, images = images)
+        return DecodedBundle(
+            macros = remappedMacros,
+            scripts = scripts,
+            images = images,
+            macroIcons = macroIcons
+        )
     }
 
     private fun readZipEntryBytes(zis: ZipInputStream): ByteArray {
