@@ -634,6 +634,8 @@ object AutomationCoordinator {
                     return argb
                 }
 
+                private val luaScaleCache = HashMap<String, Double>()
+
                 override fun findImage(name: String, threshold: Double, region: Region?): MatchResult? {
                     val tpl = localStore?.loadTemplate(name)
                     if (tpl == null) {
@@ -645,10 +647,39 @@ object AutomationCoordinator {
                         ExecutionLogBus.warn("findImage('$name'): Tangkap layar belum aktif.")
                         return null
                     }
-                    val match = if (region != null) {
-                        TemplateMatcher.find(frame, tpl, threshold, region.left, region.top, region.right, region.bottom)
-                    } else {
-                        TemplateMatcher.find(frame, tpl, threshold)
+                    val rLeft = region?.left ?: 0
+                    val rTop = region?.top ?: 0
+                    val rRight = region?.right ?: frame.width
+                    val rBottom = region?.bottom ?: frame.height
+                    val cacheKey = "$name@${frame.width}x${frame.height}"
+                    val cachedScale = luaScaleCache[cacheKey]
+                    val triedScales = ArrayList<Double>(2)
+                    var match: MatchResult? = null
+                    if (cachedScale != null) {
+                        triedScales += cachedScale
+                        val scaledTpl = tpl.scaled(cachedScale, cachedScale)
+                        match = TemplateMatcher.find(frame, scaledTpl, threshold, rLeft, rTop, rRight, rBottom)
+                    }
+                    if (match == null && (cachedScale == null || kotlin.math.abs(cachedScale - 1.0) >= 0.02)) {
+                        triedScales += 1.0
+                        match = TemplateMatcher.find(frame, tpl, threshold, rLeft, rTop, rRight, rBottom)
+                        if (match != null) luaScaleCache[cacheKey] = 1.0
+                    }
+                    if (match == null) {
+                        val ms = TemplateMatcher.findMultiScale(
+                            frame = frame,
+                            template = tpl,
+                            threshold = threshold,
+                            regionLeft = rLeft,
+                            regionTop = rTop,
+                            regionRight = rRight,
+                            regionBottom = rBottom,
+                            skipScales = triedScales
+                        )
+                        if (ms.match != null) {
+                            match = ms.match
+                            luaScaleCache[cacheKey] = ms.bestScale
+                        }
                     }
                     if (match != null && localStore.settings.value.showDebugMatchBox) {
                         flashMatchHighlight(match, "$name ${(match.score * 100).toInt()}%")

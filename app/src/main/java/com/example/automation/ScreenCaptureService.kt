@@ -33,6 +33,7 @@ import com.example.vision.toFrame
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
 
 /**
  * Foreground MediaProjection service supplying live screen frames for:
@@ -53,8 +54,10 @@ class ScreenCaptureService : Service() {
     private var captureHandler: Handler? = null
     private var displayManager: DisplayManager? = null
     private var lastFrameCopyMs: Long = 0L
+    private var lastMetricsCheckMs: Long = 0L
     private var pendingImage: Image? = null
     private var pendingFlushScheduled = false
+    private var packedBuffer: ByteBuffer? = null
 
     private val flushPendingRunnable = Runnable {
         pendingFlushScheduled = false
@@ -125,6 +128,13 @@ class ScreenCaptureService : Service() {
         checkAndHandleRotation()
     }
 
+    private fun checkAndHandleRotationThrottled() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMetricsCheckMs < 450L) return
+        lastMetricsCheckMs = now
+        checkAndHandleRotation()
+    }
+
     private fun checkAndHandleRotation() {
         val vd = virtualDisplay ?: return
         val handler = captureHandler ?: return
@@ -140,8 +150,28 @@ class ScreenCaptureService : Service() {
     }
 
     private fun readDisplayMetrics(): Triple<Int, Int, Int> {
-        val wm = getSystemService(WindowManager::class.java)
+        val dm = displayManager ?: getSystemService(DisplayManager::class.java)
+        val defaultDisplay = dm?.getDisplay(Display.DEFAULT_DISPLAY)
         val metrics = DisplayMetrics()
+        if (defaultDisplay != null) {
+            @Suppress("DEPRECATION")
+            defaultDisplay.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                return Triple(
+                    metrics.widthPixels.coerceAtLeast(1),
+                    metrics.heightPixels.coerceAtLeast(1),
+                    metrics.densityDpi.coerceAtLeast(160)
+                )
+            }
+        }
+        val wm = getSystemService(WindowManager::class.java)
+        val density = resources.displayMetrics.densityDpi.coerceAtLeast(160)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = runCatching { wm.maximumWindowMetrics.bounds }.getOrNull()
+            if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+                return Triple(bounds.width(), bounds.height(), density)
+            }
+        }
         @Suppress("DEPRECATION")
         wm.defaultDisplay.getRealMetrics(metrics)
         return Triple(
@@ -229,6 +259,7 @@ class ScreenCaptureService : Service() {
             captureHeight = height
             imageReader = reader
             virtualDisplay = vd
+            activeInstance = this
             _isCapturing.value = true
             ExecutionLogBus.image("Tangkap layar aktif (${width}x${height}).")
 
@@ -271,8 +302,6 @@ class ScreenCaptureService : Service() {
             synchronized(frameLock) {
                 latestBitmap?.recycle()
                 latestBitmap = null
-                scratchBitmap?.recycle()
-                scratchBitmap = null
             }
             ExecutionLogBus.image("Orientasi layar diperbarui (${width}x${height}).")
         } catch (t: Throwable) {
@@ -284,6 +313,7 @@ class ScreenCaptureService : Service() {
         // maxImages = 3 so holding 1 trailing-edge pending image never stalls the producer
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         reader.setOnImageAvailableListener({ ir ->
+            checkAndHandleRotationThrottled()
             val image = try {
                 ir.acquireLatestImage()
             } catch (_: Throwable) {
@@ -317,35 +347,50 @@ class ScreenCaptureService : Service() {
     private fun copyImageToLatestBitmap(image: Image, width: Int, height: Int) {
         try {
             lastFrameCopyMs = SystemClock.uptimeMillis()
+            val imgW = image.width.takeIf { it > 0 } ?: width
+            val imgH = image.height.takeIf { it > 0 } ?: height
             val plane = image.planes[0]
             val buffer = plane.buffer
             buffer.rewind()
             val pixelStride = plane.pixelStride
             if (pixelStride <= 0) return
             val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * width
-            val bitmapWidth = (width + rowPadding / pixelStride).coerceAtLeast(width)
+            val rowBytes = imgW * pixelStride
+            val rowPadding = rowStride - rowBytes
+            val totalBytes = rowBytes * imgH
 
             synchronized(frameLock) {
-                if (bitmapWidth == width) {
-                    var dst = latestBitmap
-                    if (dst == null || dst.isRecycled || dst.width != width || dst.height != height) {
-                        dst?.recycle()
-                        dst = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                        latestBitmap = dst
-                    }
+                var dst = latestBitmap
+                if (dst == null || dst.isRecycled || dst.width != imgW || dst.height != imgH) {
+                    dst?.recycle()
+                    dst = Bitmap.createBitmap(imgW, imgH, Bitmap.Config.ARGB_8888)
+                    latestBitmap = dst
+                }
+                if (rowPadding == 0 && buffer.remaining() >= totalBytes) {
                     dst.copyPixelsFromBuffer(buffer)
                 } else {
-                    var scratch = scratchBitmap
-                    if (scratch == null || scratch.isRecycled || scratch.width != bitmapWidth || scratch.height != height) {
-                        scratch?.recycle()
-                        scratch = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
-                        scratchBitmap = scratch
+                    // Row-by-row copy avoids "Buffer not large enough for pixels" on Mali/Redfinger/Gralloc4
+                    // when the last row omits trailing stride padding, and avoids per-frame Bitmap allocations.
+                    var packed = packedBuffer
+                    if (packed == null || packed.capacity() < totalBytes) {
+                        packed = ByteBuffer.allocate(totalBytes)
+                        packedBuffer = packed
                     }
-                    scratch.copyPixelsFromBuffer(buffer)
-                    val oldLatest = latestBitmap
-                    latestBitmap = Bitmap.createBitmap(scratch, 0, 0, width, height)
-                    oldLatest?.recycle()
+                    packed.clear()
+                    val dstArray = packed.array()
+                    val limit = buffer.limit()
+                    var dstOffset = 0
+                    for (row in 0 until imgH) {
+                        val srcPos = row * rowStride
+                        if (srcPos >= limit) break
+                        val copyLen = minOf(rowBytes, limit - srcPos)
+                        buffer.position(srcPos)
+                        buffer.get(dstArray, dstOffset, copyLen)
+                        dstOffset += rowBytes
+                    }
+                    packed.position(0)
+                    packed.limit(totalBytes)
+                    dst.copyPixelsFromBuffer(packed)
                 }
             }
         } catch (_: Throwable) {
@@ -356,6 +401,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCaptureResources() {
+        if (activeInstance === this) activeInstance = null
         _isCapturing.value = false
         try { displayManager?.unregisterDisplayListener(displayListener) } catch (_: Throwable) {}
         displayManager = null
@@ -383,12 +429,11 @@ class ScreenCaptureService : Service() {
         try { captureThread?.quitSafely() } catch (_: Throwable) {}
         captureThread = null
         captureHandler = null
+        packedBuffer = null
 
         synchronized(frameLock) {
             latestBitmap?.recycle()
             latestBitmap = null
-            scratchBitmap?.recycle()
-            scratchBitmap = null
         }
     }
 
@@ -410,7 +455,7 @@ class ScreenCaptureService : Service() {
 
         private val frameLock = Any()
         private var latestBitmap: Bitmap? = null
-        private var scratchBitmap: Bitmap? = null
+        @Volatile private var activeInstance: ScreenCaptureService? = null
         @Volatile var captureWidth: Int = 1080
         @Volatile var captureHeight: Int = 2400
         @Volatile var pendingOnReady: (() -> Unit)? = null
@@ -443,6 +488,7 @@ class ScreenCaptureService : Service() {
 
         /** Returns an immutable snapshot [Frame] of the latest screen image for template matching. */
         fun captureFrame(): Frame? {
+            activeInstance?.checkAndHandleRotationThrottled()
             synchronized(frameLock) {
                 val bmp = latestBitmap ?: return null
                 if (bmp.isRecycled) return null
@@ -456,6 +502,7 @@ class ScreenCaptureService : Service() {
 
         /** Returns a standalone Bitmap copy for the overlay cropper UI. */
         fun captureBitmapCopy(): Bitmap? {
+            activeInstance?.checkAndHandleRotationThrottled()
             synchronized(frameLock) {
                 val bmp = latestBitmap ?: return null
                 if (bmp.isRecycled) return null

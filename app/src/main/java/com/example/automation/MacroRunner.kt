@@ -29,6 +29,7 @@ import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
 import com.example.vision.TemplateMatcher
 import com.example.vision.TextConditionEvaluator
+import kotlin.math.abs
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
@@ -78,6 +79,10 @@ class MacroRunner(
     private val random: Random = Random.Default
 ) {
     private var lastProgressMs: Long = 0L
+    /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
+    private val discoveredTemplateScale = HashMap<String, Double>()
+    /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
+    private val discoveredMacroScale = HashMap<String, Double>()
 
     suspend fun run(macro: Macro) {
         val now = runtime.nowMs()
@@ -387,7 +392,10 @@ class MacroRunner(
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var matched: MatchResult? = null
         var bestScore = 0.0
+        var usedScale = 1.0
         var sawFrame = false
+        var lastMultiScaleMs = Long.MIN_VALUE / 2
+        var multiScaleCount = 0
 
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
@@ -397,26 +405,88 @@ class MacroRunner(
                 sawFrame = true
                 val frameTransform = ResolutionScaler.forMacro(macro, frame.width, frame.height)
                 val scaledRegion = action.region?.let { frameTransform.scaleRegion(it) }
-                val candidates = frameTransform.templateScaleCandidates().map { (sx, sy) ->
-                    template.scaled(sx, sy)
+                val tplKey = "${action.imageName}@${frame.width}x${frame.height}"
+                val macroKey = "${macro.id}@${frame.width}x${frame.height}"
+
+                // Build ordered fast-path (sx, sy) candidates:
+                // 1) previously discovered scale for this exact template
+                // 2) expected resolution transform scales (or 1.0x)
+                // 3) previously discovered macro-wide scale (helps sibling templates hit immediately)
+                val fastScales = ArrayList<Pair<Double, Double>>(6)
+                fun addFastScale(sx: Double, sy: Double) {
+                    if (fastScales.none { abs(it.first - sx) < 0.02 && abs(it.second - sy) < 0.02 }) {
+                        fastScales += sx to sy
+                    }
                 }
-                for (cand in candidates) {
+                if (macro.autoScaleResolution) {
+                    discoveredTemplateScale[tplKey]?.let { addFastScale(it, it) }
+                }
+                frameTransform.templateScaleCandidates().forEach { (sx, sy) -> addFastScale(sx, sy) }
+                if (macro.autoScaleResolution) {
+                    discoveredMacroScale[macroKey]?.let { addFastScale(it, it) }
+                }
+
+                val triedUniformScales = ArrayList<Double>(fastScales.size)
+                for ((sx, sy) in fastScales) {
+                    val cand = template.scaled(sx, sy)
                     if (cand.width > frame.width || cand.height > frame.height) continue
-                    val outcome = if (scaledRegion != null && scaledRegion.width >= cand.width && scaledRegion.height >= cand.height) {
+                    if (abs(sx - sy) < 0.02) triedUniformScales += sx
+                    val outcome = if (scaledRegion != null &&
+                        scaledRegion.width >= cand.width &&
+                        scaledRegion.height >= cand.height
+                    ) {
                         TemplateMatcher.findWithStats(
                             frame, cand, action.threshold.toDouble(),
                             scaledRegion.left, scaledRegion.top, scaledRegion.right, scaledRegion.bottom
                         )
-                    } else if (scaledRegion == null) {
-                        TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
                     } else {
-                        // Scaled region was slightly tighter than candidate due to rounding; search full frame fallback
                         TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
                     }
                     if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
                     if (outcome.match != null) {
                         matched = outcome.match
+                        usedScale = (sx + sy) / 2.0
+                        if (macro.autoScaleResolution && abs(sx - sy) < 0.02) {
+                            discoveredTemplateScale[tplKey] = sx
+                            if (abs(sx - 1.0) >= 0.02) discoveredMacroScale[macroKey] = sx
+                        }
                         break
+                    }
+                }
+
+                // Adaptive multi-scale fallback (0.50x..1.50x with local ±1.5%..±4% refinement):
+                // catches DPI differences, legacy exports with sourceWidth==0, and gallery-cropped templates!
+                if (matched == null && macro.autoScaleResolution) {
+                    val nowMs = runtime.nowMs()
+                    val msCooldown = if (discoveredMacroScale.containsKey(macroKey)) 750L else 400L
+                    if (multiScaleCount == 0 || nowMs - lastMultiScaleMs >= msCooldown) {
+                        lastMultiScaleMs = nowMs
+                        multiScaleCount++
+                        val validRegion = scaledRegion?.takeIf {
+                            it.width >= (template.width * 0.5).toInt().coerceAtLeast(8) &&
+                                it.height >= (template.height * 0.5).toInt().coerceAtLeast(8)
+                        }
+                        val rLeft = validRegion?.left ?: 0
+                        val rTop = validRegion?.top ?: 0
+                        val rRight = validRegion?.right ?: frame.width
+                        val rBottom = validRegion?.bottom ?: frame.height
+                        val ms = TemplateMatcher.findMultiScale(
+                            frame = frame,
+                            template = template,
+                            threshold = action.threshold.toDouble(),
+                            regionLeft = rLeft,
+                            regionTop = rTop,
+                            regionRight = rRight,
+                            regionBottom = rBottom,
+                            skipScales = triedUniformScales
+                        )
+                        if (ms.bestScore > bestScore) bestScore = ms.bestScore
+                        if (ms.match != null) {
+                            matched = ms.match
+                            usedScale = ms.bestScale
+                            discoveredTemplateScale[tplKey] = ms.bestScale
+                            discoveredMacroScale[macroKey] = ms.bestScale
+                        }
                     }
                 }
                 if (matched != null) break
@@ -427,7 +497,8 @@ class MacroRunner(
 
         if (matched != null) {
             val pct = (matched.score * 100).toInt()
-            runtime.log(LogLevel.IMAGE, "Ditemukan '${action.imageName}' di (${matched.centerX},${matched.centerY}) $pct%")
+            val scaleSuffix = if (abs(usedScale - 1.0) >= 0.02) " (skala ${(usedScale * 100).toInt()}%)" else ""
+            runtime.log(LogLevel.IMAGE, "Ditemukan '${action.imageName}' di (${matched.centerX},${matched.centerY}) $pct%$scaleSuffix")
             runtime.onMatchFound(matched, "${action.imageName} $pct%")
             markProgress()
             if (action.clickOnFound) {

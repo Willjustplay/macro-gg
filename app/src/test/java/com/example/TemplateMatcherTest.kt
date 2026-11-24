@@ -146,4 +146,44 @@ class TemplateMatcherTest {
         val absent = TemplateMatcher.findWithStats(blank, tpl, threshold = 0.85)
         assertNull(absent.match)
     }
+
+    @Test
+    fun findMultiScale_detectsScaledIconsAcrossArbitraryDeviceAndDpiRatios() {
+        // Synthesize a structured button icon (border + inner badge + gradient)
+        fun makeButton(w: Int, h: Int): Frame {
+            val px = IntArray(w * h)
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val nx = x.toFloat() / w
+                    val ny = y.toFloat() / h
+                    val luma = when {
+                        nx < 0.08f || nx > 0.92f || ny < 0.10f || ny > 0.90f -> 28
+                        (nx - 0.35f) * (nx - 0.35f) + (ny - 0.50f) * (ny - 0.50f) < 0.045f -> 245
+                        nx > 0.55f && ny in 0.30f..0.70f -> 210
+                        else -> (80 + (nx * 90 + ny * 40).toInt()).coerceIn(0, 255)
+                    }
+                    px[y * w + x] = (0xFF shl 24) or (luma shl 16) or (luma shl 8) or luma
+                }
+            }
+            return Frame(w, h, px)
+        }
+
+        val origTpl = PreparedTemplate("battle_btn.png", makeButton(120, 90))
+
+        // Test awkward non-grid scales (0.67x, 0.71x, 0.85x, 0.95x, 1.15x) where 1.0x single-scale drops below 50%
+        for (scale in listOf(0.67, 0.71, 0.85, 0.95, 1.15)) {
+            val screen = Frame(640, 480, IntArray(640 * 480) { 0xFF202A38.toInt() })
+            val scaledW = kotlin.math.round(120 * scale).toInt()
+            val scaledH = kotlin.math.round(90 * scale).toInt()
+            val placed = makeButton(scaledW, scaledH)
+            stamp(screen, placed, dstX = 213, dstY = 177)
+
+            val res = TemplateMatcher.findMultiScale(screen, origTpl, threshold = 0.80)
+            assertNotNull("Expected findMultiScale match at scale=$scale (best=${res.bestScore})", res.match)
+            assertTrue("Expected score >= 0.85 at scale=$scale, got ${res.bestScore}", res.bestScore >= 0.85)
+            val m = res.match!!
+            assertTrue("Center X drift at scale=$scale: ${m.centerX} vs ${213 + scaledW / 2}", abs(m.centerX - (213 + scaledW / 2)) <= 3)
+            assertTrue("Center Y drift at scale=$scale: ${m.centerY} vs ${177 + scaledH / 2}", abs(m.centerY - (177 + scaledH / 2)) <= 3)
+        }
+    }
 }

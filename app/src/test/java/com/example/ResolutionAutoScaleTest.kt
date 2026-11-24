@@ -373,4 +373,82 @@ class ResolutionAutoScaleTest {
         assertFalse(MacroSecurity.isTampered(decoded))
         assertTrue(MacroSecurity.verifyPassword(decoded, "secret"))
     }
+
+    @Test
+    fun legacyMacroWithUnknownSourceResolutionDiscoversTemplateScaleAutomatically() = runTest {
+        fun makeIcon(w: Int, h: Int): Frame {
+            val px = IntArray(w * h)
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val nx = x.toFloat() / w
+                    val ny = y.toFloat() / h
+                    val luma = when {
+                        nx < 0.1f || nx > 0.9f || ny < 0.1f || ny > 0.9f -> 25
+                        (nx - 0.5f) * (nx - 0.5f) + (ny - 0.5f) * (ny - 0.5f) < 0.08f -> 240
+                        nx > ny -> 185
+                        else -> 90
+                    }
+                    px[y * w + x] = (0xFF shl 24) or (luma shl 16) or (luma shl 8) or luma
+                }
+            }
+            return Frame(w, h, px)
+        }
+
+        // Template cropped at 96x72, screen displays it at 0.75x (72x54) on a legacy macro with sourceWidth=0!
+        val tpl = PreparedTemplate("legacy_btn.png", makeIcon(96, 72))
+        val screenW = 640
+        val screenH = 480
+        val pixels = IntArray(screenW * screenH) { 0xFF1A202C.toInt() }
+        val scaledBtn = makeIcon(72, 54)
+        for (y in 0 until scaledBtn.height) {
+            for (x in 0 until scaledBtn.width) {
+                pixels[(180 + y) * screenW + (260 + x)] = scaledBtn.pixels[y * scaledBtn.width + x]
+            }
+        }
+        val frame = Frame(screenW, screenH, pixels)
+
+        val clicks = mutableListOf<Pair<Int, Int>>()
+        val logs = mutableListOf<String>()
+        val legacyMacro = Macro(
+            name = "Legacy Imported Macro",
+            sourceWidth = 0,
+            sourceHeight = 0,
+            autoScaleResolution = true,
+            loopCount = 1,
+            loopDelayMs = 0,
+            actions = listOf(
+                ImageAction(
+                    imageName = "legacy_btn.png",
+                    threshold = 0.80f,
+                    timeoutMs = 0,
+                    clickOnFound = true,
+                    delayAfterMs = 0
+                )
+            )
+        )
+
+        val runtime = object : MacroRuntime {
+            override val screenWidth: Int = screenW
+            override val screenHeight: Int = screenH
+            override fun isStopped() = false
+            override suspend fun waitIfPaused() {}
+            override suspend fun sleep(ms: Long) {}
+            override suspend fun click(x: Int, y: Int, durationMs: Long): Boolean {
+                clicks += x to y
+                return true
+            }
+            override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long) = true
+            override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float) = true
+            override fun captureFrame(): Frame = frame
+            override fun samplePixelArgb(x: Int, y: Int): Int? = null
+            override fun loadTemplate(name: String): PreparedTemplate? = if (name == "legacy_btn.png") tpl else null
+            override fun log(level: LogLevel, message: String) { logs += message }
+        }
+
+        MacroRunner(runtime).run(legacyMacro)
+        assertEquals("Legacy macro must detect scaled template automatically", 1, clicks.size)
+        assertTrue("Expected X near 296, got ${clicks[0].first}", abs(clicks[0].first - 296) <= 3)
+        assertTrue("Expected Y near 207, got ${clicks[0].second}", abs(clicks[0].second - 207) <= 3)
+        assertTrue("Expected scale info in log: $logs", logs.any { it.contains("skala ") })
+    }
 }

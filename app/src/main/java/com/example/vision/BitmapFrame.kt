@@ -16,7 +16,10 @@ fun Bitmap.toFrame(): Frame {
 }
 
 fun File.decodeFrame(): Frame? {
-    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+    val opts = BitmapFactory.Options().apply {
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+        inScaled = false
+    }
     val bmp = BitmapFactory.decodeFile(absolutePath, opts) ?: return null
     return try {
         bmp.toFrame()
