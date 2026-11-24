@@ -143,6 +143,9 @@ private fun WjustMacroApp() {
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingImportGalleryFolder by remember { mutableStateOf("") }
     var pendingLogoMacro by remember { mutableStateOf<Macro?>(null) }
+    var showLocalImportDialog by remember { mutableStateOf(false) }
+    var localImportFiles by remember { mutableStateOf<List<com.example.data.CloudSafeStorage.LocalBackupEntry>>(emptyList()) }
+    var loadingLocalImportFiles by remember { mutableStateOf(false) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -201,12 +204,26 @@ private fun WjustMacroApp() {
         if (uri != null) viewModel.importFromUri(uri)
     }
 
+    val importGetContentFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) viewModel.importFromUri(uri)
+    }
+
     val galleryImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         val folder = pendingImportGalleryFolder
         pendingImportGalleryFolder = ""
         if (uris.isNotEmpty()) viewModel.importImagesFromUris(uris, folder = folder)
+    }
+
+    val gallerySingleFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        val folder = pendingImportGalleryFolder
+        pendingImportGalleryFolder = ""
+        if (uri != null) viewModel.importImagesFromUris(listOf(uri), folder = folder)
     }
 
     val macroLogoLauncher = rememberLauncherForActivityResult(
@@ -216,6 +233,90 @@ private fun WjustMacroApp() {
         pendingLogoMacro = null
         if (uri != null && target != null) {
             viewModel.setMacroLogoFromUri(target, uri)
+        }
+    }
+
+    fun openLocalImportPicker() {
+        loadingLocalImportFiles = true
+        showLocalImportDialog = true
+        viewModel.loadLocalImportFiles { files ->
+            localImportFiles = files
+            loadingLocalImportFiles = false
+        }
+    }
+
+    fun safeExportMacro(m: Macro) {
+        val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
+        val fileName = "$safeName.zip"
+        pendingExportMacro = m
+        runCatching {
+            exportMacroLauncher.launch(fileName)
+        }.onFailure {
+            pendingExportMacro = null
+            viewModel.exportMacroToDownloads(m, fileName)
+        }
+    }
+
+    fun safeExportBackup() {
+        runCatching {
+            exportBackupLauncher.launch("wjust_macro_backup.zip")
+        }.onFailure {
+            viewModel.exportAllBackupToDownloads()
+        }
+    }
+
+    fun safeExportImage(assetName: String, displayName: String) {
+        pendingExportImageName = assetName
+        runCatching {
+            exportImageLauncher.launch(displayName)
+        }.onFailure {
+            pendingExportImageName = null
+            viewModel.exportImageToDownloads(assetName, displayName)
+        }
+    }
+
+    fun safeExportImagesZip(selected: List<String>) {
+        pendingExportImagesZip = selected
+        runCatching {
+            exportImagesZipLauncher.launch("gambar_wjust_macro.zip")
+        }.onFailure {
+            pendingExportImagesZip = emptyList()
+            viewModel.exportImagesZipToDownloads(selected)
+        }
+    }
+
+    fun safeImportFile() {
+        val openedDoc = runCatching {
+            importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
+        }.isSuccess
+        if (openedDoc) return
+
+        val openedContent = runCatching {
+            importGetContentFallbackLauncher.launch("*/*")
+        }.isSuccess
+        if (!openedContent) {
+            openLocalImportPicker()
+        }
+    }
+
+    fun safePickGalleryImages(folder: String) {
+        pendingImportGalleryFolder = folder
+        val okMulti = runCatching { galleryImageLauncher.launch("image/*") }.isSuccess
+        if (okMulti) return
+        val okSingle = runCatching { gallerySingleFallbackLauncher.launch("image/*") }.isSuccess
+        if (!okSingle) {
+            pendingImportGalleryFolder = ""
+            scope.launch { snackbarHostState.showSnackbar("Pemilih galeri tidak tersedia di perangkat ini.") }
+        }
+    }
+
+    fun safePickMacroLogo(target: Macro) {
+        pendingLogoMacro = target
+        runCatching {
+            macroLogoLauncher.launch("image/*")
+        }.onFailure {
+            pendingLogoMacro = null
+            scope.launch { snackbarHostState.showSnackbar("Pemilih gambar sistem tidak tersedia — pilih dari Pustaka Gambar.") }
         }
     }
 
@@ -240,7 +341,9 @@ private fun WjustMacroApp() {
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            if (!granted) {
+                runCatching { notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            }
         }
         viewModel.messages.collect { msg ->
             snackbarHostState.showSnackbar(msg)
@@ -248,23 +351,39 @@ private fun WjustMacroApp() {
     }
 
     fun openAccessibilitySettings() {
-        context.startActivity(
-            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-        )
+        runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            )
+        }.onFailure {
+            scope.launch { snackbarHostState.showSnackbar("Buka Pengaturan → Aksesibilitas secara manual.") }
+        }
     }
 
     fun requestOverlayPermission() {
-        context.startActivity(
-            Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:${context.packageName}")
-            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-        )
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            )
+        }.onFailure {
+            runCatching {
+                context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+            }.onFailure {
+                scope.launch { snackbarHostState.showSnackbar("Aktifkan izin Overlay di Pengaturan Aplikasi secara manual.") }
+            }
+        }
     }
 
     fun requestScreenCapture() {
-        val mgr = context.getSystemService(MediaProjectionManager::class.java)
-        mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+        runCatching {
+            val mgr = context.getSystemService(MediaProjectionManager::class.java)
+            mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+        }.onFailure {
+            scope.launch { snackbarHostState.showSnackbar("Gagal membuka izin Tangkap Layar: ${it.message}") }
+        }
     }
 
     fun requestBatteryUnrestricted() {
@@ -277,11 +396,15 @@ private fun WjustMacroApp() {
             Uri.parse("package:${context.packageName}")
         ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
         runCatching { context.startActivity(intent) }.onFailure {
-            context.startActivity(
-                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            )
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
+            }.onFailure {
+                scope.launch { snackbarHostState.showSnackbar("Pengaturan optimasi baterai tidak tersedia di perangkat ini.") }
+            }
         }
     }
 
@@ -506,19 +629,17 @@ private fun WjustMacroApp() {
                                 val created = viewModel.createNewMacro()
                                 editingMacroId = created.id
                             },
-                            onImportMacro = {
-                                importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
-                            },
+                            onImportMacro = ::safeImportFile,
                             onEditMacro = ::requestEditMacro,
                             onLaunchMacroOverlay = ::launchMacroIfAllowed,
                             onChangeMacroLogo = ::requestChangeLogo,
                             onOpenMacroSecurity = ::requestOpenSecurity,
                             onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
-                            onExportMacro = { m ->
-                                pendingExportMacro = m
+                            onExportMacro = ::safeExportMacro,
+                            onExportMacroDirectToDownloads = { m ->
                                 val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-                                exportMacroLauncher.launch("$safeName.zip")
+                                viewModel.exportMacroToDownloads(m, "$safeName.zip")
                             },
                             onDeleteMacro = { m -> viewModel.deleteMacro(m.id) }
                         )
@@ -533,21 +654,16 @@ private fun WjustMacroApp() {
                                     targetFolder = folder
                                 )
                             },
-                            onImportFromGallery = { folder ->
-                                pendingImportGalleryFolder = folder
-                                galleryImageLauncher.launch("image/*")
-                            },
+                            onImportFromGallery = ::safePickGalleryImages,
                             onCreateFolder = viewModel::createImageFolder,
                             onDeleteFolder = viewModel::deleteImageFolder,
                             onMoveImages = viewModel::moveImages,
                             onRecropImage = viewModel::recropImage,
                             onExportImage = { asset ->
-                                pendingExportImageName = asset.name
-                                exportImageLauncher.launch(asset.displayName)
+                                safeExportImage(asset.name, asset.displayName)
                             },
                             onExportMultipleImages = { selected ->
-                                pendingExportImagesZip = selected.toList()
-                                exportImagesZipLauncher.launch("gambar_wjust_macro.zip")
+                                safeExportImagesZip(selected.toList())
                             },
                             onRenameImage = viewModel::renameImage,
                             onDeleteImage = viewModel::deleteImage,
@@ -599,12 +715,10 @@ private fun WjustMacroApp() {
                                 2 -> SettingsPanel(
                                     settings = settings,
                                     onUpdateSettings = viewModel::updateSettings,
-                                    onExportAllBackup = {
-                                        exportBackupLauncher.launch("wjust_macro_backup.zip")
-                                    },
-                                    onImportBackup = {
-                                        importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
-                                    }
+                                    onExportAllBackup = ::safeExportBackup,
+                                    onImportBackup = ::safeImportFile,
+                                    onExportBackupDirectToDownloads = { viewModel.exportAllBackupToDownloads() },
+                                    onImportFromDownloadsFolder = ::openLocalImportPicker
                                 )
                             }
                         }
@@ -688,9 +802,8 @@ private fun WjustMacroApp() {
                 logoFilePath = if (logoMacro.logoImage.isNotBlank()) viewModel.macroIconPath(logoMacro.logoImage) else null,
                 images = images,
                 onPickFromGallery = {
-                    pendingLogoMacro = logoMacro
                     logoSheetMacroId = null
-                    macroLogoLauncher.launch("image/*")
+                    safePickMacroLogo(logoMacro)
                 },
                 onPickFromLibrary = { asset ->
                     viewModel.setMacroLogoFromLibrary(logoMacro, asset.name)
@@ -703,5 +816,104 @@ private fun WjustMacroApp() {
                 onDismiss = { logoSheetMacroId = null }
             )
         }
+
+        // CloudPhone / Redfinger Local Download Folder Import Dialog
+        if (showLocalImportDialog) {
+            LocalImportPickerDialog(
+                files = localImportFiles,
+                loading = loadingLocalImportFiles,
+                onRefresh = { openLocalImportPicker() },
+                onPickFile = { entry ->
+                    showLocalImportDialog = false
+                    viewModel.importFromLocalBackup(entry)
+                },
+                onDismiss = { showLocalImportDialog = false }
+            )
+        }
     }
 }
+
+@Composable
+private fun LocalImportPickerDialog(
+    files: List<com.example.data.CloudSafeStorage.LocalBackupEntry>,
+    loading: Boolean,
+    onRefresh: () -> Unit,
+    onPickFile: (com.example.data.CloudSafeStorage.LocalBackupEntry) -> Unit,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Impor dari Folder Download",
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Menampilkan file .zip / .json di Download/WjustMacro/ dan Download/ (cocok untuk CloudPhone/Redfinger).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 8.dp))
+                when {
+                    loading -> {
+                        Text("Memindai folder Download...", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    files.isEmpty() -> {
+                        Text(
+                            "Belum ada file .zip atau .json ditemukan di folder Download/WjustMacro/ atau Download/.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    else -> {
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp),
+                            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(files.size) { index ->
+                                val item = files[index]
+                                val kb = ((item.sizeBytes + 1023L) / 1024L).coerceAtLeast(1L)
+                                androidx.compose.material3.Surface(
+                                    onClick = { onPickFile(item) },
+                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                        Text(
+                                            item.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            "${item.displayPath} • ${kb} KB",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onRefresh) {
+                Text("Segarkan")
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("Tutup")
+            }
+        }
+    )
+}
+

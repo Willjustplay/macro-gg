@@ -161,4 +161,14 @@ class MacroBundleTest {
         }
         assertEquals("icon_v2.png", (renamed.findAction("img-1") as ImageAction).imageName)
     }
+
+    @Test
+    fun cloudSafeStorage_sanitizesNamesAndFiltersImportables() {
+        assertEquals("Farm_VIP_1.zip", com.example.data.CloudSafeStorage.ensureSafeExportName("Farm VIP #1!.zip"))
+        assertEquals("wjust_macro.zip", com.example.data.CloudSafeStorage.ensureSafeExportName("   "))
+        assertEquals("tombol.png", com.example.data.CloudSafeStorage.ensureSafeExportName("tombol.PNG"))
+        assertTrue(com.example.data.CloudSafeStorage.isImportableMacroFile("backup.zip"))
+        assertTrue(com.example.data.CloudSafeStorage.isImportableMacroFile("MACRO.JSON"))
+        assertTrue(!com.example.data.CloudSafeStorage.isImportableMacroFile("screenshot.png"))
+    }
 }

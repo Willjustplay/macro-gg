@@ -115,6 +115,7 @@ fun MacroHomeScreen(
     onTogglePassivePull: (Macro) -> Unit,
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro) -> Unit,
+    onExportMacroDirectToDownloads: (Macro) -> Unit = onExportMacro,
     onDeleteMacro: (Macro) -> Unit
 ) {
     val activePermCount = remember(permissions) {
@@ -451,6 +452,7 @@ fun MacroHomeScreen(
                     onTogglePassivePull = { onTogglePassivePull(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
                     onExport = { onExportMacro(macro) },
+                    onExportDirectToDownloads = { onExportMacroDirectToDownloads(macro) },
                     onDelete = { onDeleteMacro(macro) }
                 )
             }
@@ -511,6 +513,7 @@ private fun MacroListCard(
     onTogglePassivePull: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
+    onExportDirectToDownloads: () -> Unit = onExport,
     onDelete: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -662,6 +665,11 @@ private fun MacroListCard(
                             text = { Text("Ekspor Macro + Gambar (.zip)") },
                             leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
                             onClick = { menuOpen = false; onExport() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Simpan ke Download (.zip)") },
+                            leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
+                            onClick = { menuOpen = false; onExportDirectToDownloads() }
                         )
                         DropdownMenuItem(
                             text = { Text("Hapus", color = MaterialTheme.colorScheme.error) },

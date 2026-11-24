@@ -211,6 +211,28 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun exportMacroToDownloads(macro: Macro, fileName: String) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.writeToDownloads(
+                        context = appContext,
+                        desiredFileName = fileName,
+                        mimeType = "application/zip"
+                    ) { out ->
+                        store.exportMacroZip(macro, out)
+                    }
+                }
+            }
+            result.onSuccess { (saved, summary) ->
+                val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
+                _messages.emit("Tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote).")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor ke Download: ${err.message}")
+            }
+        }
+    }
+
     fun exportAllBackupToUri(uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -224,6 +246,27 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 _messages.emit("Backup selesai: ${summary.macrosExported} macro & ${summary.imagesExported} file gambar (.zip).")
             }.onFailure { err ->
                 _messages.emit("Gagal backup: ${err.message}")
+            }
+        }
+    }
+
+    fun exportAllBackupToDownloads(fileName: String = "wjust_macro_backup.zip") {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.writeToDownloads(
+                        context = appContext,
+                        desiredFileName = fileName,
+                        mimeType = "application/zip"
+                    ) { out ->
+                        store.exportAllBackupZip(out)
+                    }
+                }
+            }
+            result.onSuccess { (saved, summary) ->
+                _messages.emit("Backup tersimpan di ${saved.displayPath} (${summary.macrosExported} macro & ${summary.imagesExported} gambar).")
+            }.onFailure { err ->
+                _messages.emit("Gagal backup ke Download: ${err.message}")
             }
         }
     }
@@ -243,6 +286,28 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun exportImageToDownloads(imageName: String, fileName: String) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.writeToDownloads(
+                        context = appContext,
+                        desiredFileName = fileName,
+                        mimeType = "image/png"
+                    ) { out ->
+                        val ok = store.exportImagePng(imageName, out)
+                        if (!ok) error("File gambar '$imageName' tidak ditemukan.")
+                    }
+                }
+            }
+            result.onSuccess { (saved, _) ->
+                _messages.emit("Gambar disimpan di ${saved.displayPath}.")
+            }.onFailure { err ->
+                _messages.emit("Gagal menyimpan gambar: ${err.message}")
+            }
+        }
+    }
+
     fun exportImagesZipToUri(imageNames: Collection<String>, uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -256,6 +321,62 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 _messages.emit("$count gambar diekspor (.zip).")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor gambar: ${err.message}")
+            }
+        }
+    }
+
+    fun exportImagesZipToDownloads(imageNames: Collection<String>, fileName: String = "gambar_wjust_macro.zip") {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.writeToDownloads(
+                        context = appContext,
+                        desiredFileName = fileName,
+                        mimeType = "application/zip"
+                    ) { out ->
+                        store.exportImagesZip(imageNames, out)
+                    }
+                }
+            }
+            result.onSuccess { (saved, count) ->
+                _messages.emit("$count gambar tersimpan di ${saved.displayPath}.")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor gambar: ${err.message}")
+            }
+        }
+    }
+
+    fun loadLocalImportFiles(onLoaded: (List<com.example.data.CloudSafeStorage.LocalBackupEntry>) -> Unit) {
+        viewModelScope.launch {
+            val files = withContext(Dispatchers.IO) {
+                com.example.data.CloudSafeStorage.listLocalImportFiles(appContext)
+            }
+            onLoaded(files)
+        }
+    }
+
+    fun importFromLocalBackup(entry: com.example.data.CloudSafeStorage.LocalBackupEntry) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.openImportStream(appContext, entry)?.use { input ->
+                        store.importFromStream(input)
+                    } ?: error("File '${entry.displayName}' tidak dapat dibaca.")
+                }
+            }
+            result.onSuccess { s ->
+                syncActiveMacroFromStore()
+                val msg = buildString {
+                    append("Impor '${entry.displayName}' selesai: ${s.macrosImported} macro")
+                    if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
+                    if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
+                    if (s.scriptsImported > 0) append(", ${s.scriptsImported} script")
+                    if (s.imagesImported > 0) append(", ${s.imagesImported} gambar")
+                    append(".")
+                }
+                _messages.emit(msg)
+            }.onFailure { err ->
+                _messages.emit("Gagal impor '${entry.displayName}': ${err.message}")
             }
         }
     }

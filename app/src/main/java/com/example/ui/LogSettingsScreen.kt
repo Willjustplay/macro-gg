@@ -148,7 +148,9 @@ fun SettingsPanel(
     settings: AppSettings,
     onUpdateSettings: ((AppSettings) -> AppSettings) -> Unit,
     onExportAllBackup: () -> Unit,
-    onImportBackup: () -> Unit
+    onImportBackup: () -> Unit,
+    onExportBackupDirectToDownloads: () -> Unit = onExportAllBackup,
+    onImportFromDownloadsFolder: () -> Unit = onImportBackup
 ) {
     var tapMsText by remember(settings.defaultTapDurationMs) { mutableStateOf(settings.defaultTapDurationMs.toString()) }
     var jitterText by remember(settings.defaultJitterPx) { mutableStateOf(settings.defaultJitterPx.toString()) }
@@ -160,12 +162,12 @@ fun SettingsPanel(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Backup / Export / Import
+        // Backup / Export / Import (with direct CloudPhone / Redfinger Download/WjustMacro option)
         Card(shape = RoundedCornerShape(14.dp)) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Backup & Pindah Perangkat (Offline)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    "Semua macro, gambar target, dan script Lua disimpan lokal di perangkat ini. Anda bisa ekspor semuanya menjadi satu file .zip.",
+                    "Semua macro, gambar target, dan script Lua disimpan lokal di perangkat ini. Di CloudPhone/Redfinger, gunakan simpan langsung ke Download/WjustMacro agar tidak bergantung pada pemilih file sistem.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -179,6 +181,20 @@ fun SettingsPanel(
                         Icon(Icons.Filled.FileUpload, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Restore")
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.FilledTonalButton(
+                        onClick = onExportBackupDirectToDownloads,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Simpan ke Download", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                    }
+                    OutlinedButton(
+                        onClick = onImportFromDownloadsFolder,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Impor dr Download", maxLines = 1, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
