@@ -636,7 +636,7 @@ private fun MacroListCard(
                             leadingIcon = { Icon(Icons.Filled.Lock, null) },
                             onClick = { menuOpen = false; onOpenSecurity() }
                         )
-                        if (macro.isPassive) {
+                        if (macro.isPassive && !isExpired && !isTampered) {
                             DropdownMenuItem(
                                 text = {
                                     Text(

@@ -543,5 +543,54 @@ class MacroSecurityAndRandomTest {
         assertFalse("v2.7.0 exported macro seal must stay valid on v2.8.0", MacroSecurity.isTampered(legacyMacro))
         assertNull(MacroSecurity.checkLinkedRun(legacyMacro, baseNow))
     }
+
+    @Test
+    fun passiveToggleWithoutPasswordPreservesProtectionAndRejectsTampering() {
+        val baseNow = 1_700_000_000_000L
+        val passiveLocked = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "sub_locked",
+                name = "Sub Terkunci",
+                actions = listOf(ClickAction(x = 12, y = 34))
+            ),
+            isLocked = true,
+            isPassive = true,
+            passiveEnabled = true,
+            expiresAtEpochMs = baseNow + 7L * 86_400_000L,
+            expiryLabel = "7 Hari",
+            newPassword = "creatorPass"
+        )
+
+        // Toggling Passive ON -> OFF -> ON works without passing any password while preserving lock, passive mode, expiry & password
+        val toggledOff = MacroSecurity.togglePassiveEnabled(passiveLocked, false)
+        assertTrue(toggledOff.isPassive)
+        assertTrue(toggledOff.isLocked)
+        assertFalse(toggledOff.passiveEnabled)
+        assertEquals(passiveLocked.expiresAtEpochMs, toggledOff.expiresAtEpochMs)
+        assertEquals(passiveLocked.lockPasswordHash, toggledOff.lockPasswordHash)
+        assertTrue(MacroSecurity.verifyPassword(toggledOff, "creatorPass"))
+        assertFalse(MacroSecurity.isTampered(toggledOff))
+        assertEquals(RunDenialReason.PASSIVE_OFF, MacroSecurity.checkLinkedRun(toggledOff, baseNow))
+        assertEquals(RunDenialReason.PASSIVE_DIRECT, MacroSecurity.checkDirectRun(toggledOff, baseNow))
+
+        val toggledBackOn = MacroSecurity.togglePassiveEnabled(toggledOff, true)
+        assertTrue(toggledBackOn.passiveEnabled)
+        assertFalse(MacroSecurity.isTampered(toggledBackOn))
+        assertNull(MacroSecurity.checkLinkedRun(toggledBackOn, baseNow))
+
+        // Active (non-passive) macro cannot be toggled via togglePassiveEnabled
+        val activeMacro = Macro(id = "active_1", name = "Aktif", isPassive = false, passiveEnabled = true)
+        val unchangedActive = MacroSecurity.togglePassiveEnabled(activeMacro, false)
+        assertFalse(unchangedActive.isPassive)
+        assertTrue(unchangedActive.passiveEnabled)
+
+        // Tampered passive macro MUST NOT be whitewashed by passwordless togglePassiveEnabled
+        val tamperedExpiry = passiveLocked.copy(expiresAtEpochMs = 0L)
+        assertTrue(MacroSecurity.isTampered(tamperedExpiry))
+        val afterToggle = MacroSecurity.togglePassiveEnabled(tamperedExpiry, false)
+        assertTrue("Tampered macro must remain tampered after toggle attempt", MacroSecurity.isTampered(afterToggle))
+        assertEquals(tamperedExpiry.passiveEnabled, afterToggle.passiveEnabled)
+        assertEquals(RunDenialReason.TAMPERED, MacroSecurity.checkLinkedRun(afterToggle, baseNow))
+    }
 }
 

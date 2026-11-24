@@ -151,7 +151,7 @@ private enum class ExpiryEditMode {
 /**
  * Complete security & access control sheet for a macro:
  * - Lock macro (prevent editing / viewing actions without password)
- * - Passive mode (ON = callable by active macros / OFF = cannot be pulled & skipped safely, protected by password)
+ * - Passive mode (changing Active/Passive mode requires password; switching Passive ON/OFF requires no password)
  * - Usage deadline in Days or Months (supports keeping, extending/+adding time, or resetting)
  * - Password creation / update
  */
@@ -281,7 +281,7 @@ fun MacroSecuritySheet(
                                 Text("Mode Pasif (Sub-Macro)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                             }
                             Text(
-                                "Macro tidak dapat dijalankan langsung. Hanya berjalan jika ditarik oleh macro aktif lain. Dilindungi sandi.",
+                                "Macro tidak dapat dijalankan langsung. Mengubah status Aktif/Pasif memerlukan sandi, sedangkan tombol Pasif ON/OFF bebas tanpa sandi.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -311,8 +311,8 @@ fun MacroSecuritySheet(
                                         color = pullTint
                                     )
                                     Text(
-                                        if (passiveEnabled) "Macro aktif lain dapat memanggil & menjalankan macro ini."
-                                        else "Macro aktif yang memanggil macro ini akan otomatis melewati (skip) tanpa macet.",
+                                        if (passiveEnabled) "Macro aktif lain dapat memanggil & menjalankan macro ini. Dapat diubah ON/OFF tanpa sandi."
+                                        else "Macro aktif yang memanggil macro ini akan otomatis melewati (skip) tanpa macet. Dapat diubah ON/OFF tanpa sandi.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )

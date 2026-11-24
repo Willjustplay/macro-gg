@@ -262,6 +262,14 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleMacroPassiveEnabled(macro: Macro) {
         if (!macro.isPassive) return
+        if (com.example.data.MacroSecurity.isTampered(macro)) {
+            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.TAMPERED))
+            return
+        }
+        if (com.example.data.MacroSecurity.isExpired(macro, effectiveNowMs())) {
+            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
+            return
+        }
         val nextEnabled = !macro.passiveEnabled
         val updated = com.example.data.MacroSecurity.togglePassiveEnabled(macro, nextEnabled)
         saveMacro(updated)

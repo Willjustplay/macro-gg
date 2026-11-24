@@ -18,9 +18,9 @@ enum class RunDenialReason {
 
 /**
  * Pure-Kotlin offline security helper for Wjust macro:
- * - Salted SHA-256 password hashing & verification for Lock, Expiry, and Passive Mode
+ * - Salted SHA-256 password hashing & verification for Lock, Expiry, and changing Active/Passive mode
  * - Calendar-accurate expiration deadlines in Days or Months (+ stacking on macro overwrite)
- * - Passive mode ON (callable by active macros) / OFF (safely skipped by active macros)
+ * - Passive mode ON (callable by active macros) / OFF (safely skipped by active macros) — switchable without password
  * - Integrity sealing so manual JSON edits to lock/expiry/passive fields are detected
  */
 object MacroSecurity {
@@ -221,9 +221,12 @@ object MacroSecurity {
         return updated.copy(securitySeal = computeSeal(updated))
     }
 
-    /** Quickly flips passive ON (callable) / OFF (skipped) while preserving password & valid integrity seal. */
+    /**
+     * Quickly flips passive ON (callable) / OFF (skipped) without requiring a password,
+     * while refusing to modify tampered macros and preserving password & valid integrity seal.
+     */
     fun togglePassiveEnabled(macro: Macro, enabled: Boolean): Macro {
-        if (!macro.isPassive) return macro
+        if (!macro.isPassive || isTampered(macro)) return macro
         val updated = macro.copy(passiveEnabled = enabled)
         return updated.copy(securitySeal = computeSeal(updated))
     }

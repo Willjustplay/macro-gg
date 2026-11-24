@@ -149,6 +149,7 @@ fun MacroEditorScreen(
     onRecropImage: (String, Bitmap) -> Unit,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
+    onTogglePassivePull: () -> Unit,
     onLaunchOverlay: (Macro) -> Unit,
     onLaunchCropOverlay: (Macro, String?) -> Unit,
     onLaunchTargetPickerOverlay: (Macro, String) -> Unit,
@@ -591,6 +592,7 @@ fun MacroEditorScreen(
                 showMacroSettings = false
                 onOpenSecurity()
             },
+            onTogglePassivePull = onTogglePassivePull,
             onSave = { updated ->
                 onUpdateMacro(updated)
                 showMacroSettings = false
@@ -1219,6 +1221,7 @@ private fun MacroSettingsSheet(
     logoPath: String?,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
+    onTogglePassivePull: () -> Unit,
     onSave: (Macro) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1347,6 +1350,42 @@ private fun MacroSettingsSheet(
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Text("Atur", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+
+            // Quick passwordless Passive ON/OFF toggle when macro is already in Passive mode
+            if (macro.isPassive && !MacroSecurity.isTampered(macro) && !MacroSecurity.isExpired(macro)) {
+                val pullTint = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = pullTint.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, pullTint.copy(alpha = 0.4f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                if (macro.passiveEnabled) "Status Pasif: ON (Dapat Ditarik)" else "Status Pasif: OFF (Diskip)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = pullTint
+                            )
+                            Text(
+                                "Ubah Pasif ON/OFF langsung tanpa sandi.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = macro.passiveEnabled,
+                            onCheckedChange = { onTogglePassivePull() }
+                        )
                     }
                 }
             }

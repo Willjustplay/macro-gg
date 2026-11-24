@@ -17,6 +17,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import com.example.data.Action
 import com.example.data.ActionKind
 import com.example.data.ClickAction
@@ -206,6 +207,7 @@ class OverlayMacroSettingsView(
         if (macro.isLocked) {
             if (activeTab == 0) {
                 buildMacroSwitcherRow()
+                buildPassiveQuickControlsRow()
             }
             buildLockedOverlayNotice()
             return
@@ -268,6 +270,39 @@ class OverlayMacroSettingsView(
         }
     }
 
+    private fun buildPassiveQuickControlsRow() {
+        val now = store.effectiveNowMs()
+        val passiveMacros = store.macros.value.filter {
+            it.isPassive && !MacroSecurity.isTampered(it) && !MacroSecurity.isExpired(it, now)
+        }
+        if (passiveMacros.isEmpty()) return
+
+        bodyContainer.addView(sectionLabel("Pasif ON/OFF (Tanpa Sandi)"))
+        val hScroll = HorizontalScrollView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        }
+        val row = LinearLayout(context).apply { orientation = HORIZONTAL }
+        for (m in passiveMacros) {
+            val label = (if (m.passiveEnabled) "🔗 " else "⛔ ") + m.name.take(14) + if (m.passiveEnabled) " • ON" else " • OFF"
+            val bgHex = if (m.passiveEnabled) "#059669" else "#B45309"
+            row.addView(makeBtn(label, bgHex, marginEndDp = 5) {
+                val updated = MacroSecurity.togglePassiveEnabled(m, !m.passiveEnabled)
+                store.saveMacro(updated)
+                if (updated.id == macro.id) {
+                    macro = updated
+                    AutomationCoordinator.selectMacro(updated)
+                }
+                val st = if (updated.passiveEnabled) "ON" else "OFF"
+                Toast.makeText(context, "Pasif '${updated.name}': $st", Toast.LENGTH_SHORT).show()
+                rebuildBody()
+            })
+        }
+        hScroll.addView(row)
+        bodyContainer.addView(hScroll)
+    }
+
     private fun buildLockedOverlayNotice() {
         val now = store.effectiveNowMs()
         val expLabel = MacroSecurity.remainingTimeLabel(macro, now)
@@ -276,14 +311,14 @@ class OverlayMacroSettingsView(
             add("Daftar aksi & setelan disembunyikan agar tidak dapat diubah atau disalin.")
             if (macro.isPassive) {
                 add(
-                    if (macro.passiveEnabled) "🔗 Mode Pasif: ON — dapat ditarik oleh macro aktif lain."
-                    else "⛔ Mode Pasif: OFF — tidak dapat ditarik (otomatis dilewati/skip oleh macro aktif)."
+                    if (macro.passiveEnabled) "🔗 Mode Pasif: ON — dapat ditarik oleh macro aktif lain (ON/OFF bebas tanpa sandi)."
+                    else "⛔ Mode Pasif: OFF — tidak dapat ditarik (otomatis dilewati/skip oleh macro aktif; ON/OFF bebas tanpa sandi)."
                 )
             }
             if (expLabel != null) {
                 add("⏳ Masa berlaku: $expLabel (${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)})")
             }
-            add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit.")
+            add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit atau mengubah status Aktif/Pasif.")
         }.joinToString("\n\n")
 
         val box = TextView(context).apply {
@@ -304,6 +339,7 @@ class OverlayMacroSettingsView(
 
     private fun buildMacroSettingsForm() {
         buildMacroSwitcherRow()
+        buildPassiveQuickControlsRow()
 
         val nameField = addTextRow(bodyContainer, "Nama Macro", macro.name)
 
