@@ -784,7 +784,8 @@ fun ActionEditorSheet(
                             others.forEach { target ->
                                 val tag = when {
                                     com.example.data.MacroSecurity.isExpired(target) -> " (Habis)"
-                                    target.isPassive -> " (Pasif)"
+                                    target.isPassive && target.passiveEnabled -> " (Pasif ON)"
+                                    target.isPassive && !target.passiveEnabled -> " (Pasif OFF • skip)"
                                     else -> ""
                                 }
                                 FilterChip(

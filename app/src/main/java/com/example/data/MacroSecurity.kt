@@ -12,14 +12,15 @@ import java.util.TimeZone
 enum class RunDenialReason {
     TAMPERED,
     EXPIRED,
-    PASSIVE_DIRECT
+    PASSIVE_DIRECT,
+    PASSIVE_OFF
 }
 
 /**
  * Pure-Kotlin offline security helper for Wjust macro:
  * - Salted SHA-256 password hashing & verification for Lock, Expiry, and Passive Mode
- * - Calendar-accurate expiration deadlines in Days or Months
- * - Passive mode enforcement (blocked directly, allowed when called from an active macro)
+ * - Calendar-accurate expiration deadlines in Days or Months (+ stacking on macro overwrite)
+ * - Passive mode ON (callable by active macros) / OFF (safely skipped by active macros)
  * - Integrity sealing so manual JSON edits to lock/expiry/passive fields are detected
  */
 object MacroSecurity {
@@ -59,9 +60,7 @@ object MacroSecurity {
         return constantTimeEquals(expected, actual)
     }
 
-    /** Computes an integrity seal independent of [Macro.id] so ZIP import ID remapping keeps the seal intact. */
-    fun computeSeal(macro: Macro): String {
-        if (!hasAnyProtection(macro) && !hasPassword(macro)) return ""
+    private fun computeLegacySealV27(macro: Macro): String {
         val payload = buildString {
             append(SEAL_PEPPER)
             append("|locked=").append(macro.isLocked)
@@ -74,9 +73,28 @@ object MacroSecurity {
         return md.digest(payload.toByteArray(Charsets.UTF_8)).toHex()
     }
 
+    /** Computes an integrity seal independent of [Macro.id] so ZIP import ID remapping keeps the seal intact. */
+    fun computeSeal(macro: Macro): String {
+        if (!hasAnyProtection(macro) && !hasPassword(macro)) return ""
+        val payload = buildString {
+            append(SEAL_PEPPER)
+            append("|locked=").append(macro.isLocked)
+            append("|passive=").append(macro.isPassive)
+            append("|passiveOn=").append(macro.passiveEnabled)
+            append("|exp=").append(macro.expiresAtEpochMs)
+            append("|hash=").append(macro.lockPasswordHash)
+            append("|salt=").append(macro.lockSalt)
+        }
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(payload.toByteArray(Charsets.UTF_8)).toHex()
+    }
+
     fun isTampered(macro: Macro): Boolean {
         if (macro.securitySeal.isBlank()) return false
-        return !constantTimeEquals(macro.securitySeal, computeSeal(macro))
+        if (constantTimeEquals(macro.securitySeal, computeSeal(macro))) return false
+        // Backward compatibility with v2.7.0 exports (where passiveEnabled defaulted to true)
+        if (macro.passiveEnabled && constantTimeEquals(macro.securitySeal, computeLegacySealV27(macro))) return false
+        return true
     }
 
     fun isExpired(macro: Macro, nowMs: Long = System.currentTimeMillis()): Boolean =
@@ -126,10 +144,14 @@ object MacroSecurity {
         else -> null
     }
 
-    /** Checks whether [macro] may be executed when called by another active macro via [RunMacroAction]. */
+    /**
+     * Checks whether [macro] may be executed when pulled/called by another active macro via [RunMacroAction].
+     * Returns [RunDenialReason.PASSIVE_OFF] when passive mode is switched OFF so the caller skips cleanly.
+     */
     fun checkLinkedRun(macro: Macro, nowMs: Long = System.currentTimeMillis()): RunDenialReason? = when {
         isTampered(macro) -> RunDenialReason.TAMPERED
         isExpired(macro, nowMs) -> RunDenialReason.EXPIRED
+        macro.isPassive && !macro.passiveEnabled -> RunDenialReason.PASSIVE_OFF
         else -> null
     }
 
@@ -138,13 +160,17 @@ object MacroSecurity {
             "Macro '${macro.name}' tidak valid (segel keamanan rusak) dan tidak dapat dijalankan."
         RunDenialReason.EXPIRED ->
             "Macro '${macro.name}' sudah habis masa berlakunya (${formatDeadlineDate(macro.expiresAtEpochMs)}) dan tidak dapat digunakan."
-        RunDenialReason.PASSIVE_DIRECT ->
-            "Macro '${macro.name}' dalam Mode Pasif. Hubungkan lewat aksi 'Hubungkan Macro' dari macro aktif untuk menggunakannya."
+        RunDenialReason.PASSIVE_DIRECT -> {
+            val status = if (macro.passiveEnabled) "ON (siap ditarik macro aktif)" else "OFF (tidak dapat ditarik)"
+            "Macro '${macro.name}' dalam Mode Pasif $status. Tidak dapat dijalankan langsung."
+        }
+        RunDenialReason.PASSIVE_OFF ->
+            "Macro pasif '${macro.name}' sedang OFF (tidak dapat ditarik) — dilewati oleh macro aktif."
     }
 
     /**
-     * Applies updated Lock, Passive, Expiry, and Password settings and recomputes the integrity seal.
-     * Passing [newPassword] replaces/initializes the password; leaving it null/blank preserves the existing password.
+     * Applies updated Lock, Passive (with ON/OFF pull switch), Expiry, and Password settings
+     * and recomputes the integrity seal.
      */
     fun applySecurity(
         macro: Macro,
@@ -152,7 +178,10 @@ object MacroSecurity {
         isPassive: Boolean,
         expiresAtEpochMs: Long,
         expiryLabel: String,
-        newPassword: String? = null
+        newPassword: String? = null,
+        passiveEnabled: Boolean = macro.passiveEnabled,
+        expiryDurationAmount: Int = macro.expiryDurationAmount,
+        expiryDurationUnit: ExpiryUnit = macro.expiryDurationUnit
     ): Macro {
         val safeExp = expiresAtEpochMs.coerceAtLeast(0L)
         val anyProtected = isLocked || isPassive || safeExp > 0L
@@ -160,8 +189,11 @@ object MacroSecurity {
             return macro.copy(
                 isLocked = false,
                 isPassive = false,
+                passiveEnabled = true,
                 expiresAtEpochMs = 0L,
                 expiryLabel = "",
+                expiryDurationAmount = 0,
+                expiryDurationUnit = ExpiryUnit.DAYS,
                 lockPasswordHash = "",
                 lockSalt = "",
                 securitySeal = ""
@@ -178,12 +210,73 @@ object MacroSecurity {
         val updated = macro.copy(
             isLocked = isLocked,
             isPassive = isPassive,
+            passiveEnabled = if (isPassive) passiveEnabled else true,
             expiresAtEpochMs = safeExp,
             expiryLabel = if (safeExp > 0L) expiryLabel else "",
+            expiryDurationAmount = if (safeExp > 0L) expiryDurationAmount.coerceAtLeast(0) else 0,
+            expiryDurationUnit = expiryDurationUnit,
             lockSalt = salt,
             lockPasswordHash = hash
         )
         return updated.copy(securitySeal = computeSeal(updated))
+    }
+
+    /** Quickly flips passive ON (callable) / OFF (skipped) while preserving password & valid integrity seal. */
+    fun togglePassiveEnabled(macro: Macro, enabled: Boolean): Macro {
+        if (!macro.isPassive) return macro
+        val updated = macro.copy(passiveEnabled = enabled)
+        return updated.copy(securitySeal = computeSeal(updated))
+    }
+
+    data class OverwriteResult(
+        val merged: Macro,
+        val deadlineExtended: Boolean
+    )
+
+    /**
+     * Overwrites [existing] with an imported [incoming] copy of the same macro.
+     * If both [existing] and [incoming] have active (non-expired) deadlines and [incoming] is untampered,
+     * the incoming duration is ADDED onto [existing.expiresAtEpochMs] so remaining time is never lost!
+     */
+    fun mergeOverwrittenMacro(existing: Macro, incoming: Macro, nowMs: Long): OverwriteResult {
+        val incomingUntampered = !isTampered(incoming)
+        val existingHasActiveDeadline = !isTampered(existing) && existing.expiresAtEpochMs > nowMs
+        val incomingHasActiveDeadline = incomingUntampered && incoming.expiresAtEpochMs > nowMs
+
+        val preservedOrigin = incoming.originId.ifBlank { existing.originId.ifBlank { existing.id } }
+        val resolvedLogo = incoming.logoImage.ifBlank { existing.logoImage }
+
+        if (existingHasActiveDeadline && incomingHasActiveDeadline) {
+            val stackedExpiryMs = if (incoming.expiryDurationAmount > 0) {
+                computeExpiryEpochMs(existing.expiresAtEpochMs, incoming.expiryDurationAmount, incoming.expiryDurationUnit)
+            } else {
+                val addMs = (incoming.expiresAtEpochMs - nowMs).coerceAtLeast(0L)
+                existing.expiresAtEpochMs + addMs
+            }
+            val addedTag = when {
+                incoming.expiryDurationAmount > 0 -> formatDurationLabel(incoming.expiryDurationAmount, incoming.expiryDurationUnit)
+                incoming.expiryLabel.isNotBlank() -> incoming.expiryLabel
+                else -> "Diperpanjang"
+            }
+            val mergedBase = incoming.copy(
+                id = existing.id,
+                originId = preservedOrigin,
+                logoImage = resolvedLogo,
+                expiresAtEpochMs = stackedExpiryMs,
+                expiryLabel = "+$addedTag",
+                createdAt = existing.createdAt
+            )
+            val sealed = mergedBase.copy(securitySeal = computeSeal(mergedBase))
+            return OverwriteResult(merged = sealed, deadlineExtended = true)
+        }
+
+        val mergedBase = incoming.copy(
+            id = existing.id,
+            originId = preservedOrigin,
+            logoImage = resolvedLogo,
+            createdAt = existing.createdAt
+        )
+        return OverwriteResult(merged = mergedBase, deadlineExtended = false)
     }
 
     private fun constantTimeEquals(a: String, b: String): Boolean {

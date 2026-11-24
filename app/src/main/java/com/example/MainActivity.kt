@@ -137,7 +137,7 @@ private fun WjustMacroApp() {
     var securitySheetMacroId by remember { mutableStateOf<String?>(null) }
     var logoSheetMacroId by remember { mutableStateOf<String?>(null) }
     var passwordPromptMacroId by remember { mutableStateOf<String?>(null) }
-    var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
+    var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE" | "TOGGLE_PASSIVE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -342,6 +342,16 @@ private fun WjustMacroApp() {
         }
     }
 
+    fun requestTogglePassivePull(m: Macro) {
+        if (!m.isPassive) return
+        if (MacroSecurity.hasPassword(m)) {
+            passwordPromptMacroId = m.id
+            passwordPromptAction = "TOGGLE_PASSIVE"
+        } else {
+            viewModel.toggleMacroPassiveEnabled(m)
+        }
+    }
+
     fun launchMacroIfAllowed(m: Macro) {
         val denial = com.example.data.MacroSecurity.checkDirectRun(m, viewModel.effectiveNowMs())
         if (denial != null) {
@@ -507,6 +517,7 @@ private fun WjustMacroApp() {
                             onLaunchMacroOverlay = ::launchMacroIfAllowed,
                             onChangeMacroLogo = ::requestChangeLogo,
                             onOpenMacroSecurity = ::requestOpenSecurity,
+                            onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
                             onExportMacro = { m ->
                                 pendingExportMacro = m
@@ -611,6 +622,14 @@ private fun WjustMacroApp() {
         if (promptMacro != null) {
             val subtitle = when (passwordPromptAction) {
                 "SECURITY" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah pengaturan Kunci, Tenggat Waktu, atau Mode Pasif."
+                "TOGGLE_PASSIVE" -> {
+                    val nextAction = if (promptMacro.passiveEnabled) {
+                        "mematikan (OFF — tidak dapat ditarik macro aktif)"
+                    } else {
+                        "menyalakan (ON — dapat ditarik macro aktif)"
+                    }
+                    "Masukkan sandi '${promptMacro.name}' untuk $nextAction Mode Pasif."
+                }
                 "LOGO" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah foto logo."
                 "DUPLICATE" -> "Masukkan sandi '${promptMacro.name}' untuk menduplikat macro terkunci."
                 else -> "Macro '${promptMacro.name}' dikunci. Masukkan sandi untuk membuka editor."
@@ -631,6 +650,9 @@ private fun WjustMacroApp() {
                         }
                         "SECURITY" -> {
                             securitySheetMacroId = target.id
+                        }
+                        "TOGGLE_PASSIVE" -> {
+                            viewModel.toggleMacroPassiveEnabled(target)
                         }
                         "LOGO" -> {
                             unlockedMacroIds = unlockedMacroIds + target.id
@@ -659,7 +681,7 @@ private fun WjustMacroApp() {
                     securitySheetMacroId = null
                     val summary = buildList {
                         if (updated.isLocked) add("Terkunci")
-                        if (updated.isPassive) add("Pasif")
+                        if (updated.isPassive) add(if (updated.passiveEnabled) "Pasif ON" else "Pasif OFF")
                         if (updated.expiresAtEpochMs > 0L) add("Tenggat ${updated.expiryLabel}")
                     }.joinToString(", ")
                     scope.launch {

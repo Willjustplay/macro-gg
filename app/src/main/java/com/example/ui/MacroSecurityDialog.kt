@@ -142,11 +142,17 @@ fun PasswordUnlockDialog(
     )
 }
 
+private enum class ExpiryEditMode {
+    KEEP,
+    EXTEND,
+    RESET
+}
+
 /**
  * Complete security & access control sheet for a macro:
  * - Lock macro (prevent editing / viewing actions without password)
- * - Passive mode ON/OFF (macro only runs when linked from an active macro, protected by password)
- * - Usage deadline in Days or Months (macro stops working when deadline passes)
+ * - Passive mode (ON = callable by active macros / OFF = cannot be pulled & skipped safely, protected by password)
+ * - Usage deadline in Days or Months (supports keeping, extending/+adding time, or resetting)
  * - Password creation / update
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -159,15 +165,19 @@ fun MacroSecuritySheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val alreadyHasPassword = MacroSecurity.hasPassword(macro)
+    val hasActiveExistingExpiry = macro.expiresAtEpochMs > 0L && !MacroSecurity.isExpired(macro, nowMs)
 
     var isLocked by remember(macro.id) { mutableStateOf(macro.isLocked) }
     var isPassive by remember(macro.id) { mutableStateOf(macro.isPassive) }
+    var passiveEnabled by remember(macro.id) { mutableStateOf(macro.passiveEnabled) }
     var useExpiry by remember(macro.id) { mutableStateOf(macro.expiresAtEpochMs > 0L) }
-    var keepExistingExpiry by remember(macro.id) {
-        mutableStateOf(macro.expiresAtEpochMs > 0L && !MacroSecurity.isExpired(macro, nowMs))
+    var expiryEditMode by remember(macro.id) {
+        mutableStateOf(if (hasActiveExistingExpiry) ExpiryEditMode.KEEP else ExpiryEditMode.RESET)
     }
-    var expiryAmountText by remember(macro.id) { mutableStateOf("7") }
-    var expiryUnit by remember(macro.id) { mutableStateOf(ExpiryUnit.DAYS) }
+    var expiryAmountText by remember(macro.id) {
+        mutableStateOf(if (macro.expiryDurationAmount > 0) macro.expiryDurationAmount.toString() else "7")
+    }
+    var expiryUnit by remember(macro.id) { mutableStateOf(macro.expiryDurationUnit) }
 
     var passwordInput by remember(macro.id) { mutableStateOf("") }
     var confirmPassword by remember(macro.id) { mutableStateOf("") }
@@ -176,10 +186,12 @@ fun MacroSecuritySheet(
 
     val anyProtection = isLocked || isPassive || useExpiry
     val parsedAmount = (expiryAmountText.toIntOrNull() ?: 1).coerceIn(1, if (expiryUnit == ExpiryUnit.DAYS) 3650 else 120)
-    val previewDeadlineMs = remember(useExpiry, keepExistingExpiry, parsedAmount, expiryUnit, macro.expiresAtEpochMs, nowMs) {
+    val previewDeadlineMs = remember(useExpiry, expiryEditMode, parsedAmount, expiryUnit, macro.expiresAtEpochMs, nowMs) {
         when {
             !useExpiry -> 0L
-            keepExistingExpiry && macro.expiresAtEpochMs > 0L -> macro.expiresAtEpochMs
+            expiryEditMode == ExpiryEditMode.KEEP && hasActiveExistingExpiry -> macro.expiresAtEpochMs
+            expiryEditMode == ExpiryEditMode.EXTEND && hasActiveExistingExpiry ->
+                MacroSecurity.computeExpiryEpochMs(macro.expiresAtEpochMs, parsedAmount, expiryUnit)
             else -> MacroSecurity.computeExpiryEpochMs(nowMs, parsedAmount, expiryUnit)
         }
     }
@@ -247,34 +259,75 @@ fun MacroSecuritySheet(
                 }
             }
 
-            // 2. Passive Mode toggle (ON/OFF with password)
+            // 2. Passive Mode toggle + ON (dapat ditarik) / OFF (tidak dapat ditarik, diskip)
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Icon(Icons.Filled.Link, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                            Text("Mode Pasif (Sub-Macro)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Icon(Icons.Filled.Link, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                Text("Mode Pasif (Sub-Macro)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                            Text(
+                                "Macro tidak dapat dijalankan langsung. Hanya berjalan jika ditarik oleh macro aktif lain. Dilindungi sandi.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                        Text(
-                            "Macro tidak dapat dijalankan langsung. Hanya berjalan jika dipanggil oleh macro aktif lain lewat 'Hubungkan Macro'. Memerlukan sandi untuk mematikan/mengubah.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Switch(checked = isPassive, onCheckedChange = { isPassive = it; errorMsg = null })
                     }
-                    Switch(checked = isPassive, onCheckedChange = { isPassive = it; errorMsg = null })
+
+                    if (isPassive) {
+                        val pullTint = if (passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = pullTint.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, pullTint.copy(alpha = 0.4f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                    Text(
+                                        if (passiveEnabled) "Status Pasif: ON (Dapat Ditarik)" else "Status Pasif: OFF (Tidak Dapat Ditarik)",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = pullTint
+                                    )
+                                    Text(
+                                        if (passiveEnabled) "Macro aktif lain dapat memanggil & menjalankan macro ini."
+                                        else "Macro aktif yang memanggil macro ini akan otomatis melewati (skip) tanpa macet.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = passiveEnabled,
+                                    onCheckedChange = { passiveEnabled = it }
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            // 3. Expiration Deadline (Days / Months)
+            // 3. Expiration Deadline (Days / Months + Extend / Stack option)
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
@@ -296,7 +349,7 @@ fun MacroSecuritySheet(
                                 Text("Tenggat Waktu Penggunaan", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                             }
                             Text(
-                                "Saat waktu habis, macro tidak bisa dijalankan langsung maupun dipanggil macro lain.",
+                                "Saat waktu habis, macro tidak bisa dijalankan. Jika macro yang sama ditimpa via impor, waktu tenggat otomatis ditambahkan.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -305,8 +358,8 @@ fun MacroSecuritySheet(
                             checked = useExpiry,
                             onCheckedChange = {
                                 useExpiry = it
-                                if (it && (macro.expiresAtEpochMs <= 0L || MacroSecurity.isExpired(macro, nowMs))) {
-                                    keepExistingExpiry = false
+                                if (it && !hasActiveExistingExpiry) {
+                                    expiryEditMode = ExpiryEditMode.RESET
                                 }
                                 errorMsg = null
                             }
@@ -314,22 +367,27 @@ fun MacroSecuritySheet(
                     }
 
                     if (useExpiry) {
-                        if (macro.expiresAtEpochMs > 0L && !MacroSecurity.isExpired(macro, nowMs)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (hasActiveExistingExpiry) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 FilterChip(
-                                    selected = keepExistingExpiry,
-                                    onClick = { keepExistingExpiry = true },
-                                    label = { Text("Pertahankan Tenggat Saat Ini", style = MaterialTheme.typography.labelSmall) }
+                                    selected = expiryEditMode == ExpiryEditMode.KEEP,
+                                    onClick = { expiryEditMode = ExpiryEditMode.KEEP },
+                                    label = { Text("Pertahankan", style = MaterialTheme.typography.labelSmall) }
                                 )
                                 FilterChip(
-                                    selected = !keepExistingExpiry,
-                                    onClick = { keepExistingExpiry = false },
-                                    label = { Text("Atur Ulang Durasi", style = MaterialTheme.typography.labelSmall) }
+                                    selected = expiryEditMode == ExpiryEditMode.EXTEND,
+                                    onClick = { expiryEditMode = ExpiryEditMode.EXTEND },
+                                    label = { Text("+ Tambah Waktu", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold) }
+                                )
+                                FilterChip(
+                                    selected = expiryEditMode == ExpiryEditMode.RESET,
+                                    onClick = { expiryEditMode = ExpiryEditMode.RESET },
+                                    label = { Text("Atur Ulang", style = MaterialTheme.typography.labelSmall) }
                                 )
                             }
                         }
 
-                        if (!keepExistingExpiry) {
+                        if (expiryEditMode != ExpiryEditMode.KEEP) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -338,7 +396,7 @@ fun MacroSecuritySheet(
                                 OutlinedTextField(
                                     value = expiryAmountText,
                                     onValueChange = { expiryAmountText = it.filter(Char::isDigit).take(4) },
-                                    label = { Text("Durasi") },
+                                    label = { Text(if (expiryEditMode == ExpiryEditMode.EXTEND) "Tambah durasi" else "Durasi") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.weight(1f)
@@ -363,13 +421,14 @@ fun MacroSecuritySheet(
                                     3 to ExpiryUnit.MONTHS,
                                     12 to ExpiryUnit.MONTHS
                                 ).forEach { (amt, u) ->
+                                    val prefix = if (expiryEditMode == ExpiryEditMode.EXTEND) "+" else ""
                                     FilterChip(
                                         selected = parsedAmount == amt && expiryUnit == u,
                                         onClick = {
                                             expiryAmountText = amt.toString()
                                             expiryUnit = u
                                         },
-                                        label = { Text("$amt ${u.label}", style = MaterialTheme.typography.labelSmall) }
+                                        label = { Text("$prefix$amt ${u.label}", style = MaterialTheme.typography.labelSmall) }
                                     )
                                 }
                             }
@@ -379,15 +438,30 @@ fun MacroSecuritySheet(
                             shape = RoundedCornerShape(10.dp),
                             color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                         ) {
-                            Text(
-                                text = "Berakhir pada: ${MacroSecurity.formatDeadlineDate(previewDeadlineMs)}",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary,
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 8.dp)
-                            )
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                if (expiryEditMode == ExpiryEditMode.EXTEND && hasActiveExistingExpiry) {
+                                    Text(
+                                        text = "Saat ini: ${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    text = if (expiryEditMode == ExpiryEditMode.EXTEND && hasActiveExistingExpiry) {
+                                        "Setelah +$parsedAmount ${expiryUnit.label}: ${MacroSecurity.formatDeadlineDate(previewDeadlineMs)}"
+                                    } else {
+                                        "Berakhir pada: ${MacroSecurity.formatDeadlineDate(previewDeadlineMs)}"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
@@ -445,6 +519,7 @@ fun MacroSecuritySheet(
                     onClick = {
                         isLocked = false
                         isPassive = false
+                        passiveEnabled = true
                         useExpiry = false
                         errorMsg = null
                     },
@@ -473,8 +548,19 @@ fun MacroSecuritySheet(
                         }
                         val expLabel = when {
                             !useExpiry -> ""
-                            keepExistingExpiry -> macro.expiryLabel.ifBlank { MacroSecurity.formatDeadlineDate(previewDeadlineMs) }
+                            expiryEditMode == ExpiryEditMode.KEEP -> macro.expiryLabel.ifBlank { MacroSecurity.formatDeadlineDate(previewDeadlineMs) }
+                            expiryEditMode == ExpiryEditMode.EXTEND -> "+${MacroSecurity.formatDurationLabel(parsedAmount, expiryUnit)}"
                             else -> MacroSecurity.formatDurationLabel(parsedAmount, expiryUnit)
+                        }
+                        val durAmount = when {
+                            !useExpiry -> 0
+                            expiryEditMode == ExpiryEditMode.KEEP -> macro.expiryDurationAmount
+                            else -> parsedAmount
+                        }
+                        val durUnit = when {
+                            !useExpiry -> ExpiryUnit.DAYS
+                            expiryEditMode == ExpiryEditMode.KEEP -> macro.expiryDurationUnit
+                            else -> expiryUnit
                         }
                         val updated = MacroSecurity.applySecurity(
                             macro = macro,
@@ -482,7 +568,10 @@ fun MacroSecuritySheet(
                             isPassive = isPassive,
                             expiresAtEpochMs = previewDeadlineMs,
                             expiryLabel = expLabel,
-                            newPassword = passwordInput.takeIf { it.isNotBlank() }
+                            newPassword = passwordInput.takeIf { it.isNotBlank() },
+                            passiveEnabled = passiveEnabled,
+                            expiryDurationAmount = durAmount,
+                            expiryDurationUnit = durUnit
                         )
                         onSave(updated)
                     },

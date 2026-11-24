@@ -182,7 +182,7 @@ class OverlayMacroSettingsView(
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
         val recStr = if (macro.autoRecoverStuckSec > 0) " • AutoFix ${macro.autoRecoverStuckSec}d" else ""
         val extra = buildList {
-            if (macro.isPassive) add("Pasif")
+            if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
             MacroSecurity.remainingTimeLabel(macro, store.effectiveNowMs())?.let { add(it) }
         }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
         subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$extra"
@@ -251,6 +251,7 @@ class OverlayMacroSettingsView(
                 val sel = m.id == macro.id
                 val prefix = when {
                     m.isLocked -> "🔒 "
+                    m.isPassive && !m.passiveEnabled -> "⛔ "
                     m.isPassive -> "🔗 "
                     else -> ""
                 }
@@ -274,7 +275,10 @@ class OverlayMacroSettingsView(
             add("🔒 Macro ini dikunci dengan sandi.")
             add("Daftar aksi & setelan disembunyikan agar tidak dapat diubah atau disalin.")
             if (macro.isPassive) {
-                add("🔗 Mode Pasif aktif: hanya berjalan jika dipanggil oleh macro aktif lain.")
+                add(
+                    if (macro.passiveEnabled) "🔗 Mode Pasif: ON — dapat ditarik oleh macro aktif lain."
+                    else "⛔ Mode Pasif: OFF — tidak dapat ditarik (otomatis dilewati/skip oleh macro aktif)."
+                )
             }
             if (expLabel != null) {
                 add("⏳ Masa berlaku: $expLabel (${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)})")
@@ -1109,7 +1113,8 @@ class OverlayMacroSettingsView(
                     otherMacros.forEach { m ->
                         val suffix = when {
                             MacroSecurity.isExpired(m, now) -> " [Habis]"
-                            m.isPassive -> " [Pasif]"
+                            m.isPassive && m.passiveEnabled -> " [Pasif ON]"
+                            m.isPassive && !m.passiveEnabled -> " [Pasif OFF • skip]"
                             else -> ""
                         }
                         val b = makeBtn(m.name + suffix, if (m.id == targetId) "#0891B2" else "#1E293B") {

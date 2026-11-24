@@ -1307,7 +1307,7 @@ private fun MacroSettingsSheet(
             ) {
                 val secSummary = buildList {
                     if (macro.isLocked) add("Terkunci")
-                    if (macro.isPassive) add("Pasif")
+                    if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
                     MacroSecurity.remainingTimeLabel(macro)?.let { add(it) }
                 }.joinToString(" • ").ifBlank { "Tidak ada proteksi aktif" }
 

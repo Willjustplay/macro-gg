@@ -99,9 +99,19 @@ class MacroRunner(
         var iteration = 0
         while (!runtime.isStopped() && iteration < maxLoops) {
             val now = runtime.nowMs()
-            if (MacroSecurity.isExpired(macro, now)) {
-                runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
-                return FlowControl.STOP_MACRO
+            if (depth == 0) {
+                if (MacroSecurity.isExpired(macro, now)) {
+                    runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
+                    return FlowControl.STOP_MACRO
+                }
+            } else {
+                val liveSub = runtime.loadMacro(macro.id) ?: macro
+                MacroSecurity.checkLinkedRun(liveSub, now)?.let { denial ->
+                    val level = if (denial == com.example.data.RunDenialReason.PASSIVE_OFF) LogLevel.INFO else LogLevel.WARN
+                    runtime.log(level, MacroSecurity.denialMessage(liveSub, denial))
+                    markProgress()
+                    return FlowControl.NEXT
+                }
             }
             if (now - startedAt >= maxDurationMs) {
                 runtime.log(LogLevel.INFO, "Batas waktu ${macro.maxDurationMin} menit tercapai.")
@@ -120,8 +130,16 @@ class MacroRunner(
                     continue
                 }
                 FlowControl.NEXT -> {
-                    if (!runtime.isStopped() && iteration < maxLoops && macro.loopDelayMs > 0) {
-                        runtime.sleep(macro.loopDelayMs)
+                    if (!runtime.isStopped() && iteration < maxLoops) {
+                        val effectiveDelay = if (macro.loopDelayMs > 0) {
+                            macro.loopDelayMs
+                        } else if (maxLoops == Int.MAX_VALUE && runtime.nowMs() == now) {
+                            // Prevent tight 0ms spin / log flood if every action in an infinite loop was skipped (e.g. Passive OFF)
+                            50L
+                        } else {
+                            0L
+                        }
+                        if (effectiveDelay > 0L) runtime.sleep(effectiveDelay)
                     }
                 }
             }
@@ -276,16 +294,21 @@ class MacroRunner(
             is RunMacroAction -> {
                 if (action.targetMacroId.isBlank()) {
                     runtime.log(LogLevel.WARN, "Hubungkan Macro dilewati: belum ada macro tujuan dipilih.")
+                    markProgress()
                     return FlowControl.NEXT
                 }
                 val target = runtime.loadMacro(action.targetMacroId)
                 if (target == null) {
-                    runtime.log(LogLevel.WARN, "Macro tujuan '${action.targetMacroName}' tidak ditemukan.")
+                    runtime.log(LogLevel.WARN, "Macro tujuan '${action.targetMacroName}' tidak ditemukan — dilewati.")
+                    markProgress()
                     return FlowControl.NEXT
                 }
-                // Linked execution allows Passive macros, while still blocking Expired or Tampered macros.
+                // Linked execution allows Passive ON macros; cleanly skips Passive OFF, Expired, or Tampered macros
+                // without hanging or triggering the stuck-macro watchdog.
                 MacroSecurity.checkLinkedRun(target, runtime.nowMs())?.let { denial ->
-                    runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(target, denial))
+                    val level = if (denial == com.example.data.RunDenialReason.PASSIVE_OFF) LogLevel.INFO else LogLevel.WARN
+                    runtime.log(level, MacroSecurity.denialMessage(target, denial))
+                    markProgress()
                     return FlowControl.NEXT
                 }
                 val tag = if (target.isPassive) "macro pasif" else "macro"

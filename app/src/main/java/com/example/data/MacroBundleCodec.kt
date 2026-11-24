@@ -128,7 +128,11 @@ object MacroBundleCodec {
         if (!isZip) {
             val text = buffered.readBytes().toString(Charsets.UTF_8)
             val macro = json.decodeFromString<Macro>(text)
-            val cloned = macro.copy(id = idGenerator(), actions = macro.actions.map { it.withNewIds() })
+            val cloned = macro.copy(
+                id = idGenerator(),
+                originId = macro.originId.ifBlank { macro.id },
+                actions = macro.actions.map { it.withNewIds() }
+            )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
         }
 
@@ -186,7 +190,7 @@ object MacroBundleCodec {
             }
         }
 
-        // Remap old macro IDs -> fresh IDs so RunMacroAction references stay connected
+        // Remap old macro IDs -> fresh IDs while preserving originId so same-macro overwrite & deadline stacking work
         val idRemap = HashMap<String, String>()
         rawMacros.forEach { m -> idRemap[m.id] = idGenerator() }
         val remappedMacros = rawMacros.map { m ->
@@ -195,7 +199,11 @@ object MacroBundleCodec {
                     a.copy(targetMacroId = idRemap[a.targetMacroId]!!)
                 } else a
             }
-            m.copy(id = idRemap[m.id] ?: idGenerator(), actions = mappedActions)
+            m.copy(
+                id = idRemap[m.id] ?: idGenerator(),
+                originId = m.originId.ifBlank { m.id },
+                actions = mappedActions
+            )
         }
 
         return DecodedBundle(

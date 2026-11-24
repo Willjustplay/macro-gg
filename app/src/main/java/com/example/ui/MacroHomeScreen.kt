@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -111,6 +112,7 @@ fun MacroHomeScreen(
     onLaunchMacroOverlay: (Macro) -> Unit,
     onChangeMacroLogo: (Macro) -> Unit,
     onOpenMacroSecurity: (Macro) -> Unit,
+    onTogglePassivePull: (Macro) -> Unit,
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit
@@ -446,6 +448,7 @@ fun MacroHomeScreen(
                     onLaunchOverlay = { onLaunchMacroOverlay(macro) },
                     onChangeLogo = { onChangeMacroLogo(macro) },
                     onOpenSecurity = { onOpenMacroSecurity(macro) },
+                    onTogglePassivePull = { onTogglePassivePull(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
                     onExport = { onExportMacro(macro) },
                     onDelete = { onDeleteMacro(macro) }
@@ -505,6 +508,7 @@ private fun MacroListCard(
     onLaunchOverlay: () -> Unit,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
+    onTogglePassivePull: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit
@@ -632,6 +636,23 @@ private fun MacroListCard(
                             leadingIcon = { Icon(Icons.Filled.Lock, null) },
                             onClick = { menuOpen = false; onOpenSecurity() }
                         )
+                        if (macro.isPassive) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (macro.passiveEnabled) "Mode Pasif: Matikan (OFF)"
+                                        else "Mode Pasif: Nyalakan (ON)"
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (macro.passiveEnabled) Icons.Filled.LinkOff else Icons.Filled.Link,
+                                        contentDescription = null
+                                    )
+                                },
+                                onClick = { menuOpen = false; onTogglePassivePull() }
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Duplikat") },
                             leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
@@ -656,7 +677,12 @@ private fun MacroListCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (macro.isLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
-                    if (macro.isPassive) FeatureTag("🔗 Pasif", Color(0xFF22D3EE))
+                    if (macro.isPassive) {
+                        FeatureTag(
+                            text = if (macro.passiveEnabled) "🔗 Pasif ON" else "⛔ Pasif OFF",
+                            color = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
+                        )
+                    }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)
                         FeatureTag((if (isExpired) "⏰ " else "⏳ ") + remainingLabel, expColor)
@@ -707,15 +733,34 @@ private fun MacroListCard(
                             }
                         }
                         macro.isPassive -> {
-                            FilledTonalButton(
-                                onClick = onLaunchOverlay,
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                modifier = Modifier.height(34.dp)
-                            ) {
-                                Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("Pasif", style = MaterialTheme.typography.labelMedium)
+                            if (macro.passiveEnabled) {
+                                FilledTonalButton(
+                                    onClick = onTogglePassivePull,
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = Color(0xFF10B981).copy(alpha = 0.18f),
+                                        contentColor = Color(0xFF10B981)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Pasif ON", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = onTogglePassivePull,
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF59E0B)),
+                                    border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.6f)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Filled.LinkOff, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Pasif OFF", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
                         else -> {

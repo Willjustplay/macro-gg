@@ -294,6 +294,7 @@ object AutomationCoordinator {
 
     fun macroNeedsScreenCapture(macro: Macro): Boolean {
         val localStore = store
+        val now = localStore?.effectiveNowMs() ?: System.currentTimeMillis()
         val visited = HashSet<String>()
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
@@ -301,7 +302,9 @@ object AutomationCoordinator {
                 if (a is ImageAction || a is TextAction || a is ColorAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
-                    if (linked != null && check(linked)) return true
+                    if (linked != null && MacroSecurity.checkLinkedRun(linked, now) == null && check(linked)) {
+                        return true
+                    }
                 }
             }
             return false

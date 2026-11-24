@@ -260,6 +260,15 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun toggleMacroPassiveEnabled(macro: Macro) {
+        if (!macro.isPassive) return
+        val nextEnabled = !macro.passiveEnabled
+        val updated = com.example.data.MacroSecurity.togglePassiveEnabled(macro, nextEnabled)
+        saveMacro(updated)
+        val statusText = if (nextEnabled) "ON (dapat ditarik macro aktif)" else "OFF (tidak dapat ditarik / diskip)"
+        _messages.tryEmit("Mode Pasif '${updated.name}' diubah ke $statusText.")
+    }
+
     fun importFromUri(uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -270,7 +279,16 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 }
             }
             result.onSuccess { s ->
-                _messages.emit("Impor selesai: ${s.macrosImported} macro, ${s.scriptsImported} script, ${s.imagesImported} gambar.")
+                syncActiveMacroFromStore()
+                val msg = buildString {
+                    append("Impor selesai: ${s.macrosImported} macro")
+                    if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
+                    if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
+                    if (s.scriptsImported > 0) append(", ${s.scriptsImported} script")
+                    if (s.imagesImported > 0) append(", ${s.imagesImported} gambar")
+                    append(".")
+                }
+                _messages.emit(msg)
             }.onFailure { err ->
                 _messages.emit("Gagal impor: ${err.message}")
             }

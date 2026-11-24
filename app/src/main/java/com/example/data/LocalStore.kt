@@ -590,12 +590,38 @@ class LocalStore(context: Context) {
     data class ImportSummary(
         val macrosImported: Int,
         val scriptsImported: Int,
-        val imagesImported: Int
+        val imagesImported: Int,
+        val macrosOverwritten: Int = 0,
+        val deadlinesExtended: Int = 0
     )
+
+    private fun findMatchingMacroForOverwrite(incoming: Macro, candidates: List<Macro>): Macro? {
+        val incOrigin = incoming.originId.trim()
+        if (incOrigin.isNotBlank()) {
+            val byOrigin = candidates.firstOrNull { cur ->
+                cur.originId.equals(incOrigin, ignoreCase = false) || cur.id == incOrigin
+            }
+            if (byOrigin != null) return byOrigin
+        }
+        val incName = incoming.name.trim()
+        if (incName.isBlank()) return null
+        val byName = candidates.firstOrNull { cur -> cur.name.trim().equals(incName, ignoreCase = true) }
+        if (byName != null) {
+            // Do not allow an unrelated unprotected macro with a generic name to overwrite a locked/protected macro
+            if (MacroSecurity.hasAnyProtection(byName) && !MacroSecurity.hasAnyProtection(incoming)) {
+                return null
+            }
+            return byName
+        }
+        return null
+    }
 
     /**
      * Imports either a single macro JSON, a single macro .zip bundle (with linked macros, logos & PNGs),
-     * or a full backup .zip. Preserves [RunMacroAction] links by remapping old macro IDs to new IDs.
+     * or a full backup .zip.
+     * - If an imported macro matches an existing macro (by origin ID or name), overwrites it in-place
+     *   and ADDS the incoming expiry duration onto any remaining active deadline.
+     * - Preserves [RunMacroAction] links across both new and overwritten macros.
      */
     fun importFromStream(input: InputStream): ImportSummary {
         val decoded = MacroBundleCodec.readBundle(input)
@@ -612,13 +638,52 @@ class LocalStore(context: Context) {
         for (script in decoded.scripts) {
             saveScript(script)
         }
-        for (macro in decoded.macros) {
-            saveMacro(macro)
+
+        val now = effectiveNowMs()
+        val existingSnapshot = _macros.value.toMutableList()
+        val matchedPairs = ArrayList<Pair<Macro, Macro?>>()
+        val finalIdMap = HashMap<String, String>()
+
+        for (incoming in decoded.macros) {
+            val match = findMatchingMacroForOverwrite(incoming, existingSnapshot)
+            if (match != null) {
+                existingSnapshot.removeAll { it.id == match.id }
+                finalIdMap[incoming.id] = match.id
+            } else {
+                finalIdMap[incoming.id] = incoming.id
+            }
+            matchedPairs += incoming to match
         }
+
+        var overwrittenCount = 0
+        var extendedCount = 0
+        for ((incoming, existing) in matchedPairs) {
+            val relinked = incoming.copy(
+                actions = incoming.actions.mapAllActions { a ->
+                    if (a is RunMacroAction && a.targetMacroId in finalIdMap) {
+                        a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
+                    } else a
+                }
+            )
+            if (existing != null) {
+                val res = MacroSecurity.mergeOverwrittenMacro(existing, relinked, now)
+                saveMacro(res.merged)
+                overwrittenCount++
+                if (res.deadlineExtended) extendedCount++
+                if (existing.logoImage.isNotBlank() && existing.logoImage != res.merged.logoImage) {
+                    cleanupUnusedMacroIcon(existing.logoImage, excludingMacroId = res.merged.id)
+                }
+            } else {
+                saveMacro(relinked)
+            }
+        }
+
         return ImportSummary(
             macrosImported = decoded.macros.size,
             scriptsImported = decoded.scripts.size,
-            imagesImported = imagesCount
+            imagesImported = imagesCount,
+            macrosOverwritten = overwrittenCount,
+            deadlinesExtended = extendedCount
         )
     }
 

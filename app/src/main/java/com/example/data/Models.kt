@@ -364,8 +364,15 @@ data class Macro(
     val expiresAtEpochMs: Long = 0L,
     /** Human-readable duration label configured for expiry (e.g. "7 Hari", "1 Bulan"). */
     val expiryLabel: String = "",
+    /** Configured duration amount & unit so overwriting the same macro stacks deadlines accurately. */
+    val expiryDurationAmount: Int = 0,
+    val expiryDurationUnit: ExpiryUnit = ExpiryUnit.DAYS,
     /** Passive mode: cannot run directly; only runnable when called by an active macro via RunMacroAction. */
     val isPassive: Boolean = false,
+    /** When [isPassive] is true: true = ON (can be pulled by active macros), false = OFF (skipped safely). */
+    val passiveEnabled: Boolean = true,
+    /** Stable origin macro ID preserved across ZIP export/import to recognize & overwrite the same macro. */
+    val originId: String = "",
     /** Integrity seal over protection fields to detect manual JSON tampering. */
     val securitySeal: String = "",
     val createdAt: Long = System.currentTimeMillis(),

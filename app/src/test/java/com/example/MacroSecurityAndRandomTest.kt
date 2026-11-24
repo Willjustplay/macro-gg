@@ -242,5 +242,306 @@ class MacroSecurityAndRandomTest {
         assertTrue(imported.isPassive)
         assertFalse("Security seal must remain valid after import ID remap", MacroSecurity.isTampered(imported))
         assertTrue(MacroSecurity.verifyPassword(imported, "mySecret"))
+        assertEquals("orig_id_1", imported.originId)
+    }
+
+    @Test
+    fun passiveOffIsSkippedCleanlyWithoutHangingOrTrippingStuckWatchdog() = runTest {
+        var fakeClock = 1_700_000_000_000L
+        val passiveOff = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "sub_passive_off",
+                name = "Sub Pasif OFF",
+                loopCount = 1,
+                loopDelayMs = 0,
+                actions = listOf(ClickAction(x = 999, y = 999, delayAfterMs = 0))
+            ),
+            isLocked = false,
+            isPassive = true,
+            passiveEnabled = false,
+            expiresAtEpochMs = 0L,
+            expiryLabel = "",
+            newPassword = "pw123"
+        )
+
+        // Direct run blocked; linked run returns PASSIVE_OFF
+        assertEquals(RunDenialReason.PASSIVE_DIRECT, MacroSecurity.checkDirectRun(passiveOff, fakeClock))
+        assertEquals(RunDenialReason.PASSIVE_OFF, MacroSecurity.checkLinkedRun(passiveOff, fakeClock))
+        assertFalse(MacroSecurity.isTampered(passiveOff))
+
+        // Manual JSON tampering to flip passiveEnabled = true without valid seal MUST be caught
+        val tampered = passiveOff.copy(passiveEnabled = true)
+        assertTrue(MacroSecurity.isTampered(tampered))
+        assertEquals(RunDenialReason.TAMPERED, MacroSecurity.checkLinkedRun(tampered, fakeClock))
+
+        // Active macro calls passive OFF with BOTH returnAfter=true and returnAfter=false,
+        // and has a strict stuck watchdog (5s STOP_MACRO) while time advances 4s per action.
+        val activeCaller = Macro(
+            id = "active_main",
+            name = "Active Caller",
+            loopCount = 3,
+            loopDelayMs = 0,
+            autoRecoverStuckSec = 5,
+            stuckRecoveryMode = com.example.data.StuckRecoveryMode.STOP_MACRO,
+            actions = listOf(
+                ClickAction(x = 10, y = 10, delayAfterMs = 0),
+                RunMacroAction(targetMacroId = passiveOff.id, targetMacroName = passiveOff.name, returnAfter = true, delayAfterMs = 0),
+                RunMacroAction(targetMacroId = passiveOff.id, targetMacroName = passiveOff.name, returnAfter = false, delayAfterMs = 0),
+                ClickAction(x = 20, y = 20, delayAfterMs = 0)
+            )
+        )
+
+        val clicks = mutableListOf<Pair<Int, Int>>()
+        val logs = mutableListOf<String>()
+        val runtime = fakeRuntime(
+            clicks = clicks,
+            nowProvider = {
+                fakeClock += 1_000L
+                fakeClock
+            },
+            macrosById = mapOf(passiveOff.id to passiveOff),
+            logs = logs
+        )
+
+        MacroRunner(runtime).run(activeCaller)
+
+        // All 3 loops must complete both clicks; passive OFF click (999,999) must NEVER run; watchdog must NOT trip!
+        assertEquals(
+            listOf(10 to 10, 20 to 20, 10 to 10, 20 to 20, 10 to 10, 20 to 20),
+            clicks
+        )
+        assertTrue(logs.none { it.contains("Auto-Perbaiki") })
+        assertTrue(logs.any { it.contains("sedang OFF") })
+
+        // Now flip Passive OFF -> ON legitimately via MacroSecurity.togglePassiveEnabled
+        val passiveOn = MacroSecurity.togglePassiveEnabled(passiveOff, true)
+        assertTrue(passiveOn.passiveEnabled)
+        assertFalse(MacroSecurity.isTampered(passiveOn))
+        assertTrue(MacroSecurity.verifyPassword(passiveOn, "pw123"))
+        assertNull(MacroSecurity.checkLinkedRun(passiveOn, fakeClock))
+
+        val clicksWhenOn = mutableListOf<Pair<Int, Int>>()
+        val singleLoopCaller = activeCaller.copy(
+            loopCount = 1,
+            actions = listOf(
+                ClickAction(x = 10, y = 10, delayAfterMs = 0),
+                RunMacroAction(targetMacroId = passiveOn.id, targetMacroName = passiveOn.name, returnAfter = true, delayAfterMs = 0),
+                ClickAction(x = 20, y = 20, delayAfterMs = 0)
+            )
+        )
+        MacroRunner(
+            fakeRuntime(
+                clicks = clicksWhenOn,
+                nowProvider = { fakeClock },
+                macrosById = mapOf(passiveOn.id to passiveOn)
+            )
+        ).run(singleLoopCaller)
+        assertEquals(listOf(10 to 10, 999 to 999, 20 to 20), clicksWhenOn)
+    }
+
+    @Test
+    fun midRunPassiveSwitchOffExitsSubMacroCleanlyAndContinuesActiveCaller() = runTest {
+        val baseNow = 1_700_000_000_000L
+        val passiveLoop = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "sub_loop",
+                name = "Sub Loop Pasif",
+                loopCount = 5,
+                loopDelayMs = 0,
+                actions = listOf(ClickAction(x = 55, y = 55, delayAfterMs = 0))
+            ),
+            isLocked = false,
+            isPassive = true,
+            passiveEnabled = true,
+            expiresAtEpochMs = 0L,
+            expiryLabel = "",
+            newPassword = "secret"
+        )
+        var currentSub = passiveLoop
+        val clicks = mutableListOf<Pair<Int, Int>>()
+
+        val runtime = object : MacroRuntime {
+            override fun isStopped() = false
+            override suspend fun waitIfPaused() {}
+            override suspend fun sleep(ms: Long) {}
+            override suspend fun click(x: Int, y: Int, durationMs: Long): Boolean {
+                clicks += x to y
+                // After the 1st click of the passive sub-macro, user toggles it OFF
+                if (x == 55 && y == 55) {
+                    currentSub = MacroSecurity.togglePassiveEnabled(currentSub, false)
+                }
+                return true
+            }
+            override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long) = true
+            override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float) = true
+            override fun captureFrame(): Frame? = null
+            override fun samplePixelArgb(x: Int, y: Int): Int? = null
+            override fun loadTemplate(name: String): PreparedTemplate? = null
+            override fun loadMacro(id: String): Macro? = if (id == currentSub.id) currentSub else null
+            override fun log(level: LogLevel, message: String) {}
+            override fun nowMs(): Long = baseNow
+        }
+
+        val caller = Macro(
+            id = "caller",
+            name = "Caller",
+            loopCount = 1,
+            loopDelayMs = 0,
+            actions = listOf(
+                ClickAction(x = 1, y = 1, delayAfterMs = 0),
+                RunMacroAction(targetMacroId = passiveLoop.id, targetMacroName = passiveLoop.name, returnAfter = true, delayAfterMs = 0),
+                ClickAction(x = 2, y = 2, delayAfterMs = 0)
+            )
+        )
+        MacroRunner(runtime).run(caller)
+
+        // Sub-macro runs 1st iteration, then sees OFF on 2nd iteration and exits cleanly back to caller -> click (2,2) runs!
+        assertEquals(listOf(1 to 1, 55 to 55, 2 to 2), clicks)
+    }
+
+    @Test
+    fun overwritingSameMacroStacksExpiryDeadlinesAndPreservesIdentityAcrossZip() {
+        val dayMs = 86_400_000L
+        val baseNow = 1_700_000_000_000L
+
+        // Existing macro on device has 4 days remaining
+        val existing = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "local_id_99",
+                originId = "orig_vip_01",
+                name = "VIP Farm",
+                logoImage = "logo_old.png",
+                actions = listOf(ClickAction(x = 10, y = 10))
+            ),
+            isLocked = true,
+            isPassive = false,
+            expiresAtEpochMs = baseNow + 4L * dayMs,
+            expiryLabel = "4 Hari",
+            expiryDurationAmount = 4,
+            expiryDurationUnit = ExpiryUnit.DAYS,
+            newPassword = "vip123"
+        )
+
+        // Scenario 1: Incoming overwrite adds 7 Days -> 4 + 7 = 11 days remaining
+        val incoming7d = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "remapped_import_id",
+                originId = "orig_vip_01",
+                name = "VIP Farm",
+                actions = listOf(ClickAction(x = 50, y = 60))
+            ),
+            isLocked = true,
+            isPassive = false,
+            expiresAtEpochMs = baseNow + 7L * dayMs,
+            expiryLabel = "7 Hari",
+            expiryDurationAmount = 7,
+            expiryDurationUnit = ExpiryUnit.DAYS,
+            newPassword = "vip123"
+        )
+
+        val resDays = MacroSecurity.mergeOverwrittenMacro(existing, incoming7d, baseNow)
+        assertTrue(resDays.deadlineExtended)
+        assertEquals("local_id_99", resDays.merged.id)
+        assertEquals("orig_vip_01", resDays.merged.originId)
+        assertEquals("logo_old.png", resDays.merged.logoImage)
+        assertEquals(baseNow + 11L * dayMs, resDays.merged.expiresAtEpochMs)
+        assertFalse("Stacked macro seal must be valid", MacroSecurity.isTampered(resDays.merged))
+        assertEquals(50, (resDays.merged.actions.first() as ClickAction).x)
+
+        // Scenario 2: Incoming overwrite adds 1 Calendar Month onto the 11-day remaining deadline
+        val incoming1m = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "remapped_import_2",
+                originId = "orig_vip_01",
+                name = "VIP Farm",
+                actions = listOf(ClickAction(x = 88, y = 99))
+            ),
+            isLocked = true,
+            isPassive = true,
+            passiveEnabled = false,
+            expiresAtEpochMs = MacroSecurity.computeExpiryEpochMs(baseNow, 1, ExpiryUnit.MONTHS),
+            expiryLabel = "1 Bulan",
+            expiryDurationAmount = 1,
+            expiryDurationUnit = ExpiryUnit.MONTHS,
+            newPassword = "vip123"
+        )
+        val resMonth = MacroSecurity.mergeOverwrittenMacro(resDays.merged, incoming1m, baseNow)
+        assertTrue(resMonth.deadlineExtended)
+        assertEquals(
+            MacroSecurity.computeExpiryEpochMs(resDays.merged.expiresAtEpochMs, 1, ExpiryUnit.MONTHS),
+            resMonth.merged.expiresAtEpochMs
+        )
+        assertTrue(resMonth.merged.isPassive)
+        assertFalse(resMonth.merged.passiveEnabled)
+        assertFalse(MacroSecurity.isTampered(resMonth.merged))
+
+        // Scenario 3: Legacy incoming (expiryDurationAmount = 0) still adds remaining delta onto existing
+        val legacyIncoming = incoming7d.copy(expiryDurationAmount = 0)
+        val resLegacy = MacroSecurity.mergeOverwrittenMacro(existing, legacyIncoming, baseNow)
+        assertTrue(resLegacy.deadlineExtended)
+        assertEquals(baseNow + 11L * dayMs, resLegacy.merged.expiresAtEpochMs)
+        assertFalse(MacroSecurity.isTampered(resLegacy.merged))
+
+        // Scenario 4: Existing macro already expired -> adopts incoming deadline fresh without stacking expired gap
+        val expiredExisting = existing.copy(
+            expiresAtEpochMs = baseNow - 2L * dayMs
+        ).let { it.copy(securitySeal = MacroSecurity.computeSeal(it)) }
+        val resRenew = MacroSecurity.mergeOverwrittenMacro(expiredExisting, incoming7d, baseNow)
+        assertFalse(resRenew.deadlineExtended)
+        assertEquals(incoming7d.expiresAtEpochMs, resRenew.merged.expiresAtEpochMs)
+        assertFalse(MacroSecurity.isTampered(resRenew.merged))
+
+        // Scenario 5: Tampered incoming macro CANNOT be whitewashed by overwriting
+        val tamperedIncoming = incoming7d.copy(expiresAtEpochMs = baseNow + 999L * dayMs)
+        assertTrue(MacroSecurity.isTampered(tamperedIncoming))
+        val resTampered = MacroSecurity.mergeOverwrittenMacro(existing, tamperedIncoming, baseNow)
+        assertFalse(resTampered.deadlineExtended)
+        assertTrue(MacroSecurity.isTampered(resTampered.merged))
+
+        // Scenario 6: Full ZIP export -> decode -> overwrite stacks correctly and preserves originId & passiveEnabled
+        val out = ByteArrayOutputStream()
+        MacroBundleCodec.writeMacroZip(
+            root = existing,
+            lookupMacro = { null },
+            loadImage = { null },
+            output = out
+        )
+        val decoded = MacroBundleCodec.readBundle(ByteArrayInputStream(out.toByteArray())).macros.first()
+        assertEquals("orig_vip_01", decoded.originId)
+        assertEquals(4, decoded.expiryDurationAmount)
+        assertEquals(ExpiryUnit.DAYS, decoded.expiryDurationUnit)
+        assertFalse(MacroSecurity.isTampered(decoded))
+
+        val stackedAfterZip = MacroSecurity.mergeOverwrittenMacro(existing, decoded, baseNow)
+        assertTrue(stackedAfterZip.deadlineExtended)
+        assertEquals(baseNow + 8L * dayMs, stackedAfterZip.merged.expiresAtEpochMs)
+        assertFalse(MacroSecurity.isTampered(stackedAfterZip.merged))
+    }
+
+    @Test
+    fun legacyV27SealWithoutPassiveEnabledRemainsValid() {
+        val baseNow = 1_700_000_000_000L
+        val salt = MacroSecurity.generateSalt()
+        val hash = MacroSecurity.hashPassword("oldpass", salt)
+        val exp = baseNow + 5L * 86_400_000L
+        val legacyPayload = "WjustMacro::v2.7::Seal::9f3a8c41d2e7|locked=true|passive=true|exp=$exp|hash=$hash|salt=$salt"
+        val legacySeal = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(legacyPayload.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+        val legacyMacro = Macro(
+            id = "legacy_v27",
+            name = "Legacy v2.7",
+            isLocked = true,
+            isPassive = true,
+            passiveEnabled = true,
+            expiresAtEpochMs = exp,
+            lockSalt = salt,
+            lockPasswordHash = hash,
+            securitySeal = legacySeal
+        )
+        assertFalse("v2.7.0 exported macro seal must stay valid on v2.8.0", MacroSecurity.isTampered(legacyMacro))
+        assertNull(MacroSecurity.checkLinkedRun(legacyMacro, baseNow))
     }
 }
+
