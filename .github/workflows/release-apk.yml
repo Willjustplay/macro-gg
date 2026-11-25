@@ -138,13 +138,14 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           ls -lh dist/
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" dist/* --clobber
+          if gh release view "$TAG_NAME" -R "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/* -R "$GH_REPO" --clobber
           else
-            gh release create "$TAG_NAME" dist/* \
+            gh release create "$TAG_NAME" dist/* -R "$GH_REPO" \
               --title "Wjust macro ${TAG_NAME} (Android + PC)" \
               --generate-notes
           fi
