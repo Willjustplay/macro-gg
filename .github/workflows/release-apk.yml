@@ -1,4 +1,4 @@
-name: Build & Publish APK
+name: Build & Publish Android + PC
 
 on:
   push:
@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v2.0.0)'
+        description: 'Release tag (e.g. v2.14.0)'
         required: true
-        default: 'v2.0.0'
+        default: 'v2.14.0'
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-android-and-pc-jar:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -44,27 +44,107 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Run unit tests & build APKs
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug :export-bridge:assembleDebug --no-configuration-cache
-
-      - name: Rename APKs
+      - name: Run all tests & build Android APKs + PC Universal JAR
         env:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk "Wjust-macro-${TAG_NAME}.apk"
-          cp export-bridge/build/outputs/apk/debug/export-bridge-debug.apk "Wjust-Export-Bridge.apk"
+          chmod +x gradlew
+          ./gradlew :core:test :desktop:test :app:testDebugUnitTest \
+            :app:assembleDebug :export-bridge:assembleDebug :desktop:fatJar \
+            -PappVersion="${TAG_NAME}" --no-configuration-cache
+
+      - name: Stage release artifacts
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/debug/app-debug.apk "release-assets/Wjust-macro-${TAG_NAME}.apk"
+          cp export-bridge/build/outputs/apk/debug/export-bridge-debug.apk "release-assets/Wjust-Export-Bridge.apk"
+          cp desktop/build/libs/Wjust-macro-PC-*-universal.jar "release-assets/Wjust-macro-PC-Universal-${TAG_NAME}.jar"
+
+      - name: Upload Android & Universal JAR artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-android-and-jar
+          path: release-assets/*
+
+  build-pc-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run PC unit tests & package Windows portable .exe (jpackage)
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          .\gradlew.bat :desktop:test :desktop:packagePortableWindows "-PappVersion=$($env:TAG_NAME)" --no-configuration-cache
+
+      - name: Bundle quick-start guide & zip Windows portable package
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          $appDir = "desktop\build\jpackage-win\WjustMacroPC"
+          $guideLines = @(
+            "Wjust macro PC ($($env:TAG_NAME)) - Panduan Singkat",
+            "====================================================",
+            "1. Ekstrak seluruh folder ini lalu klik ganda WjustMacroPC.exe (TIDAK perlu install Java!).",
+            "2. Hotkey Global Windows (tetap aktif saat game berjalan):",
+            "   - F6 : Mulai / Jeda Macro",
+            "   - F7 : Hentikan Macro",
+            "   - F8 : Potong Gambar Target dari Layar (Snipping Tool)",
+            "   - F9 : Tampilkan / Sembunyikan Floating Mini Bar",
+            "3. Mode Tangkap Layar (Tab Target & Optimasi PC):",
+            "   - Win32 GDI Fast   : Tangkap seluruh layar kecepatan tinggi (~2-5ms)",
+            "   - Jendela Target   : Kunci langsung ke jendela game/emulator tertentu",
+            "   - ADB Background   : Kontrol LDPlayer / BlueStacks / MuMu / Nox di latar belakang TANPA menggerakkan mouse PC!",
+            "4. 100% Kompatibel Android <-> PC:",
+            "   - Ekspor/Impor .zip Macro & Macro Set (termasuk Kunci Sandi, Tenggat, & 1x Impor) langsung jalan di HP maupun PC.",
+            "5. Mode Portabel (Opsional):",
+            "   - Buat folder kosong bernama wjust-macro-data di sebelah WjustMacroPC.exe agar data tersimpan di dalam folder ini."
+          )
+          Set-Content -Path (Join-Path $appDir "CARA-PAKAI-PC.txt") -Value ($guideLines -join "`r`n") -Encoding UTF8
+          New-Item -ItemType Directory -Force -Path "release-win" | Out-Null
+          $zipPath = "release-win\Wjust-macro-PC-Windows-x64-$($env:TAG_NAME).zip"
+          Compress-Archive -Path $appDir -DestinationPath $zipPath -Force
+
+      - name: Upload Windows portable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-pc-windows
+          path: release-win/*
+
+  publish-release:
+    needs: [build-android-and-pc-jar, build-pc-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
+          ls -lh dist/
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "Wjust-macro-${TAG_NAME}.apk" "Wjust-Export-Bridge.apk" --clobber
+            gh release upload "$TAG_NAME" dist/* --clobber
           else
-            gh release create "$TAG_NAME" "Wjust-macro-${TAG_NAME}.apk" "Wjust-Export-Bridge.apk" \
-              --title "Wjust macro ${TAG_NAME}" \
+            gh release create "$TAG_NAME" dist/* \
+              --title "Wjust macro ${TAG_NAME} (Android + PC)" \
               --generate-notes
           fi

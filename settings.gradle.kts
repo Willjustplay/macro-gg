@@ -24,5 +24,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "TapLua"
 
+include(":core")
 include(":app")
+include(":desktop")
 include(":export-bridge")

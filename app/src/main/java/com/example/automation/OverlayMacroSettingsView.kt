@@ -990,8 +990,9 @@ class OverlayMacroSettingsView(
             rebuildBody()
         })
         bar.addView(TextView(context).apply {
+            val slot = ref.slot
             text = when {
-                ref.slot != null -> "Tambah ke: ${ref.slot.label}"
+                slot != null -> "Tambah ke: ${slot.label}"
                 forStuck -> "Tambah Aksi Anti-Macet"
                 else -> "Pilih Jenis Aksi"
             }

@@ -37,6 +37,7 @@ class TemplateMatcherTest {
                 bg.pixels[(dstY + y) * bg.width + (dstX + x)] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
+        bg.invalidateCache()
     }
 
     @Test
@@ -72,9 +73,10 @@ class TemplateMatcherTest {
             stamp(screen, icon, dstX = pos.first, dstY = pos.second, brightnessShift = 6)
             val tpl = PreparedTemplate(name, icon)
             val outcome = TemplateMatcher.findWithStats(screen, tpl, threshold = 0.85)
-            assertNotNull("Failed to find $name (bestScore=${outcome.bestScore})", outcome.match)
-            assertTrue("x drift for $name: ${outcome.match!!.x} vs ${pos.first}", abs(outcome.match.x - pos.first) <= 1)
-            assertTrue("y drift for $name: ${outcome.match.y} vs ${pos.second}", abs(outcome.match.y - pos.second) <= 1)
+            val m = outcome.match
+            assertNotNull("Failed to find $name (bestScore=${outcome.bestScore})", m)
+            assertTrue("x drift for $name: ${m!!.x} vs ${pos.first}", abs(m.x - pos.first) <= 1)
+            assertTrue("y drift for $name: ${m.y} vs ${pos.second}", abs(m.y - pos.second) <= 1)
         }
     }
 
@@ -136,9 +138,10 @@ class TemplateMatcherTest {
         stamp(canvas, edgeIcon, dstX = 320 - 64, dstY = 240 - 60)
         val tpl = PreparedTemplate("edge.png", edgeIcon)
         val outcome = TemplateMatcher.findWithStats(canvas, tpl, threshold = 0.90)
-        assertNotNull("Expected match at bottom-right edge", outcome.match)
-        assertTrue("x=${outcome.match!!.x}", abs(outcome.match.x - (320 - 64)) <= 1)
-        assertTrue("y=${outcome.match.y}", abs(outcome.match.y - (240 - 60)) <= 1)
+        val edgeMatch = outcome.match
+        assertNotNull("Expected match at bottom-right edge", edgeMatch)
+        assertTrue("x=${edgeMatch!!.x}", abs(edgeMatch.x - (320 - 64)) <= 1)
+        assertTrue("y=${edgeMatch.y}", abs(edgeMatch.y - (240 - 60)) <= 1)
         assertTrue("score=${outcome.bestScore}", outcome.bestScore >= 0.96)
 
         // Verify absent template returns cleanly without false positives

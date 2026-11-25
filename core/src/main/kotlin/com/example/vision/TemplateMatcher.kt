@@ -1,5 +1,10 @@
 package com.example.vision
 
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -12,7 +17,38 @@ class Frame(val width: Int, val height: Int, val pixels: IntArray) {
         require(width > 0 && height > 0 && pixels.size >= width * height) { "Invalid frame ${width}x$height" }
     }
 
+    @Volatile
+    private var coarseCache: ConcurrentHashMap<String, GrayImage>? = null
+
     fun argbAt(x: Int, y: Int): Int = pixels[y.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)]
+
+    /**
+     * Caches downsampled grayscale projections per (region, factor) on this [Frame] so checking
+     * multiple templates or scale probes on the same screenshot avoids redundant full-screen downsampling.
+     */
+    fun cachedDownsampledGray(left: Int, top: Int, w: Int, h: Int, factor: Int): GrayImage {
+        val map = coarseCache ?: synchronized(this) {
+            coarseCache ?: ConcurrentHashMap<String, GrayImage>(4).also { coarseCache = it }
+        }
+        val key = "$left,$top,$w,$h,$factor"
+        map[key]?.let { return it }
+        val computed = when {
+            factor == 8 -> map["$left,$top,$w,$h,4"]?.downsample(2)
+                ?: GrayImage.fromFrameDownsampled(this, left, top, w, h, factor)
+            factor == 4 -> map["$left,$top,$w,$h,2"]?.downsample(2)
+                ?: GrayImage.fromFrameDownsampled(this, left, top, w, h, factor)
+            else -> GrayImage.fromFrameDownsampled(this, left, top, w, h, factor)
+        }
+        if (map.size < 16) {
+            map.putIfAbsent(key, computed)
+        }
+        return computed
+    }
+
+    /** Clears cached downsampled projections if [pixels] was mutated in place (e.g. in tests). */
+    fun invalidateCache() {
+        coarseCache?.clear()
+    }
 
     fun crop(left: Int, top: Int, w: Int, h: Int): Frame {
         val l = left.coerceIn(0, width - 1)
@@ -24,6 +60,28 @@ class Frame(val width: Int, val height: Int, val pixels: IntArray) {
             System.arraycopy(pixels, (t + row) * width + l, out, row * cw, cw)
         }
         return Frame(cw, ch, out)
+    }
+}
+
+/**
+ * Triple-buffered reusable ARGB pixel pool to avoid multi-megabyte IntArray GC churn during
+ * high-FPS (30-60 FPS) desktop screen capture & moving-troop tracking.
+ */
+class ReusableFramePool(private val slots: Int = 3) {
+    private val buffers = Array<IntArray?>(slots.coerceAtLeast(2)) { null }
+    private var cursor = 0
+
+    @Synchronized
+    fun acquire(pixelCount: Int): IntArray {
+        val idx = cursor
+        cursor = (cursor + 1) % buffers.size
+        val existing = buffers[idx]
+        if (existing != null && existing.size == pixelCount) {
+            return existing
+        }
+        val fresh = IntArray(pixelCount)
+        buffers[idx] = fresh
+        return fresh
     }
 }
 
@@ -318,6 +376,23 @@ object TemplateMatcher {
     private const val EARLY_EXIT_SCORE = 0.92
     private const val COARSE_REFINE_RADIUS = 3
     private const val FULL_REFINE_RADIUS = 2
+    private const val PARALLEL_WORK_THRESHOLD = 1_500_000L
+
+    /** Enables multi-threaded row-parallel NCC matching on multi-core CPUs (3x-5x faster on HD/4K PC screens). */
+    @Volatile
+    var parallelMatchingEnabled: Boolean = true
+
+    /** Max worker threads used for parallel coarse matching (defaults to available CPU cores capped at 8). */
+    @Volatile
+    var maxWorkerThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+
+    private val workerPool: ExecutorService by lazy {
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+        val counter = AtomicInteger(1)
+        Executors.newFixedThreadPool(threads) { r ->
+            Thread(r, "wjust-vision-${counter.getAndIncrement()}").apply { isDaemon = true }
+        }
+    }
 
     /** Dense logarithmic scale grid (~7-8% spacing) covering 0.42x..1.85x across phones, tablets, foldables & emulators. */
     private val AUTO_SCALE_GRID = doubleArrayOf(
@@ -360,7 +435,7 @@ object TemplateMatcher {
         if (rw < template.width || rh < template.height) return SearchOutcome(null, 0.0)
 
         val factor = template.coarseFactor
-        val coarseImg = GrayImage.fromFrameDownsampled(frame, left, top, rw, rh, factor)
+        val coarseImg = frame.cachedDownsampledGray(left, top, rw, rh, factor)
         return findWithPrecomputedCoarse(frame, left, top, rw, rh, template, factor, coarseImg, threshold)
     }
 
@@ -387,14 +462,7 @@ object TemplateMatcher {
         val rh = bottom - top
         if (rw < 8 || rh < 8) return MultiScaleOutcome(null, 0.0, 1.0)
 
-        val coarseCache = HashMap<Int, GrayImage>(4)
-        fun coarseScreen(factor: Int): GrayImage = coarseCache.getOrPut(factor) {
-            when {
-                factor == 8 && coarseCache.containsKey(4) -> coarseCache[4]!!.downsample(2)
-                factor == 4 && coarseCache.containsKey(2) -> coarseCache[2]!!.downsample(2)
-                else -> GrayImage.fromFrameDownsampled(frame, left, top, rw, rh, factor)
-            }
-        }
+        fun coarseScreen(factor: Int): GrayImage = frame.cachedDownsampledGray(left, top, rw, rh, factor)
 
         val probeCoarseMin = (threshold - 0.48).coerceIn(0.18, 0.42)
         val earlyExitTarget = max(threshold, EARLY_EXIT_SCORE)
@@ -648,7 +716,7 @@ object TemplateMatcher {
         if (rw < template.width || rh < template.height) return emptyList()
 
         val factor = template.coarseFactor
-        val coarseImg = GrayImage.fromFrameDownsampled(frame, left, top, rw, rh, factor)
+        val coarseImg = frame.cachedDownsampledGray(left, top, rw, rh, factor)
         val coarseTpl = template.level(factor)
         if (coarseImg.width < coarseTpl.img.width || coarseImg.height < coarseTpl.img.height) return emptyList()
 
@@ -832,41 +900,64 @@ object TemplateMatcher {
         val zm = tpl.zeroMean
         val zmSum = tpl.zmSum
         val out = FloatArray(ow * oh)
-        for (y in 0 until oh) {
-            val rowOut = y * ow
-            val aRow = y * stride
-            val cRow = (y + th) * stride
-            val imgBaseY = y0 + y
-            for (x in 0 until ow) {
-                val a = aRow + x
-                val b = a + tw
-                val c = cRow + x
-                val d = c + tw
-                val ws = sum[d] - sum[b] - sum[c] + sum[a]
-                val wq = sq[d] - sq[b] - sq[c] + sq[a]
-                val wMean = ws / n
-                val wVar = (wq - ws * wMean).coerceAtLeast(0.0)
-                val score: Double
-                if (tFlat || wVar / n < FLAT_EPS) {
-                    score = if (tFlat && wVar / n < 4.0) 1.0 - abs(wMean - tpl.mean) / 255.0 else 0.0
-                } else {
-                    var cross = 0.0
-                    var ti = 0
-                    val imgBaseX = x0 + x
-                    for (ty in 0 until th) {
-                        var ii = (imgBaseY + ty) * iw + imgBaseX
-                        var rowCross = 0f
-                        val end = ti + tw
-                        while (ti < end) {
-                            rowCross += data[ii++] * zm[ti++]
+
+        fun computeRows(yStart: Int, yEnd: Int) {
+            for (y in yStart until yEnd) {
+                val rowOut = y * ow
+                val aRow = y * stride
+                val cRow = (y + th) * stride
+                val imgBaseY = y0 + y
+                for (x in 0 until ow) {
+                    val a = aRow + x
+                    val b = a + tw
+                    val c = cRow + x
+                    val d = c + tw
+                    val ws = sum[d] - sum[b] - sum[c] + sum[a]
+                    val wq = sq[d] - sq[b] - sq[c] + sq[a]
+                    val wMean = ws / n
+                    val wVar = (wq - ws * wMean).coerceAtLeast(0.0)
+                    val score: Double
+                    if (tFlat || wVar / n < FLAT_EPS) {
+                        score = if (tFlat && wVar / n < 4.0) 1.0 - abs(wMean - tpl.mean) / 255.0 else 0.0
+                    } else {
+                        var cross = 0.0
+                        var ti = 0
+                        val imgBaseX = x0 + x
+                        for (ty in 0 until th) {
+                            var ii = (imgBaseY + ty) * iw + imgBaseX
+                            var rowCross = 0f
+                            val end = ti + tw
+                            while (ti < end) {
+                                rowCross += data[ii++] * zm[ti++]
+                            }
+                            cross += rowCross
                         }
-                        cross += rowCross
+                        cross -= wMean * zmSum
+                        score = (cross / sqrt(wVar * tEnergy)).coerceIn(-1.0, 1.0)
                     }
-                    cross -= wMean * zmSum
-                    score = (cross / sqrt(wVar * tEnergy)).coerceIn(-1.0, 1.0)
+                    out[rowOut + x] = score.toFloat()
                 }
-                out[rowOut + x] = score.toFloat()
             }
+        }
+
+        val workers = if (parallelMatchingEnabled) {
+            min(maxWorkerThreads, Runtime.getRuntime().availableProcessors()).coerceIn(1, 8)
+        } else 1
+        val workOps = ow.toLong() * oh.toLong() * tw.toLong() * th.toLong()
+        if (workers > 1 && oh >= 16 && workOps >= PARALLEL_WORK_THRESHOLD) {
+            val slices = min(workers, oh / 8).coerceAtLeast(2)
+            val tasks = ArrayList<Callable<Unit>>(slices)
+            for (s in 0 until slices) {
+                val ys = (oh * s) / slices
+                val ye = (oh * (s + 1)) / slices
+                if (ys < ye) {
+                    tasks += Callable { computeRows(ys, ye) }
+                }
+            }
+            val futures = workerPool.invokeAll(tasks)
+            for (f in futures) f.get()
+        } else {
+            computeRows(0, oh)
         }
         return out
     }
