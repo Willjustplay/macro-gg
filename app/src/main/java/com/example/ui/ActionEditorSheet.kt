@@ -79,8 +79,12 @@ import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
+import com.example.data.FinishMacroAction
+import com.example.data.FinishMacroMode
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
+import com.example.data.JumpAction
+import com.example.data.JumpMode
 import com.example.data.LaunchAppAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
@@ -100,6 +104,7 @@ import com.example.data.TrackObjectAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.create
+import com.example.data.findAction
 import com.example.data.kind
 import com.example.data.summary
 import kotlinx.coroutines.Dispatchers
@@ -111,6 +116,7 @@ import kotlin.math.roundToInt
 fun ActionEditorSheet(
     action: Action,
     currentMacroId: String,
+    macroActions: List<Action> = emptyList(),
     allMacros: List<Macro>,
     images: List<ImageAsset>,
     imageFolders: List<String>,
@@ -985,23 +991,42 @@ fun ActionEditorSheet(
                             if (a.targetNumber == a.targetNumber.toLong().toDouble()) {
                                 a.targetNumber.toLong().toString()
                             } else {
-                                a.targetNumber.toString()
+                                java.math.BigDecimal.valueOf(a.targetNumber).stripTrailingZeros().toPlainString()
                             }
                         }
                         var numText by remember(a.id) { mutableStateOf(initNumStr) }
+                        val parsedPreview = com.example.vision.TextConditionEvaluator.parseSmartNumber(numText)
+                        val formattedPreview = parsedPreview?.let { v ->
+                            if (v == v.toLong().toDouble()) {
+                                String.format(java.util.Locale.forLanguageTag("id-ID"), "%,d", v.toLong())
+                            } else {
+                                java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()
+                            }
+                        }
                         OutlinedTextField(
                             value = numText,
                             onValueChange = { raw ->
-                                val filtered = raw.filter { it.isDigit() || it == '.' || it == ',' || it == '-' }
+                                val filtered = raw.filter {
+                                    it.isDigit() || it == '.' || it == ',' || it == '-' || it == ' ' || it in "KkMmBb"
+                                }
                                 numText = filtered
-                                filtered.replace(',', '.').toDoubleOrNull()?.let { parsed ->
+                                com.example.vision.TextConditionEvaluator.parseSmartNumber(filtered)?.let { parsed ->
                                     draft = a.copy(targetNumber = parsed)
                                 }
                             },
-                            label = { Text("Nilai pembanding (mendukung desimal & negatif)") },
-                            supportingText = { Text("Contoh: 500, 12.5, atau 10000 (otomatis baca format 10K / 1,500)") },
+                            label = { Text("Nilai pembanding (angka, ribuan, K/M/B, desimal)") },
+                            supportingText = {
+                                Text(
+                                    if (formattedPreview != null) {
+                                        "Terbaca sebagai: $formattedPreview (mendukung 500000, 500.000, 500K, 1.5M)"
+                                    } else {
+                                        "Format angka belum valid — contoh: 500000, 500.000, 500K, atau 12.5"
+                                    },
+                                    color = if (formattedPreview != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                )
+                            },
                             singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -1271,6 +1296,307 @@ fun ActionEditorSheet(
                         Switch(checked = a.returnAfter, onCheckedChange = { draft = a.copy(returnAfter = it) })
                     }
                     NumberField("Jeda sesudah (ms)", a.delayAfterMs.toString()) {
+                        draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
+                    }
+                }
+
+                is FinishMacroAction -> {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                    ) {
+                        Text(
+                            "Cocok diletakkan di dalam Macro Pasif (atau cabang Jika ditemukan): begitu hasil tercapai, macro pasif langsung diselesaikan dan switch kembali ke Macro Aktif tanpa menghentikan eksekusi yang sedang berjalan.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                    Text("Arah Switch Setelah Selesai:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FinishMacroMode.entries.forEach { m ->
+                            val selected = a.mode == m
+                            Surface(
+                                onClick = { draft = a.copy(mode = m) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                border = if (selected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        m.label,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        m.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (a.mode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE) {
+                        val activeCandidates = allMacros.filter { it.id != currentMacroId && !it.isPassive }
+                        Text("Pilih Macro Aktif Tujuan:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        if (activeCandidates.isEmpty()) {
+                            Text(
+                                "Belum ada macro aktif lain. Buat macro aktif di beranda terlebih dahulu.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                activeCandidates.forEach { target ->
+                                    val tag = if (com.example.data.MacroSecurity.isExpired(target)) " (Habis)" else ""
+                                    FilterChip(
+                                        selected = a.targetMacroId == target.id,
+                                        onClick = {
+                                            draft = a.copy(targetMacroId = target.id, targetMacroName = target.name)
+                                        },
+                                        label = { Text(target.name + tag) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                is JumpAction -> {
+                    val enclosingIdx = macroActions.indexOfFirst { top ->
+                        top.id == a.id || listOf(top).findAction(a.id) != null
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                    ) {
+                        Text(
+                            "Meloncat maju melewati aksi tertentu atau meloncat kembali ke belakang ke aksi sebelumnya tanpa mengulang dari awal dan tanpa menghentikan macro.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+
+                    Text("Mode Loncat Aksi:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        JumpMode.entries.forEach { m ->
+                            val selected = a.mode == m
+                            Surface(
+                                onClick = { draft = a.copy(mode = m) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                border = if (selected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        m.label,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        m.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    val isTargetMode = a.mode == JumpMode.SKIP_AFTER_ACTION || a.mode == JumpMode.JUMP_TO_ACTION
+                    if (isTargetMode) {
+                        Text(
+                            if (a.mode == JumpMode.SKIP_AFTER_ACTION) "Pilih Aksi yang Ingin Dilewati (lanjut sesudahnya):"
+                            else "Pilih Aksi Tujuan (Mundur / Maju):",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        val selectedIdx = macroActions.indexOfFirst { it.id == a.targetActionId }
+                        if (selectedIdx >= 0) {
+                            val previewText = if (a.mode == JumpMode.SKIP_AFTER_ACTION) {
+                                val nextIdx = selectedIdx + 1
+                                if (nextIdx < macroActions.size) {
+                                    "Hasil: Lewati #${selectedIdx + 1} (${macroActions[selectedIdx].kind.label}) → mendarat di #${nextIdx + 1} (${macroActions[nextIdx].kind.label})"
+                                } else {
+                                    "Hasil: Lewati #${selectedIdx + 1} (${macroActions[selectedIdx].kind.label}) → selesai siklus loop ini"
+                                }
+                            } else {
+                                val dirLabel = when {
+                                    enclosingIdx >= 0 && selectedIdx < enclosingIdx -> "mundur ke belakang"
+                                    enclosingIdx >= 0 && selectedIdx > enclosingIdx -> "maju ke depan"
+                                    else -> "ke"
+                                }
+                                "Hasil: Loncat $dirLabel → langsung jalan dari #${selectedIdx + 1} (${macroActions[selectedIdx].kind.label})"
+                            }
+                            if (previewText.isNotBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Color(0xFF7C3AED).copy(alpha = 0.14f)
+                                ) {
+                                    Text(
+                                        previewText,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF7C3AED),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        if (macroActions.isEmpty()) {
+                            Text(
+                                "Belum ada aksi lain di daftar macro ini.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                macroActions.forEachIndexed { idx, candidate ->
+                                    val isSelf = candidate.id == a.id
+                                    val isSelected = candidate.id == a.targetActionId
+                                    val dirBadge = when {
+                                        isSelf -> "Aksi ini"
+                                        enclosingIdx >= 0 && idx < enclosingIdx -> "← Mundur"
+                                        enclosingIdx >= 0 && idx > enclosingIdx -> "→ Maju"
+                                        enclosingIdx == idx -> "Induk ini"
+                                        else -> ""
+                                    }
+                                    val labelForSummary = "#${idx + 1} ${candidate.kind.label}"
+                                    Surface(
+                                        onClick = {
+                                            if (!isSelf || a.mode == JumpMode.SKIP_AFTER_ACTION) {
+                                                draft = a.copy(
+                                                    targetActionId = candidate.id,
+                                                    targetActionLabel = labelForSummary
+                                                )
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = when {
+                                            isSelected -> MaterialTheme.colorScheme.primaryContainer
+                                            isSelf -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                        },
+                                        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = candidate.kind.accentColor().copy(alpha = 0.2f)
+                                            ) {
+                                                Text(
+                                                    "#${idx + 1}",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = candidate.kind.accentColor(),
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                            Column(Modifier.weight(1f)) {
+                                                Text(
+                                                    candidate.kind.label,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    candidate.summary(),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            if (dirBadge.isNotBlank()) {
+                                                Text(
+                                                    dirBadge,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = when {
+                                                        dirBadge.startsWith("←") -> Color(0xFF0284C7)
+                                                        dirBadge.startsWith("→") -> Color(0xFF059669)
+                                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        val safeSteps = a.stepCount.coerceAtLeast(1)
+                        Text(
+                            if (a.mode == JumpMode.SKIP_FORWARD_STEPS) "Jumlah Aksi yang Dilewati ke Depan:"
+                            else "Jumlah Langkah Kembali ke Belakang:",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(1, 2, 3, 4, 5).forEach { n ->
+                                FilterChip(
+                                    selected = safeSteps == n,
+                                    onClick = { draft = a.copy(stepCount = n) },
+                                    label = {
+                                        Text(
+                                            if (a.mode == JumpMode.SKIP_FORWARD_STEPS) "+$n aksi" else "-$n aksi"
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        NumberField("Jumlah langkah custom (N)", safeSteps.toString()) {
+                            draft = a.copy(stepCount = (it.toIntOrNull() ?: safeSteps).coerceIn(1, 999))
+                        }
+                        if (enclosingIdx >= 0) {
+                            val relPreview = if (a.mode == JumpMode.SKIP_FORWARD_STEPS) {
+                                val landing = enclosingIdx + 1 + safeSteps
+                                if (landing < macroActions.size) {
+                                    "Hasil dari #${enclosingIdx + 1}: Lewati $safeSteps aksi → mendarat di #${landing + 1} (${macroActions[landing].kind.label})"
+                                } else {
+                                    "Hasil dari #${enclosingIdx + 1}: Lewati $safeSteps aksi → selesai siklus loop ini"
+                                }
+                            } else {
+                                val landing = (enclosingIdx - safeSteps).coerceAtLeast(0)
+                                "Hasil dari #${enclosingIdx + 1}: Kembali $safeSteps langkah → mendarat di #${landing + 1} (${macroActions[landing].kind.label})"
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF7C3AED).copy(alpha = 0.14f)
+                            ) {
+                                Text(
+                                    relPreview,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF7C3AED),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    NumberField("Jeda sebelum loncat (ms)", a.delayAfterMs.toString()) {
                         draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
                     }
                 }
@@ -1727,7 +2053,7 @@ private fun BranchSectionEditor(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
                     ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT,
                     ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
-                    ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
+                    ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     quickKinds.forEach { k ->

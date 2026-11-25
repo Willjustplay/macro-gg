@@ -12,6 +12,8 @@ import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ExitAppMode
+import com.example.data.FinishMacroAction
+import com.example.data.FinishMacroMode
 import com.example.data.ImageAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
@@ -543,6 +545,14 @@ object AutomationCoordinator {
                     if (linked != null && MacroSecurity.checkLinkedRun(linked, now) == null && check(linked)) {
                         return true
                     }
+                } else if (a is FinishMacroAction &&
+                    a.mode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE &&
+                    a.targetMacroId.isNotBlank()
+                ) {
+                    val linked = localStore?.getMacroById(a.targetMacroId)
+                    if (linked != null && MacroSecurity.checkDirectRun(linked, now) == null && check(linked)) {
+                        return true
+                    }
                 }
             }
             return false
@@ -751,16 +761,53 @@ object AutomationCoordinator {
 
                 override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
                 override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
-                override suspend fun recognizeText(region: Region?): List<OcrBlock> {
+                override suspend fun recognizeText(region: Region?): List<OcrBlock> =
+                    recognizeText(region, enhanced = false)
+
+                override suspend fun recognizeText(region: Region?, enhanced: Boolean): List<OcrBlock> {
                     val bmp = ScreenCaptureService.captureBitmapCopy() ?: return emptyList()
                     return try {
-                        ScreenTextRecognizer.recognize(bmp, region)
+                        val liveW = screenWidth.coerceAtLeast(1)
+                        val liveH = screenHeight.coerceAtLeast(1)
+                        val needsAlign = region != null && (bmp.width != liveW || bmp.height != liveH)
+                        val bmpRegion = if (region != null && needsAlign) {
+                            val sx = bmp.width.toDouble() / liveW.toDouble()
+                            val sy = bmp.height.toDouble() / liveH.toDouble()
+                            Region(
+                                left = (region.left * sx).toInt().coerceIn(0, (bmp.width - 1).coerceAtLeast(0)),
+                                top = (region.top * sy).toInt().coerceIn(0, (bmp.height - 1).coerceAtLeast(0)),
+                                right = (region.right * sx).toInt().coerceIn(1, bmp.width),
+                                bottom = (region.bottom * sy).toInt().coerceIn(1, bmp.height)
+                            )
+                        } else {
+                            region
+                        }
+                        val rawBlocks = ScreenTextRecognizer.recognize(bmp, bmpRegion, enhanced = enhanced)
+                        if (needsAlign && rawBlocks.isNotEmpty()) {
+                            val invX = liveW.toDouble() / bmp.width.coerceAtLeast(1).toDouble()
+                            val invY = liveH.toDouble() / bmp.height.coerceAtLeast(1).toDouble()
+                            rawBlocks.map { b ->
+                                OcrBlock(
+                                    text = b.text,
+                                    left = (b.left * invX).toInt(),
+                                    top = (b.top * invY).toInt(),
+                                    right = (b.right * invX).toInt(),
+                                    bottom = (b.bottom * invY).toInt()
+                                )
+                            }
+                        } else {
+                            rawBlocks
+                        }
                     } finally {
                         bmp.recycle()
                     }
                 }
                 override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
                 override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)
+                override fun onActiveMacroSwitched(target: Macro) {
+                    selectMacro(target)
+                    _currentLoop.value = 0
+                }
                 override fun onMatchFound(match: MatchResult, label: String) {
                     if (localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)

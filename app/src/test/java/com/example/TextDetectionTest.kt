@@ -187,4 +187,133 @@ class TextDetectionTest {
         assertEquals(bodyReordered, bodyReordered.reorderInContainer(ContainerRef.ROOT, -1, 5))
         assertEquals(bodyReordered, bodyReordered.reorderInContainer(ContainerRef.ROOT, 1, 1))
     }
+
+    @Test
+    fun parsesSpaceThousandsDotThousandsAndOcrConfusedGameDigits() {
+        // Space-separated game HUD thousands (Clash of Clans gold/elixir style)
+        assertEquals(listOf(450_000.0), TextConditionEvaluator.extractNumbers("450 000"))
+        assertEquals(listOf(1_250_000.0), TextConditionEvaluator.extractNumbers("1 250 000"))
+        assertEquals(listOf(450_000.0, 1_000_000.0), TextConditionEvaluator.extractNumbers("450 000 / 1 000 000"))
+
+        // Indonesian/European single-dot thousands vs true decimals & K suffix
+        assertEquals(listOf(500_000.0), TextConditionEvaluator.extractNumbers("500.000"))
+        assertEquals(listOf(1_500.0), TextConditionEvaluator.extractNumbers("1.500"))
+        assertEquals(listOf(10_000.0), TextConditionEvaluator.extractNumbers("10.000"))
+        assertEquals(listOf(0.125), TextConditionEvaluator.extractNumbers("0.125"))
+        assertEquals(listOf(12.5), TextConditionEvaluator.extractNumbers("12.5"))
+        assertEquals(listOf(1_250.0), TextConditionEvaluator.extractNumbers("1.250K"))
+        assertEquals(listOf(450_000.0), TextConditionEvaluator.extractNumbers("450, 000"))
+
+        // Game-font OCR digit confusions (O->0, I/l->1, S->5, inner B->8) without mangling pure words
+        assertEquals(listOf(450_000.0), TextConditionEvaluator.extractNumbers("Gold 45O 000"))
+        assertEquals(listOf(450_000.0), TextConditionEvaluator.extractNumbers("450 OOO"))
+        assertEquals(listOf(150_000.0), TextConditionEvaluator.extractNumbers("I50,000"))
+        assertEquals(listOf(500_000.0), TextConditionEvaluator.extractNumbers("S00.000"))
+        assertEquals(listOf(480_000.0), TextConditionEvaluator.extractNumbers("4B0 000"))
+        assertEquals(listOf(2_000_000_000.0), TextConditionEvaluator.extractNumbers("2B"))
+        assertEquals(emptyList<Double>(), TextConditionEvaluator.extractNumbers("BOSS GOLD SKIP"))
+
+        // User target input smart parsing
+        assertEquals(500_000.0, TextConditionEvaluator.parseSmartNumber("500.000")!!, 0.001)
+        assertEquals(1_000_000.0, TextConditionEvaluator.parseSmartNumber("1.000.000")!!, 0.001)
+        assertEquals(500_000.0, TextConditionEvaluator.parseSmartNumber("500K")!!, 0.001)
+        assertEquals(1_500_000.0, TextConditionEvaluator.parseSmartNumber("1.5M")!!, 0.001)
+    }
+
+    @Test
+    fun mergedSameLineBlocksEvaluateGreaterAndLessWithoutFragmentFalsePositives() {
+        // ML Kit split "450 000" into two adjacent blocks on the same row
+        val splitLoot = listOf(
+            OcrBlock("450", 100, 50, 160, 80),
+            OcrBlock("000", 168, 50, 228, 80)
+        )
+
+        val gtMatch = TextConditionEvaluator.evaluate(
+            TextAction(compareMode = TextCompareMode.GREATER_THAN, targetNumber = 300_000.0),
+            splitLoot
+        )
+        assertTrue(gtMatch.matched)
+        assertEquals(450_000.0, gtMatch.parsedNumber!!, 0.001)
+
+        // MUST NOT false-match "< 100000" on the unmerged "450" or "000" fragments!
+        val ltShouldNotMatch = TextConditionEvaluator.evaluate(
+            TextAction(compareMode = TextCompareMode.LESS_THAN, targetNumber = 100_000.0),
+            splitLoot
+        )
+        assertFalse(ltShouldNotMatch.matched)
+
+        // When loot actually drops to 85 000, "< 100000" MUST match!
+        val lowLoot = listOf(
+            OcrBlock("85", 100, 50, 140, 80),
+            OcrBlock("000", 148, 50, 208, 80)
+        )
+        val ltMatch = TextConditionEvaluator.evaluate(
+            TextAction(compareMode = TextCompareMode.LESS_THAN, targetNumber = 100_000.0),
+            lowLoot
+        )
+        assertTrue(ltMatch.matched)
+        assertEquals(85_000.0, ltMatch.parsedNumber!!, 0.001)
+    }
+
+    @Test
+    fun ocrTolerantTextMatchingAndEnhancedOcrFallbackInMacroRunner() = runTest {
+        // OCR-confusable text match ("C1aim!" matches "Claim", "Attack  Now" matches "Attack Now")
+        val fuzzy1 = TextConditionEvaluator.evaluate(
+            TextAction(compareMode = TextCompareMode.CONTAINS, query = "Claim"),
+            listOf(OcrBlock("C1aim!", 50, 50, 180, 90))
+        )
+        assertTrue(fuzzy1.matched)
+
+        val fuzzy2 = TextConditionEvaluator.evaluate(
+            TextAction(compareMode = TextCompareMode.EQUALS, query = "Attack Now"),
+            listOf(OcrBlock("Attack  Now", 50, 50, 220, 90))
+        )
+        assertTrue(fuzzy2.matched)
+
+        // MacroRunner automatically retries with enhanced=true HUD OCR when fast RGB pass returns empty/missed
+        val clicks = mutableListOf<Pair<Int, Int>>()
+        val calls = mutableListOf<Boolean>()
+        val runtime = object : MacroRuntime {
+            override fun isStopped() = false
+            override suspend fun waitIfPaused() {}
+            override suspend fun sleep(ms: Long) {}
+            override suspend fun click(x: Int, y: Int, durationMs: Long): Boolean {
+                clicks += x to y
+                return true
+            }
+            override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long) = true
+            override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float) = true
+            override fun captureFrame(): Frame? = null
+            override fun samplePixelArgb(x: Int, y: Int): Int? = null
+            override suspend fun recognizeText(region: Region?): List<OcrBlock> = emptyList()
+            override suspend fun recognizeText(region: Region?, enhanced: Boolean): List<OcrBlock> {
+                calls += enhanced
+                return if (enhanced) listOf(OcrBlock("620 000", 120, 40, 260, 80)) else emptyList()
+            }
+            override fun loadTemplate(name: String): PreparedTemplate? = null
+            override fun log(level: LogLevel, message: String) {}
+        }
+
+        val macro = Macro(
+            loopCount = 1,
+            actions = listOf(
+                TextAction(
+                    compareMode = TextCompareMode.GREATER_THAN,
+                    targetNumber = 500_000.0,
+                    timeoutMs = 0,
+                    clickOnFound = false,
+                    thenActions = listOf(ClickAction(x = 700, y = 800, delayAfterMs = 0)),
+                    delayAfterMs = 0
+                )
+            )
+        )
+
+        MacroRunner(runtime).run(macro)
+
+        assertEquals(listOf(false, true), calls)
+        assertEquals(listOf(700 to 800), clicks)
+
+        // Wide narrow HUD strip (500x40) must be upscaled (> 1f) unlike the old width<420 bug
+        assertTrue(com.example.vision.ScreenTextRecognizer.computeAdaptiveScale(500, 40, isCropped = true) >= 3.0f)
+    }
 }

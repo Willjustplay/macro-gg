@@ -137,6 +137,7 @@ import com.example.data.childList
 import com.example.data.create
 import com.example.data.duplicateAction
 import com.example.data.insertInto
+import com.example.data.isStuckAction
 import com.example.data.kind
 import com.example.data.moveAction
 import com.example.data.removeAction
@@ -784,9 +785,11 @@ fun MacroEditorScreen(
 
     // Edit Action Sheet
     editingAction?.let { act ->
+        val ownerActions = if (macro.isStuckAction(act.id)) macro.stuckActions else macro.actions
         ActionEditorSheet(
             action = act,
             currentMacroId = macro.id,
+            macroActions = ownerActions,
             allMacros = allMacros,
             images = images,
             imageFolders = imageFolders,
@@ -1406,7 +1409,7 @@ private fun AddActionPickerSheet(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
         "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
-        "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP)
+        "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)
     )
 
     ModalBottomSheet(onDismissRequest = onDismiss) {

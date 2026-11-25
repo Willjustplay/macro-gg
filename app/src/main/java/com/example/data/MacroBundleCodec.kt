@@ -63,6 +63,11 @@ object MacroBundleCodec {
             for (action in m.allActionsSequence()) {
                 if (action is RunMacroAction && action.targetMacroId.isNotBlank()) {
                     lookupMacro(action.targetMacroId)?.let { visit(it) }
+                } else if (action is FinishMacroAction &&
+                    action.mode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE &&
+                    action.targetMacroId.isNotBlank()
+                ) {
+                    lookupMacro(action.targetMacroId)?.let { visit(it) }
                 }
             }
         }
@@ -178,8 +183,8 @@ object MacroBundleCodec {
             val cloned = macro.copy(
                 id = idGenerator(),
                 originId = macro.originId.ifBlank { macro.id },
-                actions = macro.actions.map { it.withNewIds() },
-                stuckActions = macro.stuckActions.map { it.withNewIds() }
+                actions = macro.actions.cloneWithRemappedIds(),
+                stuckActions = macro.stuckActions.cloneWithRemappedIds()
             )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
         }
@@ -248,10 +253,14 @@ object MacroBundleCodec {
         val idRemap = HashMap<String, String>()
         rawMacros.forEach { m -> idRemap[m.id] = idGenerator() }
         val remappedMacros = rawMacros.map { m ->
-            fun remapList(list: List<Action>) = list.map { it.withNewIds() }.mapAllActions { a ->
-                if (a is RunMacroAction && a.targetMacroId in idRemap) {
-                    a.copy(targetMacroId = idRemap[a.targetMacroId]!!)
-                } else a
+            fun remapList(list: List<Action>) = list.cloneWithRemappedIds().mapAllActions { a ->
+                when {
+                    a is RunMacroAction && a.targetMacroId in idRemap ->
+                        a.copy(targetMacroId = idRemap[a.targetMacroId]!!)
+                    a is FinishMacroAction && a.targetMacroId in idRemap ->
+                        a.copy(targetMacroId = idRemap[a.targetMacroId]!!)
+                    else -> a
+                }
             }
             m.copy(
                 id = idRemap[m.id] ?: idGenerator(),

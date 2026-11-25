@@ -112,10 +112,20 @@ fun List<Action>.duplicateAction(id: String): List<Action> {
     val idx = indexOfFirst { it.id == id }
     if (idx >= 0) {
         val list = toMutableList()
-        list.add(idx + 1, this[idx].withNewIds())
+        list.add(idx + 1, listOf(this[idx]).cloneWithRemappedIds().first())
         return list
     }
     return map { a -> a.mapChildLists { it.duplicateAction(id) } }
+}
+
+/** Clones an action tree with fresh IDs while keeping internal [JumpAction.targetActionId] links intact. */
+fun List<Action>.cloneWithRemappedIds(idGenerator: () -> String = { newId() }): List<Action> {
+    if (isEmpty()) return this
+    val idMap = HashMap<String, String>()
+    for (a in walk()) {
+        idMap[a.id] = idGenerator()
+    }
+    return map { it.withMappedIds(idMap) }
 }
 
 fun List<Action>.insertInto(ref: ContainerRef, action: Action): List<Action> {

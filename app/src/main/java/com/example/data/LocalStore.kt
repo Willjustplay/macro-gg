@@ -196,8 +196,8 @@ class LocalStore(context: Context) {
             id = newMacroId,
             name = "${macro.name} (Salinan)",
             logoImage = copiedLogo,
-            actions = macro.actions.map { it.withNewIds() },
-            stuckActions = macro.stuckActions.map { it.withNewIds() },
+            actions = macro.actions.cloneWithRemappedIds(),
+            stuckActions = macro.stuckActions.cloneWithRemappedIds(),
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )
@@ -783,12 +783,18 @@ class LocalStore(context: Context) {
         var overwrittenCount = 0
         var extendedCount = 0
         for ((incoming, existing) in matchedPairs) {
-            val relinked = incoming.copy(
-                actions = incoming.actions.mapAllActions { a ->
-                    if (a is RunMacroAction && a.targetMacroId in finalIdMap) {
+            fun relinkList(list: List<Action>): List<Action> = list.mapAllActions { a ->
+                when {
+                    a is RunMacroAction && a.targetMacroId in finalIdMap ->
                         a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
-                    } else a
+                    a is FinishMacroAction && a.targetMacroId in finalIdMap ->
+                        a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
+                    else -> a
                 }
+            }
+            val relinked = incoming.copy(
+                actions = relinkList(incoming.actions),
+                stuckActions = relinkList(incoming.stuckActions)
             )
             if (existing != null) {
                 val res = MacroSecurity.mergeOverwrittenMacro(existing, relinked, now)

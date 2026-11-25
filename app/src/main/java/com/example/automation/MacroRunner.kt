@@ -5,7 +5,11 @@ import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
+import com.example.data.FinishMacroAction
+import com.example.data.FinishMacroMode
 import com.example.data.ImageAction
+import com.example.data.JumpAction
+import com.example.data.JumpMode
 import com.example.data.LaunchAppAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
@@ -70,8 +74,10 @@ interface MacroRuntime {
     fun captureFrame(): Frame?
     fun samplePixelArgb(x: Int, y: Int): Int?
     suspend fun recognizeText(region: Region?): List<OcrBlock> = emptyList()
+    suspend fun recognizeText(region: Region?, enhanced: Boolean): List<OcrBlock> = recognizeText(region)
     fun loadTemplate(name: String): PreparedTemplate?
     fun loadMacro(id: String): Macro? = null
+    fun onActiveMacroSwitched(target: Macro) {}
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
@@ -81,10 +87,22 @@ interface MacroRuntime {
 
 private enum class FlowControl {
     NEXT,
+    JUMP,
     RESTART_MACRO,
     RESTART_ROOT,
+    FINISH_TO_ACTIVE_CONTINUE,
+    FINISH_TO_ACTIVE_RESTART,
+    SWITCH_TO_ACTIVE_MACRO,
     STOP_MACRO
 }
+
+private data class PendingJump(
+    val mode: JumpMode,
+    val targetActionId: String,
+    val targetActionLabel: String,
+    val stepCount: Int,
+    val sourceActionId: String
+)
 
 /**
  * Recursive Macrorify-style macro executor supporting:
@@ -94,7 +112,7 @@ private enum class FlowControl {
  * - Per-action success probability ([Action.chancePercent]) for random events
  * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
  * - Image, OCR Text/Value, and Color detection with full Then/Else branches + Found/NotFound flow modes
- * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection & Passive Mode support
+ * - Nested loop blocks, [JumpAction] forward/backward jumps, & Chained/Linked Macros ([RunMacroAction]) with cycle protection, Passive Mode & [FinishMacroAction]
  * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
  * - Recorded gesture playback with speed multiplier
  * - Auto-Fix Stuck Macro Watchdog ([Macro.autoRecoverStuckSec], [Macro.stuckActions], [StuckRecoveryMode])
@@ -106,6 +124,8 @@ class MacroRunner(
     private var lastProgressMs: Long = 0L
     private var rootWatchdogMacro: Macro? = null
     private var inStuckRecovery: Boolean = false
+    private var pendingSwitchMacro: Macro? = null
+    private var pendingJump: PendingJump? = null
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -117,10 +137,26 @@ class MacroRunner(
             runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, denial))
             return
         }
-        rootWatchdogMacro = macro
-        inStuckRecovery = false
-        lastProgressMs = now
-        runInternal(macro, depth = 0)
+        var currentMacro = macro
+        pendingSwitchMacro = null
+        pendingJump = null
+        while (!runtime.isStopped()) {
+            rootWatchdogMacro = currentMacro
+            inStuckRecovery = false
+            pendingJump = null
+            lastProgressMs = runtime.nowMs()
+            val flow = runInternal(currentMacro, depth = 0)
+            if (flow == FlowControl.SWITCH_TO_ACTIVE_MACRO) {
+                val nextTarget = pendingSwitchMacro
+                pendingSwitchMacro = null
+                if (nextTarget != null && !runtime.isStopped()) {
+                    runtime.onActiveMacroSwitched(nextTarget)
+                    currentMacro = nextTarget
+                    continue
+                }
+            }
+            break
+        }
     }
 
     private suspend fun runInternal(macro: Macro, depth: Int): FlowControl {
@@ -161,9 +197,29 @@ class MacroRunner(
             if (depth == 0) runtime.onLoopChanged(iteration)
             runtime.log(LogLevel.INFO, if (depth == 0) "Loop #$iteration dimulai." else "Sub-macro '${macro.name}' loop #$iteration.")
 
-            val flow = executeList(macro.actions, macro, startedAt, maxDurationMs, depth)
+            pendingJump = null
+            val flow = executeList(macro.actions, macro, startedAt, maxDurationMs, depth, isRootList = true)
+            pendingJump = null
             when (flow) {
                 FlowControl.STOP_MACRO -> return FlowControl.STOP_MACRO
+                FlowControl.SWITCH_TO_ACTIVE_MACRO -> return FlowControl.SWITCH_TO_ACTIVE_MACRO
+                FlowControl.FINISH_TO_ACTIVE_CONTINUE -> {
+                    if (depth > 0) return FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                    runtime.log(LogLevel.INFO, "Siklus '${macro.name}' diselesaikan — lanjut ke siklus berikutnya.")
+                    val d = if (macro.loopDelayMs > 0) macro.loopDelayMs else if (maxLoops == Int.MAX_VALUE && runtime.nowMs() == now) 50L else 0L
+                    if (d > 0L && !runtime.isStopped()) runtime.sleep(d)
+                    continue
+                }
+                FlowControl.FINISH_TO_ACTIVE_RESTART -> {
+                    if (depth > 0) return FlowControl.FINISH_TO_ACTIVE_RESTART
+                    runtime.log(LogLevel.INFO, "Macro aktif '${macro.name}' diulang dari aksi pertama tanpa berhenti.")
+                    if (maxLoops != Int.MAX_VALUE && iteration >= maxLoops) {
+                        iteration = (maxLoops - 1).coerceAtLeast(0)
+                    }
+                    val d = if (macro.loopDelayMs > 0) macro.loopDelayMs else if (runtime.nowMs() == now) 50L else 0L
+                    if (d > 0L && !runtime.isStopped()) runtime.sleep(d)
+                    continue
+                }
                 FlowControl.RESTART_ROOT -> {
                     if (depth > 0) return FlowControl.RESTART_ROOT
                     runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal setelah pemulihan Anti-Macet...")
@@ -175,7 +231,7 @@ class MacroRunner(
                     if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
                     continue
                 }
-                FlowControl.NEXT -> {
+                FlowControl.NEXT, FlowControl.JUMP -> {
                     if (!runtime.isStopped() && iteration < maxLoops) {
                         val effectiveDelay = if (macro.loopDelayMs > 0) {
                             macro.loopDelayMs
@@ -188,8 +244,14 @@ class MacroRunner(
                         if (effectiveDelay > 0L) {
                             val waitFlow = sleepWatchingStuck(effectiveDelay, macro, startedAt, maxDurationMs, depth)
                             if (waitFlow != FlowControl.NEXT) {
-                                if (waitFlow == FlowControl.STOP_MACRO) return FlowControl.STOP_MACRO
-                                if (waitFlow == FlowControl.RESTART_ROOT && depth > 0) return FlowControl.RESTART_ROOT
+                                when (waitFlow) {
+                                    FlowControl.STOP_MACRO -> return FlowControl.STOP_MACRO
+                                    FlowControl.SWITCH_TO_ACTIVE_MACRO -> return FlowControl.SWITCH_TO_ACTIVE_MACRO
+                                    FlowControl.FINISH_TO_ACTIVE_CONTINUE,
+                                    FlowControl.FINISH_TO_ACTIVE_RESTART,
+                                    FlowControl.RESTART_ROOT -> if (depth > 0) return waitFlow
+                                    else -> Unit
+                                }
                                 continue
                             }
                         }
@@ -256,15 +318,20 @@ class MacroRunner(
         return when (effectiveMode) {
             StuckRecoveryMode.RUN_WATCHDOG_ACTIONS -> {
                 inStuckRecovery = true
+                val savedJump = pendingJump
+                pendingJump = null
                 val recFlow = try {
                     runtime.log(LogLevel.WARN, "Menjalankan ${watchdog.stuckActions.size} aksi Anti-Macet di luar aksi utama...")
-                    executeList(watchdog.stuckActions, watchdog, startedAt, maxDurationMs, depth = 0)
+                    executeList(watchdog.stuckActions, watchdog, startedAt, maxDurationMs, depth = 0, isRootList = true)
                 } finally {
+                    pendingJump = savedJump
                     inStuckRecovery = false
                     lastProgressMs = runtime.nowMs()
                 }
                 when {
                     runtime.isStopped() || recFlow == FlowControl.STOP_MACRO -> FlowControl.STOP_MACRO
+                    recFlow == FlowControl.SWITCH_TO_ACTIVE_MACRO -> FlowControl.SWITCH_TO_ACTIVE_MACRO
+                    recFlow == FlowControl.FINISH_TO_ACTIVE_RESTART -> restartSignal
                     recFlow == FlowControl.RESTART_MACRO || recFlow == FlowControl.RESTART_ROOT -> restartSignal
                     watchdog.stuckRestartAfter -> restartSignal
                     else -> null
@@ -286,14 +353,25 @@ class MacroRunner(
         macro: Macro,
         startedAt: Long,
         maxDurationMs: Long,
-        depth: Int
+        depth: Int,
+        isBranch: Boolean = false,
+        isRootList: Boolean = false
     ): FlowControl {
-        for (action in actions) {
+        var idx = 0
+        var lastJumpClockMs = Long.MIN_VALUE
+        var consecutiveZeroTimeJumps = 0
+
+        while (idx < actions.size) {
             runtime.waitIfPaused()
             if (runtime.isStopped()) return FlowControl.STOP_MACRO
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
-            if (!action.enabled) continue
+
+            val action = actions[idx]
+            if (!action.enabled) {
+                idx++
+                continue
+            }
 
             // Per-action Random Event probability roll (0..100%)
             val chance = action.chancePercent.coerceIn(0, 100)
@@ -301,12 +379,118 @@ class MacroRunner(
                 val roll = random.nextInt(100)
                 if (roll >= chance) {
                     runtime.log(LogLevel.INFO, "Random Event dilewati (${action.kind.label}, peluang $chance%).")
+                    idx++
                     continue
                 }
                 runtime.log(LogLevel.INFO, "Random Event aktif (${action.kind.label}, peluang $chance%).")
             }
 
             val flow = executeAction(action, macro, startedAt, maxDurationMs, depth)
+            if (flow == FlowControl.JUMP) {
+                val jump = pendingJump
+                if (jump == null) {
+                    idx++
+                    continue
+                }
+
+                // Resolve target index within this action list, or propagate to an enclosing list
+                val resolvedNextIdx: Int? = when (jump.mode) {
+                    JumpMode.SKIP_AFTER_ACTION -> {
+                        val targetIdx = actions.indexOfFirst { it.id == jump.targetActionId }
+                        if (targetIdx >= 0) {
+                            pendingJump = null
+                            val nextIdx = targetIdx + 1
+                            val targetName = "#${targetIdx + 1} (${actions[targetIdx].kind.label})"
+                            if (nextIdx < actions.size) {
+                                runtime.log(LogLevel.INFO, "Loncat melewati $targetName → lanjut di #${nextIdx + 1} (${actions[nextIdx].kind.label}).")
+                            } else {
+                                runtime.log(LogLevel.INFO, "Loncat melewati $targetName → selesai siklus ini.")
+                            }
+                            nextIdx
+                        } else if (isRootList) {
+                            pendingJump = null
+                            runtime.log(LogLevel.WARN, "Loncat Aksi dilewati: aksi tujuan '${jump.targetActionLabel.ifBlank { jump.targetActionId }}' tidak ditemukan.")
+                            idx + 1
+                        } else {
+                            null
+                        }
+                    }
+                    JumpMode.JUMP_TO_ACTION -> {
+                        val targetIdx = actions.indexOfFirst { it.id == jump.targetActionId }
+                        if (targetIdx >= 0) {
+                            pendingJump = null
+                            if (targetIdx == idx && actions[idx].id == jump.sourceActionId) {
+                                runtime.log(LogLevel.WARN, "Loncat Aksi ke diri sendiri (#${idx + 1}) dilewati agar tidak macet.")
+                                idx + 1
+                            } else {
+                                val dir = if (targetIdx < idx) "kembali ke belakang" else "maju"
+                                runtime.log(LogLevel.INFO, "Loncat $dir → #${targetIdx + 1} (${actions[targetIdx].kind.label}).")
+                                targetIdx
+                            }
+                        } else if (isRootList) {
+                            pendingJump = null
+                            runtime.log(LogLevel.WARN, "Loncat Aksi dilewati: aksi tujuan '${jump.targetActionLabel.ifBlank { jump.targetActionId }}' tidak ditemukan.")
+                            idx + 1
+                        } else {
+                            null
+                        }
+                    }
+                    JumpMode.SKIP_FORWARD_STEPS -> {
+                        if (isBranch && !isRootList) {
+                            null
+                        } else {
+                            pendingJump = null
+                            val skip = jump.stepCount.coerceAtLeast(1)
+                            val nextIdx = idx + 1 + skip
+                            if (nextIdx < actions.size) {
+                                runtime.log(LogLevel.INFO, "Loncat lewati +$skip aksi → lanjut di #${nextIdx + 1} (${actions[nextIdx].kind.label}).")
+                            } else {
+                                runtime.log(LogLevel.INFO, "Loncat lewati +$skip aksi → selesai siklus ini.")
+                            }
+                            nextIdx
+                        }
+                    }
+                    JumpMode.JUMP_BACKWARD_STEPS -> {
+                        if (isBranch && !isRootList) {
+                            null
+                        } else {
+                            pendingJump = null
+                            val back = jump.stepCount.coerceAtLeast(1)
+                            val nextIdx = (idx - back).coerceAtLeast(0)
+                            if (nextIdx == idx && actions[idx].id == jump.sourceActionId) {
+                                runtime.log(LogLevel.WARN, "Loncat mundur di aksi #1 tidak bisa mundur lagi — lanjut ke berikutnya.")
+                                idx + 1
+                            } else {
+                                runtime.log(LogLevel.INFO, "Loncat kembali -$back aksi ke belakang → #${nextIdx + 1} (${actions[nextIdx].kind.label}).")
+                                nextIdx
+                            }
+                        }
+                    }
+                }
+
+                if (resolvedNextIdx == null) {
+                    return FlowControl.JUMP
+                }
+
+                // Cooperative anti-spin guard for zero-delay backward jump loops
+                if (resolvedNextIdx <= idx) {
+                    val nowClock = runtime.nowMs()
+                    if (nowClock == lastJumpClockMs) {
+                        consecutiveZeroTimeJumps++
+                        if (consecutiveZeroTimeJumps >= 20) {
+                            consecutiveZeroTimeJumps = 0
+                            runtime.sleep(25L)
+                        }
+                    } else {
+                        lastJumpClockMs = nowClock
+                        consecutiveZeroTimeJumps = 0
+                    }
+                }
+
+                idx = resolvedNextIdx
+                continue
+            }
+
             if (flow != FlowControl.NEXT) return flow
 
             val extraRandom = if (macro.randomDelayMs > 0) random.nextLong(0, macro.randomDelayMs + 1) else 0L
@@ -315,6 +499,7 @@ class MacroRunner(
                 val delayFlow = sleepWatchingStuck(totalDelay, macro, startedAt, maxDurationMs, depth)
                 if (delayFlow != FlowControl.NEXT) return delayFlow
             }
+            idx++
         }
         return FlowControl.NEXT
     }
@@ -472,11 +657,86 @@ class MacroRunner(
                 )
                 markProgress()
                 val subFlow = runInternal(target, depth + 1)
-                when {
-                    subFlow == FlowControl.RESTART_ROOT -> FlowControl.RESTART_ROOT
-                    !action.returnAfter || subFlow == FlowControl.STOP_MACRO -> FlowControl.STOP_MACRO
-                    else -> FlowControl.NEXT
+                when (subFlow) {
+                    FlowControl.RESTART_ROOT -> FlowControl.RESTART_ROOT
+                    FlowControl.SWITCH_TO_ACTIVE_MACRO -> FlowControl.SWITCH_TO_ACTIVE_MACRO
+                    FlowControl.FINISH_TO_ACTIVE_CONTINUE -> {
+                        if (macro.isPassive && depth > 0) {
+                            FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                        } else {
+                            runtime.log(LogLevel.INFO, "Selesai dari '${target.name}' — kembali melanjutkan macro aktif '${macro.name}'.")
+                            markProgress()
+                            FlowControl.NEXT
+                        }
+                    }
+                    FlowControl.FINISH_TO_ACTIVE_RESTART -> {
+                        if (macro.isPassive && depth > 0) {
+                            FlowControl.FINISH_TO_ACTIVE_RESTART
+                        } else {
+                            runtime.log(LogLevel.INFO, "Selesai dari '${target.name}' — kembali mengulang macro aktif '${macro.name}' dari awal.")
+                            markProgress()
+                            FlowControl.FINISH_TO_ACTIVE_RESTART
+                        }
+                    }
+                    FlowControl.STOP_MACRO -> FlowControl.STOP_MACRO
+                    else -> if (!action.returnAfter) FlowControl.STOP_MACRO else FlowControl.NEXT
                 }
+            }
+
+            is FinishMacroAction -> {
+                markProgress()
+                when (action.mode) {
+                    FinishMacroMode.RETURN_TO_ACTIVE_CONTINUE -> {
+                        runtime.log(LogLevel.INFO, "Selesaikan Macro '${macro.name}' — langsung kembali & lanjutkan macro aktif.")
+                        FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                    }
+                    FinishMacroMode.RETURN_TO_ACTIVE_RESTART -> {
+                        runtime.log(LogLevel.INFO, "Selesaikan Macro '${macro.name}' — langsung kembali & ulangi macro aktif dari awal.")
+                        FlowControl.FINISH_TO_ACTIVE_RESTART
+                    }
+                    FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE -> {
+                        if (action.targetMacroId.isBlank()) {
+                            runtime.log(LogLevel.WARN, "Selesaikan Macro: macro aktif tujuan belum dipilih — kembali ke macro aktif pemanggil.")
+                            FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                        } else {
+                            val target = runtime.loadMacro(action.targetMacroId)
+                            if (target == null) {
+                                runtime.log(LogLevel.WARN, "Selesaikan Macro: macro tujuan '${action.targetMacroName}' tidak ditemukan — kembali ke macro aktif pemanggil.")
+                                FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                            } else {
+                                val denial = MacroSecurity.checkDirectRun(target, runtime.nowMs())
+                                if (denial != null) {
+                                    runtime.log(LogLevel.WARN, "Selesaikan Macro: ${MacroSecurity.denialMessage(target, denial)} — kembali ke macro aktif pemanggil.")
+                                    FlowControl.FINISH_TO_ACTIVE_CONTINUE
+                                } else {
+                                    runtime.log(LogLevel.INFO, "Selesaikan Macro '${macro.name}' — switch langsung ke macro aktif '${target.name}' tanpa berhenti.")
+                                    pendingSwitchMacro = target
+                                    FlowControl.SWITCH_TO_ACTIVE_MACRO
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            is JumpAction -> {
+                val needsTargetId = action.mode == JumpMode.SKIP_AFTER_ACTION || action.mode == JumpMode.JUMP_TO_ACTION
+                if (needsTargetId && action.targetActionId.isBlank()) {
+                    runtime.log(LogLevel.WARN, "Loncat Aksi dilewati: aksi tujuan belum dipilih.")
+                    return FlowControl.NEXT
+                }
+                if (action.delayAfterMs > 0L && !runtime.isStopped()) {
+                    val waitFlow = sleepWatchingStuck(action.delayAfterMs, macro, startedAt, maxDurationMs, depth)
+                    if (waitFlow != FlowControl.NEXT) return waitFlow
+                }
+                pendingJump = PendingJump(
+                    mode = action.mode,
+                    targetActionId = action.targetActionId,
+                    targetActionLabel = action.targetActionLabel,
+                    stepCount = action.stepCount.coerceAtLeast(1),
+                    sourceActionId = action.id
+                )
+                FlowControl.JUMP
             }
 
             is RecordAction -> {
@@ -1098,27 +1358,53 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
-        val transform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+        val liveW = runtime.screenWidth.coerceAtLeast(4)
+        val liveH = runtime.screenHeight.coerceAtLeast(4)
+        val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
         val scaledRegion = action.region?.let { transform.scaleRegion(it) }
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var lastOutcome = TextConditionEvaluator.evaluate(action, emptyList())
         var sawBlocks = false
 
+        fun updateBestOutcome(candidate: com.example.vision.TextMatchOutcome) {
+            if (candidate.matched) {
+                lastOutcome = candidate
+            } else if (candidate.allNumbers.isNotEmpty() || (!lastOutcome.allNumbers.isNotEmpty() && candidate.allText.isNotBlank())) {
+                lastOutcome = candidate
+            } else if (lastOutcome.allText.isBlank()) {
+                lastOutcome = candidate
+            }
+        }
+
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
-            val blocks = runtime.recognizeText(scaledRegion)
-            if (blocks.isNotEmpty()) sawBlocks = true
-            val outcome = TextConditionEvaluator.evaluate(action, blocks)
-            lastOutcome = outcome
-            if (outcome.matched) break
+
+            val fastBlocks = runtime.recognizeText(scaledRegion, enhanced = false)
+            if (fastBlocks.isNotEmpty()) sawBlocks = true
+            val fastOutcome = TextConditionEvaluator.evaluate(action, fastBlocks)
+            updateBestOutcome(fastOutcome)
+            if (fastOutcome.matched) break
+
+            // If fast RGB pass missed (common on outlined/colored game HUD digits), run high-contrast HUD OCR pass
+            val enhancedBlocks = runtime.recognizeText(scaledRegion, enhanced = true)
+            if (enhancedBlocks.isNotEmpty()) {
+                sawBlocks = true
+                val combined = (fastBlocks + enhancedBlocks).distinctBy { "${it.text.lowercase()}|${it.left / 12}|${it.top / 12}" }
+                val enhOutcome = TextConditionEvaluator.evaluate(action, combined)
+                updateBestOutcome(enhOutcome)
+                if (enhOutcome.matched) break
+            }
+
             if (runtime.nowMs() >= deadline) break
-            runtime.sleep(220L)
+            runtime.sleep(200L)
         }
 
         if (lastOutcome.matched) {
             val detail = if (action.compareMode.isNumeric && lastOutcome.parsedNumber != null) {
-                "nilai=${lastOutcome.parsedNumber} (${action.compareMode.shortLabel} ${action.targetNumber})"
+                val pStr = formatPlainNumber(lastOutcome.parsedNumber!!)
+                val tStr = formatPlainNumber(action.targetNumber)
+                "nilai=$pStr (${action.compareMode.shortLabel} $tStr)"
             } else {
                 "\"${lastOutcome.matchedText}\""
             }
@@ -1133,24 +1419,34 @@ class MacroRunner(
             if (action.clickOnFound) {
                 val cx = lastOutcome.matchedBlock?.centerX
                     ?: scaledRegion?.let { it.left + it.width / 2 }
-                    ?: (runtime.screenWidth / 2)
+                    ?: (liveW / 2)
                 val cy = lastOutcome.matchedBlock?.centerY
                     ?: scaledRegion?.let { it.top + it.height / 2 }
-                    ?: (runtime.screenHeight / 2)
-                val (tx, ty) = applyJitter(cx, cy, transform.scaleDistance(macro.jitterPx))
-                if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
+                    ?: (liveH / 2)
+                val (rawTx, rawTy) = applyJitter(cx, cy, transform.scaleDistance(macro.jitterPx))
+                val tx = rawTx.coerceIn(1, liveW - 2)
+                val ty = rawTy.coerceIn(1, liveH - 2)
+                if (runtime.click(tx, ty, 80L)) runtime.onActionExecuted()
             }
             return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
         } else {
             val readInfo = when {
-                !sawBlocks -> "tidak ada teks terbaca"
-                action.compareMode.isNumeric -> "angka terbaca=${lastOutcome.allNumbers.take(4)}"
+                !sawBlocks -> "tidak ada teks terbaca (pastikan area baca menutupi teks/angka)"
+                action.compareMode.isNumeric -> {
+                    val numsStr = lastOutcome.allNumbers.take(5).map { formatPlainNumber(it) }
+                    val tStr = formatPlainNumber(action.targetNumber)
+                    "terbaca=\"${lastOutcome.allText.take(36)}\", angka=$numsStr, syarat ${action.compareMode.shortLabel} $tStr"
+                }
                 else -> "terbaca=\"${lastOutcome.allText.take(40)}\""
             }
             runtime.log(LogLevel.INFO, "Teks/Nilai belum cocok ($readInfo).")
             return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
         }
     }
+
+    private fun formatPlainNumber(v: Double): String =
+        if (v == v.toLong().toDouble()) v.toLong().toString()
+        else java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()
 
     private suspend fun handleBranch(
         branchActions: List<Action>,
@@ -1160,11 +1456,16 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
-        val childFlow = executeList(branchActions, macro, startedAt, maxDurationMs, depth)
+        val childFlow = executeList(branchActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
         if (childFlow != FlowControl.NEXT) return childFlow
         return when (endMode) {
             NotFoundMode.CONTINUE -> FlowControl.NEXT
             NotFoundMode.RESTART -> FlowControl.RESTART_MACRO
+            NotFoundMode.FINISH -> {
+                markProgress()
+                runtime.log(LogLevel.INFO, "Cabang selesai — selesaikan '${macro.name}' & kembali ke macro aktif.")
+                FlowControl.FINISH_TO_ACTIVE_CONTINUE
+            }
             NotFoundMode.STOP -> FlowControl.STOP_MACRO
         }
     }

@@ -25,7 +25,11 @@ import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
+import com.example.data.FinishMacroAction
+import com.example.data.FinishMacroMode
 import com.example.data.ImageAction
+import com.example.data.JumpAction
+import com.example.data.JumpMode
 import com.example.data.LaunchAppAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
@@ -52,6 +56,7 @@ import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.childList
 import com.example.data.create
+import com.example.data.findAction
 import com.example.data.findAnyAction
 import com.example.data.isStuckAction
 import com.example.data.kind
@@ -934,7 +939,7 @@ class OverlayMacroSettingsView(
             ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
             ActionKind.CLICK, ActionKind.LONG_PRESS,
             ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
-            ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
+            ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
         )
         for (k in kinds) {
             val item = LinearLayout(context).apply {
@@ -1529,9 +1534,9 @@ class OverlayMacroSettingsView(
                 val numStr = if (action.targetNumber == action.targetNumber.toLong().toDouble()) {
                     action.targetNumber.toLong().toString()
                 } else {
-                    action.targetNumber.toString()
+                    java.math.BigDecimal.valueOf(action.targetNumber).stripTrailingZeros().toPlainString()
                 }
-                val numField = addDecimalRow(numBox, "Nilai pembanding", numStr)
+                val numField = addTextRow(numBox, "Nilai pembanding (cth 500000 / 500K)", numStr)
 
                 fun refreshModeInputs() {
                     queryBox.visibility = if (compareMode.isNumeric) View.GONE else View.VISIBLE
@@ -1632,7 +1637,8 @@ class OverlayMacroSettingsView(
                             rB.text.toString().toIntOrNull() ?: reg.bottom
                         )
                     } else null
-                    val parsedNum = numField.text.toString().replace(',', '.').toDoubleOrNull() ?: action.targetNumber
+                    val parsedNum = com.example.vision.TextConditionEvaluator.parseSmartNumber(numField.text.toString())
+                        ?: action.targetNumber
                     saveEdited { cur ->
                         val txtCur = (cur as? TextAction) ?: action
                         txtCur.copy(
@@ -1753,6 +1759,229 @@ class OverlayMacroSettingsView(
                             targetMacroId = targetId,
                             targetMacroName = targetName,
                             returnAfter = retCheck.isChecked,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is FinishMacroAction -> {
+                var selectedMode = action.mode
+                var targetId = action.targetMacroId
+                var targetName = action.targetMacroName
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Selesaikan macro/pasif ini lalu langsung kembali/switch ke macro aktif tanpa menghentikan eksekusi."
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11f
+                    setPadding(0, 0, 0, dp(6))
+                })
+                bodyContainer.addView(sectionLabel("Arah Switch Setelah Selesai"))
+                val activePickerContainer = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = dp(4)
+                    }
+                }
+                val modeBtns = mutableListOf<Pair<FinishMacroMode, TextView>>()
+                FinishMacroMode.entries.forEach { m ->
+                    val b = makeBtn("${m.shortLabel} — ${m.label}", if (m == selectedMode) "#059669" else "#1E293B") {
+                        selectedMode = m
+                        modeBtns.forEach { (itemMode, tv) ->
+                            (tv.background as? GradientDrawable)?.setColor(
+                                Color.parseColor(if (itemMode == selectedMode) "#059669" else "#1E293B")
+                            )
+                        }
+                        activePickerContainer.visibility = if (selectedMode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE) VISIBLE else GONE
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    modeBtns += m to b
+                    bodyContainer.addView(b)
+                }
+
+                activePickerContainer.addView(sectionLabel("Pilih Macro Aktif Tujuan"))
+                val activeMacros = store.macros.value.filter { it.id != macro.id && !it.isPassive }
+                if (activeMacros.isEmpty()) {
+                    activePickerContainer.addView(TextView(context).apply {
+                        text = "Belum ada macro aktif lain. Buat macro aktif di aplikasi terlebih dahulu."
+                        setTextColor(Color.parseColor("#94A3B8"))
+                        textSize = 11f
+                    })
+                } else {
+                    val now = store.effectiveNowMs()
+                    val mBtns = mutableListOf<Pair<String, TextView>>()
+                    activeMacros.forEach { m ->
+                        val suffix = if (MacroSecurity.isExpired(m, now)) " [Habis]" else ""
+                        val b = makeBtn(m.name + suffix, if (m.id == targetId) "#0891B2" else "#1E293B") {
+                            targetId = m.id
+                            targetName = m.name
+                            mBtns.forEach { (id, tv) ->
+                                (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (id == targetId) "#0891B2" else "#1E293B"))
+                            }
+                        }.apply {
+                            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                        }
+                        mBtns += m.id to b
+                        activePickerContainer.addView(b)
+                    }
+                }
+                activePickerContainer.visibility = if (selectedMode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE) VISIBLE else GONE
+                bodyContainer.addView(activePickerContainer)
+
+                addSaveActionBtn {
+                    saveEdited {
+                        action.copy(
+                            mode = selectedMode,
+                            targetMacroId = if (selectedMode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE) targetId else "",
+                            targetMacroName = if (selectedMode == FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE) targetName else ""
+                        )
+                    }
+                }
+            }
+
+            is JumpAction -> {
+                val ownerActions = if (macro.isStuckAction(action.id)) macro.stuckActions else macro.actions
+                val enclosingIdx = ownerActions.indexOfFirst { top ->
+                    top.id == action.id || listOf(top).findAction(action.id) != null
+                }
+                var selectedMode = action.mode
+                var targetId = action.targetActionId
+                var targetLabel = action.targetActionLabel
+
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Loncat melewati aksi tertentu ke depan atau kembali ke belakang ke aksi sebelumnya tanpa menghentikan macro."
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11f
+                    setPadding(0, 0, 0, dp(6))
+                })
+                bodyContainer.addView(sectionLabel("Mode Loncat Aksi"))
+
+                val targetBox = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
+                }
+                val stepsBox = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
+                }
+                val previewTv = TextView(context).apply {
+                    setTextColor(Color.parseColor("#C4B5FD"))
+                    textSize = 11f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(dp(8), dp(6), dp(8), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#2E1065"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val stepF = addNumberRow(stepsBox, "Jumlah langkah (N)", action.stepCount.coerceAtLeast(1).toString())
+
+                fun refreshJumpUi() {
+                    val isTargetMode = selectedMode == JumpMode.SKIP_AFTER_ACTION || selectedMode == JumpMode.JUMP_TO_ACTION
+                    targetBox.visibility = if (isTargetMode) VISIBLE else GONE
+                    stepsBox.visibility = if (isTargetMode) GONE else VISIBLE
+                    val selIdx = ownerActions.indexOfFirst { it.id == targetId }
+                    val msg = when (selectedMode) {
+                        JumpMode.SKIP_AFTER_ACTION -> if (selIdx >= 0) {
+                            val nextIdx = selIdx + 1
+                            if (nextIdx < ownerActions.size) {
+                                "Lewati #${selIdx + 1} (${ownerActions[selIdx].kind.label}) → lanjut di #${nextIdx + 1} (${ownerActions[nextIdx].kind.label})"
+                            } else {
+                                "Lewati #${selIdx + 1} (${ownerActions[selIdx].kind.label}) → selesai siklus ini"
+                            }
+                        } else "Pilih aksi yang ingin dilewati di bawah"
+                        JumpMode.JUMP_TO_ACTION -> if (selIdx >= 0) {
+                            val dir = when {
+                                enclosingIdx >= 0 && selIdx < enclosingIdx -> "mundur ke belakang"
+                                enclosingIdx >= 0 && selIdx > enclosingIdx -> "maju ke depan"
+                                else -> "ke"
+                            }
+                            "Loncat $dir → langsung jalan dari #${selIdx + 1} (${ownerActions[selIdx].kind.label})"
+                        } else "Pilih aksi tujuan (mundur/maju) di bawah"
+                        JumpMode.SKIP_FORWARD_STEPS -> {
+                            val n = (stepF.text.toString().toIntOrNull() ?: action.stepCount).coerceAtLeast(1)
+                            "Melewati +$n aksi di depan"
+                        }
+                        JumpMode.JUMP_BACKWARD_STEPS -> {
+                            val n = (stepF.text.toString().toIntOrNull() ?: action.stepCount).coerceAtLeast(1)
+                            "Kembali -$n aksi ke belakang"
+                        }
+                    }
+                    previewTv.text = msg
+                }
+
+                val modeBtns = mutableListOf<Pair<JumpMode, TextView>>()
+                JumpMode.entries.forEach { m ->
+                    val b = makeBtn("${m.shortLabel} — ${m.label}", if (m == selectedMode) "#7C3AED" else "#1E293B") {
+                        selectedMode = m
+                        modeBtns.forEach { (itemMode, tv) ->
+                            (tv.background as? GradientDrawable)?.setColor(
+                                Color.parseColor(if (itemMode == selectedMode) "#7C3AED" else "#1E293B")
+                            )
+                        }
+                        refreshJumpUi()
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    modeBtns += m to b
+                    bodyContainer.addView(b)
+                }
+
+                bodyContainer.addView(previewTv)
+
+                targetBox.addView(sectionLabel("Pilih Aksi di Daftar Macro"))
+                if (ownerActions.isEmpty()) {
+                    targetBox.addView(TextView(context).apply {
+                        text = "Belum ada aksi di daftar macro."
+                        setTextColor(Color.parseColor("#94A3B8"))
+                        textSize = 11f
+                    })
+                } else {
+                    val aBtns = mutableListOf<Pair<String, TextView>>()
+                    ownerActions.forEachIndexed { idx, candidate ->
+                        val dirTag = when {
+                            candidate.id == action.id -> " [Aksi ini]"
+                            enclosingIdx >= 0 && idx < enclosingIdx -> " [← Mundur]"
+                            enclosingIdx >= 0 && idx > enclosingIdx -> " [→ Maju]"
+                            else -> ""
+                        }
+                        val labelStr = "#${idx + 1} ${candidate.kind.label}"
+                        val b = makeBtn(
+                            "$labelStr • ${candidate.summary().take(28)}$dirTag",
+                            if (candidate.id == targetId) "#0891B2" else "#1E293B"
+                        ) {
+                            if (candidate.id != action.id || selectedMode == JumpMode.SKIP_AFTER_ACTION) {
+                                targetId = candidate.id
+                                targetLabel = labelStr
+                                aBtns.forEach { (id, tv) ->
+                                    (tv.background as? GradientDrawable)?.setColor(
+                                        Color.parseColor(if (id == targetId) "#0891B2" else "#1E293B")
+                                    )
+                                }
+                                refreshJumpUi()
+                            }
+                        }.apply {
+                            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                        }
+                        aBtns += candidate.id to b
+                        targetBox.addView(b)
+                    }
+                }
+                bodyContainer.addView(targetBox)
+                bodyContainer.addView(stepsBox)
+                refreshJumpUi()
+
+                val delF = addNumberRow(bodyContainer, "Jeda sebelum loncat (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    val isTargetMode = selectedMode == JumpMode.SKIP_AFTER_ACTION || selectedMode == JumpMode.JUMP_TO_ACTION
+                    val parsedSteps = (stepF.text.toString().toIntOrNull() ?: action.stepCount).coerceIn(1, 999)
+                    saveEdited {
+                        action.copy(
+                            mode = selectedMode,
+                            targetActionId = if (isTargetMode) targetId else "",
+                            targetActionLabel = if (isTargetMode) targetLabel else "",
+                            stepCount = parsedSteps,
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
@@ -2099,6 +2328,7 @@ class OverlayMacroSettingsView(
         val shortLabels = mapOf(
             NotFoundMode.CONTINUE to "Lanjut",
             NotFoundMode.RESTART to "Ulangi",
+            NotFoundMode.FINISH to "Selesai",
             NotFoundMode.STOP to "Stop"
         )
         NotFoundMode.entries.forEachIndexed { idx, mode ->

@@ -18,7 +18,53 @@ data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) 
 enum class NotFoundMode(val label: String) {
     CONTINUE("Lanjut ke aksi berikutnya"),
     RESTART("Ulangi macro dari awal"),
+    FINISH("Selesaikan macro (ke macro aktif)"),
     STOP("Hentikan macro")
+}
+
+/** How [FinishMacroAction] hands control back to an active macro without stopping the running engine. */
+@Serializable
+enum class FinishMacroMode(val label: String, val shortLabel: String, val description: String) {
+    RETURN_TO_ACTIVE_CONTINUE(
+        "Kembali & Lanjutkan Macro Aktif (Rekomendasi)",
+        "Lanjut Aktif",
+        "Selesaikan macro/pasif ini lalu langsung kembali ke macro aktif pemanggil di aksi berikutnya tanpa berhenti."
+    ),
+    RETURN_TO_ACTIVE_RESTART(
+        "Kembali & Ulangi Macro Aktif dari Awal",
+        "Ulangi Aktif",
+        "Selesaikan macro/pasif ini lalu langsung kembali ke macro aktif dan ulangi dari langkah pertama tanpa berhenti."
+    ),
+    SWITCH_TO_SPECIFIC_ACTIVE(
+        "Pindah ke Macro Aktif Tertentu",
+        "Pindah Aktif",
+        "Selesaikan macro ini lalu langsung jalankan macro aktif lain pilihan Anda tanpa menghentikan eksekusi."
+    )
+}
+
+/** How [JumpAction] jumps forward past actions or backward to an earlier action. */
+@Serializable
+enum class JumpMode(val label: String, val shortLabel: String, val description: String) {
+    SKIP_AFTER_ACTION(
+        "Loncat Melewati Aksi Tujuan",
+        "Lewati Aksi",
+        "Meloncat maju melewati aksi yang dipilih lalu lanjut di aksi tepat sesudahnya."
+    ),
+    JUMP_TO_ACTION(
+        "Loncat ke Aksi Tujuan (Mundur / Maju)",
+        "Ke Aksi",
+        "Meloncat kembali ke belakang (atau maju) langsung ke aksi yang dipilih lalu lanjut dari sana."
+    ),
+    SKIP_FORWARD_STEPS(
+        "Loncat Lewati N Aksi ke Depan",
+        "+N Maju",
+        "Melewati sejumlah N aksi di depan lalu lanjut di aksi berikutnya."
+    ),
+    JUMP_BACKWARD_STEPS(
+        "Loncat Kembali N Aksi ke Belakang",
+        "-N Mundur",
+        "Meloncat mundur sejumlah N langkah ke aksi sebelumnya."
+    )
 }
 
 /** Strategy used when the stuck-macro watchdog triggers. */
@@ -485,6 +531,51 @@ data class RestartAction(
     override fun withNewIds() = copy(id = newId())
 }
 
+/**
+ * Finishes the currently running (passive or linked) macro early once its desired goal is reached,
+ * immediately returning/switching control to the active macro WITHOUT stopping the running engine.
+ */
+@Serializable
+@SerialName("finish_macro")
+data class FinishMacroAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100,
+    val mode: FinishMacroMode = FinishMacroMode.RETURN_TO_ACTIVE_CONTINUE,
+    /** Only used when [mode] == [FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE]. */
+    val targetMacroId: String = "",
+    val targetMacroName: String = ""
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/**
+ * Jumps execution forward past a specified action/step-count or backward to an earlier action/step-count
+ * within the current macro (or enclosing loop/watchdog list).
+ */
+@Serializable
+@SerialName("jump")
+data class JumpAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100,
+    val mode: JumpMode = JumpMode.SKIP_AFTER_ACTION,
+    /** Target action ID when [mode] is [JumpMode.SKIP_AFTER_ACTION] or [JumpMode.JUMP_TO_ACTION]. */
+    val targetActionId: String = "",
+    /** Cached human-readable label of the target action for summary display. */
+    val targetActionLabel: String = "",
+    /** Number of steps (>= 1) when [mode] is [JumpMode.SKIP_FORWARD_STEPS] or [JumpMode.JUMP_BACKWARD_STEPS]. */
+    val stepCount: Int = 1
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
 /** Exits or closes the currently active application via Accessibility global actions (+ optional cleanup). */
 @Serializable
 @SerialName("exit_app")
@@ -605,6 +696,8 @@ enum class ActionKind(val label: String, val description: String) {
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
+    FINISH_MACRO("Selesaikan Macro", "Selesaikan macro pasif/sub-macro lalu switch ke macro aktif tanpa berhenti"),
+    JUMP("Loncat Aksi", "Loncat melewati aksi ke depan atau kembali ke aksi sebelumnya"),
     EXIT_APP("Keluar Aplikasi", "Keluar atau tutup aplikasi yang sedang terbuka"),
     LAUNCH_APP("Masuk Aplikasi", "Buka / jalankan aplikasi atau game tertentu"),
     RECORD("Rekaman", "Putar ulang sentuhan yang direkam"),
@@ -625,6 +718,8 @@ val Action.kind: ActionKind
         is ColorAction -> ActionKind.COLOR
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
+        is FinishMacroAction -> ActionKind.FINISH_MACRO
+        is JumpAction -> ActionKind.JUMP
         is ExitAppAction -> ActionKind.EXIT_APP
         is LaunchAppAction -> ActionKind.LAUNCH_APP
         is RecordAction -> ActionKind.RECORD
@@ -633,7 +728,11 @@ val Action.kind: ActionKind
     }
 
 private fun formatTargetNum(v: Double): String =
-    if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+    if (v == v.toLong().toDouble()) {
+        v.toLong().toString()
+    } else {
+        java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()
+    }
 
 /** Short human summary shown in lists and on the overlay log. */
 fun Action.summary(): String {
@@ -662,6 +761,17 @@ fun Action.summary(): String {
         is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
+        is FinishMacroAction -> when (mode) {
+            FinishMacroMode.RETURN_TO_ACTIVE_CONTINUE -> "Ke macro aktif • lanjut"
+            FinishMacroMode.RETURN_TO_ACTIVE_RESTART -> "Ke macro aktif • ulang awal"
+            FinishMacroMode.SWITCH_TO_SPECIFIC_ACTIVE -> "Switch ke ${targetMacroName.ifBlank { "(pilih macro aktif)" }}"
+        }
+        is JumpAction -> when (mode) {
+            JumpMode.SKIP_AFTER_ACTION -> "Lewati ${targetActionLabel.ifBlank { "(pilih aksi)" }}"
+            JumpMode.JUMP_TO_ACTION -> "Ke ${targetActionLabel.ifBlank { "(pilih aksi)" }}"
+            JumpMode.SKIP_FORWARD_STEPS -> "Lewati +${stepCount.coerceAtLeast(1)} aksi ke depan"
+            JumpMode.JUMP_BACKWARD_STEPS -> "Kembali -${stepCount.coerceAtLeast(1)} aksi ke belakang"
+        }
         is ExitAppAction -> {
             val target = appLabel.ifBlank { packageName }.let { if (it.isNotBlank()) " ($it)" else "" }
             val modeShort = when (mode) {
@@ -699,21 +809,63 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.WAIT -> WaitAction()
         ActionKind.IMAGE -> ImageAction(imageName = imageName)
         ActionKind.TRACK_OBJECT -> TrackObjectAction(imageName = imageName, targetX = cx, targetY = cy)
-        ActionKind.TEXT -> TextAction(
-            region = Region(
-                left = (screenW * 0.20f).toInt(),
-                top = (screenH * 0.35f).toInt(),
-                right = (screenW * 0.80f).toInt(),
-                bottom = (screenH * 0.50f).toInt()
-            )
-        )
+        ActionKind.TEXT -> TextAction(region = null)
         ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
+        ActionKind.FINISH_MACRO -> FinishMacroAction()
+        ActionKind.JUMP -> JumpAction()
         ActionKind.EXIT_APP -> ExitAppAction()
         ActionKind.LAUNCH_APP -> LaunchAppAction()
         ActionKind.RECORD -> RecordAction()
         ActionKind.RESTART -> RestartAction()
         ActionKind.STOP -> StopAction()
+    }
+}
+
+/** Rebuilds an action tree replacing every action's ID via [idMap] and preserving internal [JumpAction] target links. */
+internal fun Action.withMappedIds(idMap: Map<String, String>): Action {
+    val mappedId = idMap[id] ?: newId()
+    return when (this) {
+        is ClickAction -> copy(id = mappedId)
+        is LongPressAction -> copy(id = mappedId)
+        is SwipeAction -> copy(id = mappedId)
+        is ZoomAction -> copy(id = mappedId)
+        is WaitAction -> copy(id = mappedId)
+        is ImageAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
+        is TrackObjectAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
+        is TextAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
+        is ColorAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
+        is LoopAction -> copy(
+            id = mappedId,
+            actions = actions.map { it.withMappedIds(idMap) }
+        )
+        is RunMacroAction -> copy(id = mappedId)
+        is FinishMacroAction -> copy(id = mappedId)
+        is JumpAction -> copy(
+            id = mappedId,
+            targetActionId = idMap[targetActionId] ?: targetActionId
+        )
+        is ExitAppAction -> copy(id = mappedId)
+        is LaunchAppAction -> copy(id = mappedId)
+        is RecordAction -> copy(id = mappedId)
+        is RestartAction -> copy(id = mappedId)
+        is StopAction -> copy(id = mappedId)
     }
 }
