@@ -273,9 +273,9 @@ object TemplateMatcher {
     private const val COARSE_REFINE_RADIUS = 3
     private const val FULL_REFINE_RADIUS = 2
 
-    /** Dense logarithmic scale grid (~7-8% spacing) covering 0.50x..1.50x cross-device & DPI differences. */
+    /** Dense logarithmic scale grid (~7-8% spacing) covering 0.42x..1.85x across phones, tablets, foldables & emulators. */
     private val AUTO_SCALE_GRID = doubleArrayOf(
-        1.00, 0.93, 1.08, 0.87, 0.80, 0.73, 0.67, 0.62, 0.56, 0.50, 1.16, 1.25, 1.35, 1.50
+        1.00, 0.93, 1.08, 0.87, 0.80, 0.73, 0.67, 0.62, 0.56, 0.50, 0.44, 1.16, 1.25, 1.35, 1.50, 1.68, 1.85
     )
 
     private data class ScaleProbe(
@@ -468,7 +468,7 @@ object TemplateMatcher {
             return MultiScaleOutcome(bestMatch, bestScore, bestScale)
         }
 
-        val maxScale = (anchorScale * 1.05).coerceAtMost(1.60)
+        val maxScale = (anchorScale * 1.05).coerceAtMost(2.05)
         val maxW = (template.width * maxScale).roundToInt().coerceAtLeast(8)
         val maxH = (template.height * maxScale).roundToInt().coerceAtLeast(8)
         val pad = 14
@@ -485,7 +485,7 @@ object TemplateMatcher {
         tried += anchorScale
 
         fun probeFine(s: Double): Boolean {
-            if (s < 0.45 || s > 1.60) return false
+            if (s < 0.38 || s > 2.05) return false
             if (tried.any { abs(it - s) < 0.008 }) return false
             tried += s
             val cand = template.scaled(s, s)

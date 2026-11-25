@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AdsClick
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -89,6 +90,7 @@ import com.example.data.RecordAction
 import com.example.data.ResolutionScaler
 import com.example.data.TextAction
 import com.example.data.countActions
+import com.example.data.countStuckActions
 import com.example.data.walk
 
 @Composable
@@ -115,6 +117,7 @@ fun MacroHomeScreen(
     onLaunchMacroOverlay: (Macro) -> Unit,
     onChangeMacroLogo: (Macro) -> Unit,
     onOpenMacroSecurity: (Macro) -> Unit,
+    onOpenAutoScale: (Macro) -> Unit,
     onTogglePassivePull: (Macro) -> Unit,
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro) -> Unit,
@@ -454,6 +457,7 @@ fun MacroHomeScreen(
                     onLaunchOverlay = { onLaunchMacroOverlay(macro) },
                     onChangeLogo = { onChangeMacroLogo(macro) },
                     onOpenSecurity = { onOpenMacroSecurity(macro) },
+                    onOpenAutoScale = { onOpenAutoScale(macro) },
                     onTogglePassivePull = { onTogglePassivePull(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
                     onExport = { onExportMacro(macro) },
@@ -517,6 +521,7 @@ private fun MacroListCard(
     onLaunchOverlay: () -> Unit,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
+    onOpenAutoScale: () -> Unit,
     onTogglePassivePull: () -> Unit,
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
@@ -530,6 +535,8 @@ private fun MacroListCard(
     val hasColor = allActions.any { it is ColorAction }
     val hasRecord = allActions.any { it is RecordAction }
     val hasRandom = allActions.any { it.chancePercent < 100 }
+    val stuckActionCount = remember(macro) { macro.countStuckActions() }
+    val hasWatchdog = macro.autoRecoverStuckSec > 0 && stuckActionCount > 0
     val scaleTransform = remember(macro.sourceWidth, macro.sourceHeight, macro.autoScaleResolution, macro.scaleMode, screenW, screenH) {
         ResolutionScaler.forMacro(macro, screenW, screenH)
     }
@@ -628,8 +635,9 @@ private fun MacroListCard(
                         }
                     }
                     val loopLabel = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
+                    val watchdogSub = if (stuckActionCount > 0) " • Anti-Macet $stuckActionCount" else ""
                     Text(
-                        "${macro.countActions()} aksi • $loopLabel",
+                        "${macro.countActions()} aksi • $loopLabel$watchdogSub",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -639,6 +647,11 @@ private fun MacroListCard(
                         Icon(Icons.Filled.MoreVert, contentDescription = "Menu", modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Auto-Scale Layar (Tanpa Sandi)") },
+                            leadingIcon = { Icon(Icons.Filled.AspectRatio, null) },
+                            onClick = { menuOpen = false; onOpenAutoScale() }
+                        )
                         DropdownMenuItem(
                             text = { Text("Ubah Foto Logo") },
                             leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null) },
@@ -690,8 +703,8 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive / Auto-Scale badges row (shown cleanly when active)
-            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling) {
+            // Security / Expiry / Passive / Auto-Scale / Watchdog badges row (Auto-Scale chip is always clickable without password)
+            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (macro.isLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -701,8 +714,26 @@ private fun MacroListCard(
                             color = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
                         )
                     }
-                    if (scaleTransform.isScaling) {
-                        FeatureTag("📐 Auto-Scale", Color(0xFF06B6D4))
+                    if (scaleTransform.isScaling || macro.isLocked) {
+                        val scaleTint = if (macro.autoScaleResolution) Color(0xFF06B6D4) else Color(0xFF64748B)
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(onClick = onOpenAutoScale),
+                            shape = RoundedCornerShape(6.dp),
+                            color = scaleTint.copy(alpha = 0.16f)
+                        ) {
+                            Text(
+                                text = if (macro.autoScaleResolution) "📐 Auto-Scale" else "📐 Scale OFF",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = scaleTint,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (hasWatchdog) {
+                        FeatureTag("🛡 Anti-Macet ${macro.autoRecoverStuckSec}d", Color(0xFFF97316))
                     }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)

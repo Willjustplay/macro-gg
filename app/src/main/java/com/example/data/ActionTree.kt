@@ -141,7 +141,36 @@ fun List<Action>.mapAllActions(transform: (Action) -> Action): List<Action> = ma
     transform(mappedChildren)
 }
 
+/** Depth-first walk over both main [Macro.actions] and out-of-band [Macro.stuckActions]. */
+fun Macro.allActionsSequence(): Sequence<Action> = actions.walk() + stuckActions.walk()
+
+fun Macro.findAnyAction(id: String): Action? =
+    actions.findAction(id) ?: stuckActions.findAction(id)
+
+fun Macro.isStuckAction(id: String): Boolean =
+    stuckActions.findAction(id) != null
+
+fun Macro.updateAnyAction(id: String, transform: (Action) -> Action): Macro = when {
+    actions.findAction(id) != null -> copy(actions = actions.updateAction(id, transform))
+    stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.updateAction(id, transform))
+    else -> this
+}
+
+fun Macro.removeAnyAction(id: String): Macro = when {
+    actions.findAction(id) != null -> copy(actions = actions.removeAction(id))
+    stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.removeAction(id))
+    else -> this
+}
+
+fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
+    actions.findAction(id) != null -> copy(actions = actions.moveAction(id, delta))
+    stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.moveAction(id, delta))
+    else -> this
+}
+
 fun Macro.imageNames(): Set<String> =
-    actions.walk().filterIsInstance<ImageAction>().map { it.imageName }.filter { it.isNotBlank() }.toSet()
+    allActionsSequence().filterIsInstance<ImageAction>().map { it.imageName }.filter { it.isNotBlank() }.toSet()
 
 fun Macro.countActions(): Int = actions.walk().count()
+
+fun Macro.countStuckActions(): Int = stuckActions.walk().count()

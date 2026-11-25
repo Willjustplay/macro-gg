@@ -24,9 +24,27 @@ enum class NotFoundMode(val label: String) {
 /** Strategy used when the stuck-macro watchdog triggers. */
 @Serializable
 enum class StuckRecoveryMode(val label: String) {
+    RUN_WATCHDOG_ACTIONS("Jalankan Aksi Anti-Macet"),
     RESTART_MACRO("Ulangi macro dari awal"),
     TAP_CENTER_AND_RESTART("Klik tengah layar lalu ulangi"),
     STOP_MACRO("Hentikan macro")
+}
+
+/** How [ExitAppAction] leaves or closes the foreground application. */
+@Serializable
+enum class ExitAppMode(val label: String, val description: String) {
+    CLOSE_RECENT_AND_HOME(
+        "Tutup dari Recent & ke Home (Rekomendasi)",
+        "Buka Recent Apps, geser ke atas untuk menutup aplikasi sepenuhnya, lalu kembali ke Home."
+    ),
+    HOME_ONLY(
+        "Keluar ke Layar Utama (Home)",
+        "Langsung keluar ke layar beranda (Home) tanpa menutup paksa dari Recent."
+    ),
+    BACK_THEN_HOME(
+        "Tekan Kembali lalu ke Home",
+        "Tekan tombol Back beberapa kali lalu keluar ke layar beranda."
+    )
 }
 
 /** Unit for macro expiration duration. */
@@ -36,16 +54,24 @@ enum class ExpiryUnit(val label: String) {
     MONTHS("Bulan")
 }
 
-/** How coordinates, gestures, regions & templates scale across different screen resolutions. */
+/** How coordinates, gestures, regions & templates scale across ALL device screen resolutions & aspect ratios. */
 @Serializable
 enum class ResolutionScaleMode(val label: String, val description: String) {
+    ADAPTIVE(
+        "Adaptif Semua Layar (Rekomendasi)",
+        "Menjaga tombol pinggir (HUD) tetap akurat & tengah seimbang di semua layar: HP (16:9–21:9), Tablet (16:10/4:3), Foldable, Emulator & CloudPhone."
+    ),
     PROPORTIONAL(
-        "Proporsional (Penuh)",
-        "Skala sesuai persentase lebar & tinggi layar penuh (cocok untuk kebanyakan game & aplikasi)."
+        "Proporsional Penuh",
+        "Skala linier penuh sesuai persentase lebar & tinggi layar target (cocok untuk antarmuka melar penuh)."
+    ),
+    FIT_INSIDE(
+        "Fit Dalam Layar (Anti Terpotong)",
+        "Skala seragam mengikuti sisi terketat agar seluruh titik tetap masuk layar di rasio ekstrem (HP ↔ Tablet / Foldable)."
     ),
     CENTER_FIT(
-        "Skala Tengah (Game 16:9)",
-        "Skala seragam dari tengah layar mengikuti sisi pendek (cocok untuk game berbingkai / rasio tetap)."
+        "Skala Tengah (Rasio Tetap)",
+        "Skala seragam dari tengah layar mengikuti sisi pendek (cocok untuk game berbingkai hitam / letterbox)."
     )
 }
 
@@ -349,6 +375,42 @@ data class RestartAction(
     override fun withNewIds() = copy(id = newId())
 }
 
+/** Exits or closes the currently active application via Accessibility global actions (+ optional cleanup). */
+@Serializable
+@SerialName("exit_app")
+data class ExitAppAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 1000,
+    override val chancePercent: Int = 100,
+    val mode: ExitAppMode = ExitAppMode.CLOSE_RECENT_AND_HOME,
+    /** Optional package name to also request background process cleanup after leaving the app. */
+    val packageName: String = "",
+    val appLabel: String = ""
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/** Opens / switches into an installed Android application or game by package name. */
+@Serializable
+@SerialName("launch_app")
+data class LaunchAppAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 3000,
+    override val chancePercent: Int = 100,
+    val packageName: String = "",
+    val appLabel: String = "",
+    /** If true, adds FLAG_ACTIVITY_CLEAR_TASK to reload the target app cleanly from start. */
+    val freshStart: Boolean = false
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
 @Serializable
 data class Macro(
     val id: String = newId(),
@@ -366,6 +428,10 @@ data class Macro(
     /** Auto-recover if no progress/action succeeds for N seconds (0 = off). */
     val autoRecoverStuckSec: Int = 0,
     val stuckRecoveryMode: StuckRecoveryMode = StuckRecoveryMode.RESTART_MACRO,
+    /** Out-of-band Watchdog actions executed automatically whenever the main macro gets stuck. */
+    val stuckActions: List<Action> = emptyList(),
+    /** After [stuckActions] finish: true = restart main macro from step 1, false = continue where left off. */
+    val stuckRestartAfter: Boolean = true,
     /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
     val logoImage: String = "",
     /** Prevents viewing/editing/duplicating macro actions without password. */
@@ -393,8 +459,8 @@ data class Macro(
     val sourceHeight: Int = 0,
     /** Automatically scale clicks, swipes, gestures, regions & image templates to the active device screen. */
     val autoScaleResolution: Boolean = true,
-    /** Projection mode used when source and target aspect ratios differ. */
-    val scaleMode: ResolutionScaleMode = ResolutionScaleMode.PROPORTIONAL,
+    /** Projection mode used when source and target aspect ratios differ across any device. */
+    val scaleMode: ResolutionScaleMode = ResolutionScaleMode.ADAPTIVE,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -420,6 +486,8 @@ enum class ActionKind(val label: String, val description: String) {
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
+    EXIT_APP("Keluar Aplikasi", "Keluar atau tutup aplikasi yang sedang terbuka"),
+    LAUNCH_APP("Masuk Aplikasi", "Buka / jalankan aplikasi atau game tertentu"),
     RECORD("Rekaman", "Putar ulang sentuhan yang direkam"),
     RESTART("Ulang dari Awal", "Lompat ke awal macro"),
     STOP("Hentikan", "Hentikan macro")
@@ -437,6 +505,8 @@ val Action.kind: ActionKind
         is ColorAction -> ActionKind.COLOR
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
+        is ExitAppAction -> ActionKind.EXIT_APP
+        is LaunchAppAction -> ActionKind.LAUNCH_APP
         is RecordAction -> ActionKind.RECORD
         is RestartAction -> ActionKind.RESTART
         is StopAction -> ActionKind.STOP
@@ -466,6 +536,19 @@ fun Action.summary(): String {
         is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
+        is ExitAppAction -> {
+            val target = appLabel.ifBlank { packageName }.let { if (it.isNotBlank()) " ($it)" else "" }
+            val modeShort = when (mode) {
+                ExitAppMode.CLOSE_RECENT_AND_HOME -> "Tutup Recent + Home"
+                ExitAppMode.HOME_ONLY -> "Ke Home"
+                ExitAppMode.BACK_THEN_HOME -> "Back + Home"
+            }
+            "$modeShort$target"
+        }
+        is LaunchAppAction -> {
+            val target = appLabel.ifBlank { packageName.ifBlank { "(pilih aplikasi)" } }
+            target + if (freshStart) " • fresh" else ""
+        }
         is RecordAction -> "${gestures.size} gestur" + if (speed != 1f) " • ${speed}x" else ""
         is RestartAction -> "Kembali ke aksi pertama"
         is StopAction -> "Akhiri macro"
@@ -495,6 +578,8 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
+        ActionKind.EXIT_APP -> ExitAppAction()
+        ActionKind.LAUNCH_APP -> LaunchAppAction()
         ActionKind.RECORD -> RecordAction()
         ActionKind.RESTART -> RestartAction()
         ActionKind.STOP -> StopAction()

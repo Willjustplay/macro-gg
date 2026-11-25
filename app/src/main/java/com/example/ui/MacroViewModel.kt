@@ -400,6 +400,38 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         _messages.tryEmit("Mode Pasif '${updated.name}' diubah ke $statusText.")
     }
 
+    fun updateMacroAutoScale(
+        macro: Macro,
+        autoScaleResolution: Boolean,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        scaleMode: com.example.data.ResolutionScaleMode
+    ) {
+        if (com.example.data.MacroSecurity.isTampered(macro)) {
+            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.TAMPERED))
+            return
+        }
+        val latest = store.getMacroById(macro.id) ?: macro
+        val updated = com.example.data.MacroSecurity.updateAutoScale(
+            macro = latest,
+            autoScaleResolution = autoScaleResolution,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            scaleMode = scaleMode
+        )
+        saveMacro(updated)
+        val status = if (updated.autoScaleResolution) {
+            if (updated.sourceWidth > 0 && updated.sourceHeight > 0) {
+                "ON (${updated.sourceWidth}×${updated.sourceHeight} • ${updated.scaleMode.label})"
+            } else {
+                "ON (${updated.scaleMode.label})"
+            }
+        } else {
+            "OFF"
+        }
+        _messages.tryEmit("Auto-Scale '${updated.name}': $status.")
+    }
+
     fun importFromUri(uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {

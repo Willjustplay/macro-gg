@@ -3,7 +3,10 @@ package com.example.automation
 import com.example.data.Action
 import com.example.data.ClickAction
 import com.example.data.ColorAction
+import com.example.data.ExitAppAction
+import com.example.data.ExitAppMode
 import com.example.data.ImageAction
+import com.example.data.LaunchAppAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
@@ -44,6 +47,8 @@ interface MacroRuntime {
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean
     suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean = true
     suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean
+    suspend fun exitApp(mode: ExitAppMode, packageName: String = ""): Boolean = true
+    suspend fun launchApp(packageName: String, freshStart: Boolean = false): Boolean = true
     fun captureFrame(): Frame?
     fun samplePixelArgb(x: Int, y: Int): Int?
     suspend fun recognizeText(region: Region?): List<OcrBlock> = emptyList()
@@ -59,6 +64,7 @@ interface MacroRuntime {
 private enum class FlowControl {
     NEXT,
     RESTART_MACRO,
+    RESTART_ROOT,
     STOP_MACRO
 }
 
@@ -66,19 +72,22 @@ private enum class FlowControl {
  * Recursive Macrorify-style macro executor supporting:
  * - Multi-point clicks with burst repeat & jitter
  * - Long press, swipe, 2-finger pinch Zoom In/Out, wait with random jitter
+ * - Exit App & Launch App actions for app lifecycle automation & stuck recovery
  * - Per-action success probability ([Action.chancePercent]) for random events
- * - Automatic screen resolution scaling ([ResolutionScaler]) across devices & cloud phones
+ * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
  * - Image, OCR Text/Value, and Color detection with full Then/Else branches + Found/NotFound flow modes
  * - Nested loop blocks & Chained/Linked Macros ([RunMacroAction]) with cycle protection & Passive Mode support
  * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
  * - Recorded gesture playback with speed multiplier
- * - Auto-Fix Stuck Macro Watchdog ([Macro.autoRecoverStuckSec] & [StuckRecoveryMode])
+ * - Auto-Fix Stuck Macro Watchdog ([Macro.autoRecoverStuckSec], [Macro.stuckActions], [StuckRecoveryMode])
  */
 class MacroRunner(
     private val runtime: MacroRuntime,
     private val random: Random = Random.Default
 ) {
     private var lastProgressMs: Long = 0L
+    private var rootWatchdogMacro: Macro? = null
+    private var inStuckRecovery: Boolean = false
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -90,6 +99,8 @@ class MacroRunner(
             runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, denial))
             return
         }
+        rootWatchdogMacro = macro
+        inStuckRecovery = false
         lastProgressMs = now
         runInternal(macro, depth = 0)
     }
@@ -135,6 +146,12 @@ class MacroRunner(
             val flow = executeList(macro.actions, macro, startedAt, maxDurationMs, depth)
             when (flow) {
                 FlowControl.STOP_MACRO -> return FlowControl.STOP_MACRO
+                FlowControl.RESTART_ROOT -> {
+                    if (depth > 0) return FlowControl.RESTART_ROOT
+                    runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal setelah pemulihan Anti-Macet...")
+                    if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
+                    continue
+                }
                 FlowControl.RESTART_MACRO -> {
                     runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal...")
                     if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
@@ -150,7 +167,14 @@ class MacroRunner(
                         } else {
                             0L
                         }
-                        if (effectiveDelay > 0L) runtime.sleep(effectiveDelay)
+                        if (effectiveDelay > 0L) {
+                            val waitFlow = sleepWatchingStuck(effectiveDelay, macro, startedAt, maxDurationMs, depth)
+                            if (waitFlow != FlowControl.NEXT) {
+                                if (waitFlow == FlowControl.STOP_MACRO) return FlowControl.STOP_MACRO
+                                if (waitFlow == FlowControl.RESTART_ROOT && depth > 0) return FlowControl.RESTART_ROOT
+                                continue
+                            }
+                        }
                     }
                 }
             }
@@ -162,22 +186,78 @@ class MacroRunner(
         lastProgressMs = runtime.nowMs()
     }
 
-    /** Checks stuck watchdog; if triggered, performs recovery action and returns control signal. */
-    private suspend fun checkStuckRecovery(macro: Macro): FlowControl? {
-        val sec = macro.autoRecoverStuckSec
-        if (sec <= 0) return null
+    /** Sleeps in cooperative <= 500ms slices so the stuck-macro watchdog triggers promptly even during long waits. */
+    private suspend fun sleepWatchingStuck(
+        totalMs: Long,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        var remaining = totalMs
+        while (remaining > 0L && !runtime.isStopped()) {
+            runtime.waitIfPaused()
+            if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
+            val step = minOf(remaining, 500L)
+            runtime.sleep(step)
+            remaining -= step
+        }
+        return if (runtime.isStopped()) FlowControl.STOP_MACRO else FlowControl.NEXT
+    }
+
+    /** Checks stuck watchdog (including root watchdog inside sub-macros); runs out-of-band [Macro.stuckActions] when triggered. */
+    private suspend fun checkStuckRecovery(
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl? {
+        if (inStuckRecovery) return null
+        val watchdog = when {
+            macro.autoRecoverStuckSec > 0 -> macro
+            else -> rootWatchdogMacro?.takeIf { it.autoRecoverStuckSec > 0 }
+        } ?: return null
+
+        val sec = watchdog.autoRecoverStuckSec
         val elapsed = runtime.nowMs() - lastProgressMs
         if (elapsed < sec * 1000L) return null
 
-        runtime.log(LogLevel.WARN, "Auto-Perbaiki: Macro macet > ${sec}d — menjalankan '${macro.stuckRecoveryMode.label}'.")
+        val isRootTriggered = watchdog === rootWatchdogMacro && depth > 0
+        val restartSignal = if (isRootTriggered) FlowControl.RESTART_ROOT else FlowControl.RESTART_MACRO
+
+        val effectiveMode = if (watchdog.stuckRecoveryMode == StuckRecoveryMode.RUN_WATCHDOG_ACTIONS && watchdog.stuckActions.isEmpty()) {
+            StuckRecoveryMode.RESTART_MACRO
+        } else {
+            watchdog.stuckRecoveryMode
+        }
+
+        runtime.log(LogLevel.WARN, "Anti-Macet (Watchdog): Aksi utama macet > ${sec}d — mengaktifkan '${effectiveMode.label}'.")
         lastProgressMs = runtime.nowMs()
-        return when (macro.stuckRecoveryMode) {
-            StuckRecoveryMode.RESTART_MACRO -> FlowControl.RESTART_MACRO
+
+        return when (effectiveMode) {
+            StuckRecoveryMode.RUN_WATCHDOG_ACTIONS -> {
+                inStuckRecovery = true
+                val recFlow = try {
+                    runtime.log(LogLevel.WARN, "Menjalankan ${watchdog.stuckActions.size} aksi Anti-Macet di luar aksi utama...")
+                    executeList(watchdog.stuckActions, watchdog, startedAt, maxDurationMs, depth = 0)
+                } finally {
+                    inStuckRecovery = false
+                    lastProgressMs = runtime.nowMs()
+                }
+                when {
+                    runtime.isStopped() || recFlow == FlowControl.STOP_MACRO -> FlowControl.STOP_MACRO
+                    recFlow == FlowControl.RESTART_MACRO || recFlow == FlowControl.RESTART_ROOT -> restartSignal
+                    watchdog.stuckRestartAfter -> restartSignal
+                    else -> null
+                }
+            }
+            StuckRecoveryMode.RESTART_MACRO -> restartSignal
             StuckRecoveryMode.TAP_CENTER_AND_RESTART -> {
                 runtime.click(runtime.screenWidth / 2, runtime.screenHeight / 2, 50L)
                 runtime.sleep(250L)
                 lastProgressMs = runtime.nowMs()
-                FlowControl.RESTART_MACRO
+                restartSignal
             }
             StuckRecoveryMode.STOP_MACRO -> FlowControl.STOP_MACRO
         }
@@ -194,7 +274,7 @@ class MacroRunner(
             runtime.waitIfPaused()
             if (runtime.isStopped()) return FlowControl.STOP_MACRO
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
-            checkStuckRecovery(macro)?.let { return it }
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             if (!action.enabled) continue
 
             // Per-action Random Event probability roll (0..100%)
@@ -214,7 +294,8 @@ class MacroRunner(
             val extraRandom = if (macro.randomDelayMs > 0) random.nextLong(0, macro.randomDelayMs + 1) else 0L
             val totalDelay = action.delayAfterMs + extraRandom
             if (totalDelay > 0 && !runtime.isStopped()) {
-                runtime.sleep(totalDelay)
+                val delayFlow = sleepWatchingStuck(totalDelay, macro, startedAt, maxDurationMs, depth)
+                if (delayFlow != FlowControl.NEXT) return delayFlow
             }
         }
         return FlowControl.NEXT
@@ -288,7 +369,34 @@ class MacroRunner(
                 val extra = if (action.randomMs > 0) random.nextLong(0, action.randomMs + 1) else 0L
                 val total = (action.durationMs + extra).coerceAtLeast(0L)
                 runtime.log(LogLevel.INFO, "Tunggu ${total}ms")
-                if (total > 0) runtime.sleep(total)
+                if (total > 0) {
+                    sleepWatchingStuck(total, macro, startedAt, maxDurationMs, depth)
+                } else {
+                    FlowControl.NEXT
+                }
+            }
+
+            is ExitAppAction -> {
+                val targetName = action.appLabel.ifBlank { action.packageName }.let { if (it.isNotBlank()) " ($it)" else "" }
+                runtime.log(LogLevel.ACTION, "Keluar Aplikasi: ${action.mode.label}$targetName")
+                if (runtime.exitApp(action.mode, action.packageName)) {
+                    runtime.onActionExecuted()
+                    markProgress()
+                }
+                FlowControl.NEXT
+            }
+
+            is LaunchAppAction -> {
+                if (action.packageName.isBlank()) {
+                    runtime.log(LogLevel.WARN, "Masuk Aplikasi dilewati: belum ada aplikasi dipilih.")
+                    return FlowControl.NEXT
+                }
+                val label = action.appLabel.ifBlank { action.packageName }
+                runtime.log(LogLevel.ACTION, "Masuk Aplikasi: '$label'" + if (action.freshStart) " (fresh)" else "")
+                if (runtime.launchApp(action.packageName, action.freshStart)) {
+                    runtime.onActionExecuted()
+                    markProgress()
+                }
                 FlowControl.NEXT
             }
 
@@ -338,10 +446,10 @@ class MacroRunner(
                 )
                 markProgress()
                 val subFlow = runInternal(target, depth + 1)
-                if (!action.returnAfter || subFlow == FlowControl.STOP_MACRO) {
-                    FlowControl.STOP_MACRO
-                } else {
-                    FlowControl.NEXT
+                when {
+                    subFlow == FlowControl.RESTART_ROOT -> FlowControl.RESTART_ROOT
+                    !action.returnAfter || subFlow == FlowControl.STOP_MACRO -> FlowControl.STOP_MACRO
+                    else -> FlowControl.NEXT
                 }
             }
 
@@ -399,7 +507,7 @@ class MacroRunner(
 
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
-            checkStuckRecovery(macro)?.let { return it }
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             val frame = runtime.captureFrame()
             if (frame != null) {
                 sawFrame = true
@@ -537,7 +645,7 @@ class MacroRunner(
         var matched = false
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
-            checkStuckRecovery(macro)?.let { return it }
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             val argb = runtime.samplePixelArgb(sx, sy)
             if (argb != null && ColorUtil.matches(argb, action.color, action.tolerance)) {
                 matched = true
@@ -576,7 +684,7 @@ class MacroRunner(
 
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
-            checkStuckRecovery(macro)?.let { return it }
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             val blocks = runtime.recognizeText(scaledRegion)
             if (blocks.isNotEmpty()) sawBlocks = true
             val outcome = TextConditionEvaluator.evaluate(action, blocks)

@@ -231,6 +231,26 @@ object MacroSecurity {
         return updated.copy(securitySeal = computeSeal(updated))
     }
 
+    /**
+     * Updates Auto-Scale screen resolution settings WITHOUT requiring a password even when [macro.isLocked]
+     * is true, while refusing tampered macros and preserving all locked actions & security seal intact.
+     */
+    fun updateAutoScale(
+        macro: Macro,
+        autoScaleResolution: Boolean,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        scaleMode: ResolutionScaleMode
+    ): Macro {
+        if (isTampered(macro)) return macro
+        return macro.copy(
+            autoScaleResolution = autoScaleResolution,
+            sourceWidth = sourceWidth.coerceIn(0, 10000),
+            sourceHeight = sourceHeight.coerceIn(0, 10000),
+            scaleMode = scaleMode
+        )
+    }
+
     data class OverwriteResult(
         val merged: Macro,
         val deadlineExtended: Boolean

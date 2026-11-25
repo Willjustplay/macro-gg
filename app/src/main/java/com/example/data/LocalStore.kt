@@ -197,6 +197,7 @@ class LocalStore(context: Context) {
             name = "${macro.name} (Salinan)",
             logoImage = copiedLogo,
             actions = macro.actions.map { it.withNewIds() },
+            stuckActions = macro.stuckActions.map { it.withNewIds() },
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )
@@ -439,14 +440,16 @@ class LocalStore(context: Context) {
 
     private fun rewriteMacroImageReference(oldNormalized: String, newNormalized: String) {
         if (oldNormalized == newNormalized) return
+        fun rewriteList(list: List<Action>) = list.mapAllActions { a ->
+            if (a is ImageAction && normalizeImageName(a.imageName) == oldNormalized) {
+                a.copy(imageName = newNormalized)
+            } else a
+        }
         for (m in _macros.value) {
             if (m.imageNames().any { normalizeImageName(it) == oldNormalized }) {
                 val updated = m.copy(
-                    actions = m.actions.mapAllActions { a ->
-                        if (a is ImageAction && normalizeImageName(a.imageName) == oldNormalized) {
-                            a.copy(imageName = newNormalized)
-                        } else a
-                    }
+                    actions = rewriteList(m.actions),
+                    stuckActions = rewriteList(m.stuckActions)
                 )
                 saveMacro(updated)
             }

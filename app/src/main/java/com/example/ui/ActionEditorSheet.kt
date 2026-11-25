@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -29,10 +30,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -51,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -61,17 +65,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.automation.InstalledAppInfo
+import com.example.automation.InstalledAppsHelper
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
 import com.example.data.ClickAction
 import com.example.data.ColorAction
+import com.example.data.ExitAppAction
+import com.example.data.ExitAppMode
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
+import com.example.data.LaunchAppAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
@@ -89,6 +99,8 @@ import com.example.data.ZoomAction
 import com.example.data.create
 import com.example.data.kind
 import com.example.data.summary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -845,6 +857,129 @@ fun ActionEditorSheet(
                     }
                 }
 
+                is ExitAppAction -> {
+                    var showAppPicker by remember { mutableStateOf(false) }
+                    Text(
+                        "Cara Keluar Aplikasi",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ExitAppMode.entries.forEach { m ->
+                            FilterChip(
+                                selected = a.mode == m,
+                                onClick = { draft = a.copy(mode = m) },
+                                label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    Text(
+                        a.mode.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    FilledTonalButton(
+                        onClick = { showAppPicker = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (a.packageName.isBlank()) "Pilih Aplikasi Target (Opsional)"
+                            else "Target: ${a.appLabel.ifBlank { a.packageName }}"
+                        )
+                    }
+                    OutlinedTextField(
+                        value = a.packageName,
+                        onValueChange = { pkg ->
+                            draft = a.copy(
+                                packageName = pkg.trim(),
+                                appLabel = if (pkg.trim() != a.packageName) "" else a.appLabel
+                            )
+                        },
+                        label = { Text("Package Name (opsional, untuk bersihkan background)") },
+                        placeholder = { Text("contoh: com.supercell.clashofclans") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    NumberField("Jeda sesudah keluar (ms)", a.delayAfterMs.toString()) {
+                        draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
+                    }
+                    if (showAppPicker) {
+                        InstalledAppPickerDialog(
+                            title = "Pilih Aplikasi (Opsional)",
+                            allowClear = true,
+                            onSelect = { info ->
+                                draft = a.copy(packageName = info?.packageName.orEmpty(), appLabel = info?.label.orEmpty())
+                                showAppPicker = false
+                            },
+                            onDismiss = { showAppPicker = false }
+                        )
+                    }
+                }
+
+                is LaunchAppAction -> {
+                    var showAppPicker by remember { mutableStateOf(false) }
+                    FilledTonalButton(
+                        onClick = { showAppPicker = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (a.packageName.isBlank()) "Pilih Aplikasi / Game Terpasang"
+                            else "Ganti Aplikasi: ${a.appLabel.ifBlank { a.packageName }}"
+                        )
+                    }
+                    OutlinedTextField(
+                        value = a.packageName,
+                        onValueChange = { pkg ->
+                            draft = a.copy(
+                                packageName = pkg.trim(),
+                                appLabel = if (pkg.trim() != a.packageName) "" else a.appLabel
+                            )
+                        },
+                        label = { Text("Package Name Aplikasi") },
+                        placeholder = { Text("contoh: com.supercell.clashofclans") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text("Buka Ulang dari Awal (Fresh Start)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text(
+                                "Tambahkan Clear Task agar aplikasi dimuat ulang bersih.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = a.freshStart,
+                            onCheckedChange = { draft = a.copy(freshStart = it) }
+                        )
+                    }
+                    NumberField("Jeda loading sesudah masuk (ms)", a.delayAfterMs.toString()) {
+                        draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
+                    }
+                    if (showAppPicker) {
+                        InstalledAppPickerDialog(
+                            title = "Pilih Aplikasi untuk Dibuka",
+                            allowClear = false,
+                            onSelect = { info ->
+                                if (info != null) {
+                                    draft = a.copy(packageName = info.packageName, appLabel = info.label)
+                                }
+                                showAppPicker = false
+                            },
+                            onDismiss = { showAppPicker = false }
+                        )
+                    }
+                }
+
                 is RestartAction, is StopAction -> {
                     Text(
                         "Aksi kontrol alur (dapat diatur peluang Random Event di bawah jika ingin acak).",
@@ -939,6 +1074,94 @@ fun ActionEditorSheet(
 }
 
 @Composable
+private fun InstalledAppPickerDialog(
+    title: String,
+    allowClear: Boolean,
+    onSelect: (InstalledAppInfo?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var apps by remember { mutableStateOf<List<InstalledAppInfo>?>(null) }
+    var search by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.IO) {
+            InstalledAppsHelper.loadLaunchableApps(context)
+        }
+    }
+
+    val filtered = remember(apps, search) {
+        val list = apps ?: emptyList()
+        val q = search.trim().lowercase()
+        if (q.isEmpty()) list
+        else list.filter { it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    label = { Text("Cari nama aplikasi / package") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (allowClear) {
+                    TextButton(onClick = { onSelect(null) }) {
+                        Text("Kosongkan (aplikasi apa saja yang aktif)")
+                    }
+                }
+                when {
+                    apps == null -> Text("Memuat daftar aplikasi...", style = MaterialTheme.typography.bodySmall)
+                    filtered.isEmpty() -> Text("Tidak ada aplikasi cocok.", style = MaterialTheme.typography.bodySmall)
+                    else -> LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(280.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(filtered, key = { it.packageName }) { info ->
+                            Surface(
+                                onClick = { onSelect(info) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                    Text(
+                                        info.label,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        info.packageName,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Tutup") }
+        }
+    )
+}
+
+@Composable
 private fun PickOnScreenButton(label: String, onClick: () -> Unit) {
     FilledTonalButton(
         onClick = onClick,
@@ -1024,6 +1247,7 @@ private fun BranchSectionEditor(
                 val quickKinds = listOf(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
                     ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TEXT,
+                    ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
                     ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

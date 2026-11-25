@@ -23,7 +23,10 @@ import com.example.data.ActionKind
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
+import com.example.data.ExitAppAction
+import com.example.data.ExitAppMode
 import com.example.data.ImageAction
+import com.example.data.LaunchAppAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
@@ -46,7 +49,8 @@ import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.childList
 import com.example.data.create
-import com.example.data.findAction
+import com.example.data.findAnyAction
+import com.example.data.isStuckAction
 import com.example.data.kind
 import com.example.data.slots
 import com.example.data.summary
@@ -55,10 +59,9 @@ import kotlin.math.roundToInt
 /**
  * Full-featured in-overlay Macro Studio matching the in-app Macro Editor:
  * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
- *   Auto-Recover Stuck Macro watchdog, and optional marker preview toggle.
- * - Tab "Aksi": full action tree (including Then/Else/Loop branches), add any action kind,
- *   random event chance %, 1-tap visual image swapping, OCR Text & Numeric action editor,
- *   and visual target placement. Locked macros hide actions & settings until unlocked in-app.
+ *   all-device Auto-Scale (ALWAYS unlocked even when macro is locked!), and marker preview toggle.
+ * - Tab "Aksi": full main action tree (Then/Else/Loop), add any action kind (incl. Exit/Launch App).
+ * - Tab "Anti-Macet": out-of-band Watchdog actions triggered automatically when main macro gets stuck.
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
@@ -73,7 +76,8 @@ class OverlayMacroSettingsView(
     private val onSwitchMacro: (Macro) -> Unit,
     private val onToggleShowAllMarkers: (Boolean) -> Unit,
     private val onUpdateMacro: (Macro) -> Unit,
-    private val onAddAction: (ContainerRef, Action) -> Unit,
+    private val onUpdateAutoScale: (enabled: Boolean, srcW: Int, srcH: Int, mode: ResolutionScaleMode) -> Unit,
+    private val onAddAction: (ContainerRef, Action, Boolean) -> Unit,
     private val onUpdateAction: (String, (Action) -> Action) -> Unit,
     private val onMoveAction: (String, Int) -> Unit,
     private val onDeleteAction: (String) -> Unit,
@@ -82,21 +86,24 @@ class OverlayMacroSettingsView(
     private val onAddNewCropImageAction: () -> Unit,
     private val onPickTargetOnScreen: (actionId: String) -> Unit,
     private val onPickRegionOnScreen: (actionId: String) -> Unit,
-    private val onAddBranchClickTargetOnScreen: (parentId: String, slot: Slot) -> Unit,
+    private val onAddBranchClickTargetOnScreen: (parentId: String, slot: Slot, isStuckBranch: Boolean) -> Unit,
     private val onClose: () -> Unit
 ) : LinearLayout(context) {
 
     private val d = resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * d).toInt()
 
-    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi
+    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi, 2 = Anti-Macet
     private var editingActionId: String? = initialEditActionId
     private var quickImageSwapActionId: String? = null
+    private var appPickerActionId: String? = null
     private var addPickerRef: ContainerRef? = null
+    private var addPickerForStuck: Boolean = false
 
     private val bodyContainer = LinearLayout(context).apply { orientation = VERTICAL }
     private val tabSettingsBtn: TextView
     private val tabActionsBtn: TextView
+    private val tabWatchdogBtn: TextView
     private val titleView: TextView
     private val subtitleView: TextView
 
@@ -140,29 +147,31 @@ class OverlayMacroSettingsView(
         header.addView(makeBtn("✕", "#334155") { onClose() })
         addView(header)
 
-        // Tab switcher row
+        // 3-Tab switcher row: Setelan | Aksi | Anti-Macet
         val tabsRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(8)
             }
         }
-        tabSettingsBtn = makeTabBtn("Setelan Macro") {
+        tabSettingsBtn = makeTabBtn("Setelan") {
             activeTab = 0
-            editingActionId = null
-            quickImageSwapActionId = null
-            addPickerRef = null
+            clearSubScreens()
             rebuildBody()
         }
-        tabActionsBtn = makeTabBtn("Daftar Aksi") {
+        tabActionsBtn = makeTabBtn("Aksi") {
             activeTab = 1
-            editingActionId = null
-            quickImageSwapActionId = null
-            addPickerRef = null
+            clearSubScreens()
+            rebuildBody()
+        }
+        tabWatchdogBtn = makeTabBtn("Anti-Macet") {
+            activeTab = 2
+            clearSubScreens()
             rebuildBody()
         }
         tabsRow.addView(tabSettingsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
-        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
+        tabsRow.addView(tabWatchdogBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         addView(tabsRow)
 
         bodyContainer.setPadding(0, 0, 0, dp(14))
@@ -177,6 +186,13 @@ class OverlayMacroSettingsView(
         rebuildBody()
     }
 
+    private fun clearSubScreens() {
+        editingActionId = null
+        quickImageSwapActionId = null
+        appPickerActionId = null
+        addPickerRef = null
+    }
+
     fun refreshWithMacro(updated: Macro) {
         macro = updated
         rebuildBody()
@@ -186,21 +202,23 @@ class OverlayMacroSettingsView(
         val lockIcon = if (macro.isLocked) "🔒 " else ""
         titleView.text = lockIcon + macro.name.ifBlank { "Macro Aktif" }
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
-        val recStr = if (macro.autoRecoverStuckSec > 0) " • AutoFix ${macro.autoRecoverStuckSec}d" else ""
+        val recStr = if (macro.autoRecoverStuckSec > 0) " • Anti-Macet ${macro.autoRecoverStuckSec}d" else ""
         val extra = buildList {
             if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
             MacroSecurity.remainingTimeLabel(macro, store.effectiveNowMs())?.let { add(it) }
         }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
         subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$extra"
-        tabActionsBtn.text = if (macro.isLocked) "🔒 Terkunci" else "Daftar Aksi (${macro.actions.size})"
+        tabActionsBtn.text = if (macro.isLocked) "🔒 Aksi" else "Aksi (${macro.actions.size})"
+        tabWatchdogBtn.text = if (macro.isLocked) "🔒 Macet" else "Macet (${macro.stuckActions.size})"
 
         styleTab(tabSettingsBtn, activeTab == 0)
         styleTab(tabActionsBtn, activeTab == 1)
+        styleTab(tabWatchdogBtn, activeTab == 2, selectedHex = "#C2410C")
     }
 
-    private fun styleTab(tv: TextView, selected: Boolean) {
+    private fun styleTab(tv: TextView, selected: Boolean, selectedHex: String = "#0891B2") {
         (tv.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (selected) "#0891B2" else "#1E293B")
+            Color.parseColor(if (selected) selectedHex else "#1E293B")
         )
         tv.setTextColor(if (selected) Color.WHITE else Color.parseColor("#94A3B8"))
     }
@@ -213,6 +231,7 @@ class OverlayMacroSettingsView(
             if (activeTab == 0) {
                 buildMacroSwitcherRow()
                 buildPassiveQuickControlsRow()
+                buildAutoScaleControls(standaloneSave = true)
             }
             buildLockedOverlayNotice()
             return
@@ -220,27 +239,38 @@ class OverlayMacroSettingsView(
 
         val pickerRef = addPickerRef
         val swapId = quickImageSwapActionId
+        val appPickId = appPickerActionId
         val editId = editingActionId
         when {
-            pickerRef != null -> buildAddActionPicker(pickerRef)
+            pickerRef != null -> buildAddActionPicker(pickerRef, forStuck = addPickerForStuck)
+            appPickId != null -> {
+                val target = macro.findAnyAction(appPickId)
+                if (target is LaunchAppAction || target is ExitAppAction) {
+                    buildInstalledAppPickerView(target)
+                } else {
+                    appPickerActionId = null
+                    rebuildBody()
+                }
+            }
             swapId != null -> {
-                val target = macro.actions.findAction(swapId) as? ImageAction
+                val target = macro.findAnyAction(swapId) as? ImageAction
                 if (target != null) buildQuickImageSwapView(target)
                 else {
                     quickImageSwapActionId = null
-                    buildActionList()
+                    rebuildBody()
                 }
             }
             editId != null -> {
-                val target = macro.actions.findAction(editId)
+                val target = macro.findAnyAction(editId)
                 if (target != null) buildActionEditor(target)
                 else {
                     editingActionId = null
-                    buildActionList()
+                    rebuildBody()
                 }
             }
             activeTab == 0 -> buildMacroSettingsForm()
-            else -> buildActionList()
+            activeTab == 1 -> buildActionList()
+            else -> buildWatchdogTab()
         }
     }
 
@@ -313,35 +343,158 @@ class OverlayMacroSettingsView(
         val expLabel = MacroSecurity.remainingTimeLabel(macro, now)
         val lines = buildList {
             add("🔒 Macro ini dikunci dengan sandi.")
-            add("Daftar aksi & setelan disembunyikan agar tidak dapat diubah atau disalin.")
+            add("Daftar aksi & setelan lain disembunyikan, namun Auto-Scale Layar & Pasif ON/OFF tetap bebas diatur tanpa sandi.")
             if (macro.isPassive) {
                 add(
-                    if (macro.passiveEnabled) "🔗 Mode Pasif: ON — dapat ditarik oleh macro aktif lain (ON/OFF bebas tanpa sandi)."
-                    else "⛔ Mode Pasif: OFF — tidak dapat ditarik (otomatis dilewati/skip oleh macro aktif; ON/OFF bebas tanpa sandi)."
+                    if (macro.passiveEnabled) "🔗 Mode Pasif: ON — dapat ditarik oleh macro aktif lain."
+                    else "⛔ Mode Pasif: OFF — tidak dapat ditarik (otomatis dilewati/skip)."
                 )
             }
             if (expLabel != null) {
                 add("⏳ Masa berlaku: $expLabel (${MacroSecurity.formatDeadlineDate(macro.expiresAtEpochMs)})")
             }
-            val scaleTransform = ResolutionScaler.forMacro(macro, screenW, screenH)
-            if (scaleTransform.isScaling) {
-                add("📐 Auto-Scale aktif: ${scaleTransform.describe()}")
-            }
-            add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit atau mengubah status Aktif/Pasif.")
+            add("Buka kunci melalui aplikasi Wjust macro dengan sandi untuk mengedit daftar aksi atau mengubah status Aktif/Pasif.")
         }.joinToString("\n\n")
 
         val box = TextView(context).apply {
             text = lines
             setTextColor(Color.parseColor("#E2E8F0"))
-            textSize = 11.5f
-            setPadding(dp(12), dp(12), dp(12), dp(12))
+            textSize = 11f
+            setPadding(dp(10), dp(10), dp(10), dp(10))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#18243E"))
                 cornerRadius = dp(12).toFloat()
                 setStroke(dp(1), Color.parseColor("#A78BFA"))
             }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(6)
+            }
         }
         bodyContainer.addView(box)
+    }
+
+    private data class AutoScaleHolders(
+        val autoScaleCheck: CheckBox,
+        val srcWField: EditText,
+        val srcHField: EditText,
+        val getMode: () -> ResolutionScaleMode
+    )
+
+    /**
+     * Reusable all-device Auto-Scale controls panel.
+     * Rendered in both unlocked settings AND locked macros (with [standaloneSave] = true, no password required!).
+     */
+    private fun buildAutoScaleControls(standaloneSave: Boolean): AutoScaleHolders {
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(
+            sectionLabel(
+                if (standaloneSave) "📐 Auto-Scale Semua Perangkat (Tanpa Sandi)"
+                else "📐 Auto-Scale Resolusi Layar (Semua Perangkat)"
+            )
+        )
+        val autoScaleCheck = CheckBox(context).apply {
+            text = "Aktifkan Auto-Scale (HP, Tablet, Foldable, Emulator)"
+            isChecked = macro.autoScaleResolution
+            setTextColor(Color.WHITE)
+            textSize = 11.2f
+        }
+        bodyContainer.addView(autoScaleCheck)
+
+        val srcWField = addNumberRow(
+            bodyContainer,
+            "Lebar asal (px, 0=otomatis)",
+            macro.sourceWidth.takeIf { it > 0 }?.toString() ?: ""
+        )
+        val srcHField = addNumberRow(
+            bodyContainer,
+            "Tinggi asal (px, 0=otomatis)",
+            macro.sourceHeight.takeIf { it > 0 }?.toString() ?: ""
+        )
+
+        val quickRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(5)
+            }
+        }
+        quickRow.addView(makeBtn("Layar Ini (${screenW}×${screenH})", "#1E293B", marginEndDp = 5) {
+            srcWField.setText(screenW.toString())
+            srcHField.setText(screenH.toString())
+        })
+        quickRow.addView(makeBtn("⇄ Putar", "#1E293B", marginEndDp = 0) {
+            val curW = srcWField.text.toString().ifBlank { screenW.toString() }
+            val curH = srcHField.text.toString().ifBlank { screenH.toString() }
+            srcWField.setText(curH)
+            srcHField.setText(curW)
+        })
+        bodyContainer.addView(quickRow)
+
+        // Horizontal preset bar covering Phones, Tablets, Foldables & Emulators
+        val presetScroll = HorizontalScrollView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        val presetRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+        for (p in ResolutionScaler.DEVICE_PRESETS) {
+            presetRow.addView(makeBtn(p.label, "#1E293B", marginEndDp = 4) {
+                srcWField.setText(p.width.toString())
+                srcHField.setText(p.height.toString())
+            })
+        }
+        presetScroll.addView(presetRow)
+        bodyContainer.addView(presetScroll)
+
+        var chosenScaleMode = macro.scaleMode
+        val scaleModeRow = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(4)
+            }
+        }
+        val scaleModeBtns = mutableListOf<Pair<ResolutionScaleMode, TextView>>()
+        ResolutionScaleMode.entries.forEach { mode ->
+            val btn = makeBtn(mode.label, if (mode == chosenScaleMode) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                chosenScaleMode = mode
+                scaleModeBtns.forEach { (m, tv) ->
+                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenScaleMode) "#0284C7" else "#1E293B"))
+                }
+            }.apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(4)
+                }
+            }
+            scaleModeBtns += mode to btn
+            scaleModeRow.addView(btn)
+        }
+        bodyContainer.addView(scaleModeRow)
+
+        val curTransform = ResolutionScaler.forMacro(macro, screenW, screenH)
+        bodyContainer.addView(TextView(context).apply {
+            text = if (curTransform.isScaling) "Aktif: ${curTransform.describe()}" else "Layar ini: ${screenW}×${screenH}"
+            setTextColor(Color.parseColor(if (curTransform.isScaling) "#22D3EE" else "#94A3B8"))
+            textSize = 10f
+            setPadding(dp(2), 0, dp(2), dp(4))
+        })
+
+        if (standaloneSave) {
+            val saveScaleRow = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.END
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(4)
+                    bottomMargin = dp(4)
+                }
+            }
+            saveScaleRow.addView(makeBtn("Simpan Auto-Scale", "#0D9488") {
+                val sw = (srcWField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000)
+                val sh = (srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000)
+                onUpdateAutoScale(autoScaleCheck.isChecked, sw, sh, chosenScaleMode)
+            })
+            bodyContainer.addView(saveScaleRow)
+        }
+
+        return AutoScaleHolders(autoScaleCheck, srcWField, srcHField) { chosenScaleMode }
     }
 
     // ---- TAB 1: Complete Macro Settings ----
@@ -373,68 +526,8 @@ class OverlayMacroSettingsView(
         val randomDelayField = addNumberRow(bodyContainer, "Acak jeda (+ms)", macro.randomDelayMs.toString())
         val maxMinField = addNumberRow(bodyContainer, "Stop otomatis (menit, 0=off)", macro.maxDurationMin.toString())
 
-        // Auto-Scale Resolusi Layar section
-        bodyContainer.addView(dividerLine())
-        bodyContainer.addView(sectionLabel("Auto-Scale Resolusi Layar"))
-        val autoScaleCheck = CheckBox(context).apply {
-            text = "Aktifkan Auto-Scale (antar HP / Redfinger)"
-            isChecked = macro.autoScaleResolution
-            setTextColor(Color.WHITE)
-            textSize = 11.5f
-        }
-        bodyContainer.addView(autoScaleCheck)
-
-        val srcWField = addNumberRow(
-            bodyContainer,
-            "Lebar asal (px, 0=otomatis)",
-            macro.sourceWidth.takeIf { it > 0 }?.toString() ?: ""
-        )
-        val srcHField = addNumberRow(
-            bodyContainer,
-            "Tinggi asal (px, 0=otomatis)",
-            macro.sourceHeight.takeIf { it > 0 }?.toString() ?: ""
-        )
-        val scalePresetsRow = LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(6)
-            }
-        }
-        scalePresetsRow.addView(makeBtn("Layar Ini (${screenW}×${screenH})", "#1E293B", marginEndDp = 5) {
-            srcWField.setText(screenW.toString())
-            srcHField.setText(screenH.toString())
-        })
-        scalePresetsRow.addView(makeBtn("⇄ Putar", "#1E293B", marginEndDp = 0) {
-            val curW = srcWField.text.toString().ifBlank { screenW.toString() }
-            val curH = srcHField.text.toString().ifBlank { screenH.toString() }
-            srcWField.setText(curH)
-            srcHField.setText(curW)
-        })
-        bodyContainer.addView(scalePresetsRow)
-
-        var chosenScaleMode = macro.scaleMode
-        val scaleModeRow = LinearLayout(context).apply {
-            orientation = VERTICAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(4)
-            }
-        }
-        val scaleModeBtns = mutableListOf<Pair<ResolutionScaleMode, TextView>>()
-        ResolutionScaleMode.entries.forEach { mode ->
-            val btn = makeBtn(mode.label, if (mode == chosenScaleMode) "#0284C7" else "#1E293B", marginEndDp = 0) {
-                chosenScaleMode = mode
-                scaleModeBtns.forEach { (m, tv) ->
-                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenScaleMode) "#0284C7" else "#1E293B"))
-                }
-            }.apply {
-                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                    bottomMargin = dp(4)
-                }
-            }
-            scaleModeBtns += mode to btn
-            scaleModeRow.addView(btn)
-        }
-        bodyContainer.addView(scaleModeRow)
+        // Auto-Scale Resolusi Layar (All Devices)
+        val scaleHolders = buildAutoScaleControls(standaloneSave = false)
 
         // Auto-Recover Stuck Macro section
         bodyContainer.addView(dividerLine())
@@ -495,10 +588,10 @@ class OverlayMacroSettingsView(
                 maxDurationMin = (maxMinField.text.toString().toIntOrNull() ?: macro.maxDurationMin).coerceIn(0, 1440),
                 autoRecoverStuckSec = (stuckSecField.text.toString().toIntOrNull() ?: macro.autoRecoverStuckSec).coerceIn(0, 3600),
                 stuckRecoveryMode = chosenRecovery,
-                sourceWidth = (srcWField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
-                sourceHeight = (srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
-                autoScaleResolution = autoScaleCheck.isChecked,
-                scaleMode = chosenScaleMode
+                sourceWidth = (scaleHolders.srcWField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
+                sourceHeight = (scaleHolders.srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
+                autoScaleResolution = scaleHolders.autoScaleCheck.isChecked,
+                scaleMode = scaleHolders.getMode()
             )
             macro = updated
             onUpdateMacro(updated)
@@ -507,7 +600,7 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(saveRow)
     }
 
-    // ---- TAB 2: Complete Action Tree ----
+    // ---- TAB 2: Complete Main Action Tree ----
 
     private fun buildActionList() {
         val topBtns = LinearLayout(context).apply {
@@ -517,6 +610,7 @@ class OverlayMacroSettingsView(
             }
         }
         topBtns.addView(makeBtn("+ Tambah Aksi", "#1D4ED8", marginEndDp = 6) {
+            addPickerForStuck = false
             addPickerRef = ContainerRef.ROOT
             rebuildBody()
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
@@ -534,12 +628,121 @@ class OverlayMacroSettingsView(
             })
         } else {
             macro.actions.forEachIndexed { idx, action ->
-                bodyContainer.addView(buildActionCard(idx, macro.actions.size, action, depth = 0))
+                bodyContainer.addView(buildActionCard(idx, macro.actions.size, action, depth = 0, isStuckTree = false))
             }
         }
     }
 
-    private fun buildActionCard(idx: Int, siblingCount: Int, action: Action, depth: Int): LinearLayout {
+    // ---- TAB 3: Out-of-Band Anti-Macet (Watchdog) Actions ----
+
+    private fun buildWatchdogTab() {
+        val infoBox = TextView(context).apply {
+            text = "🛡 Aksi di luar aksi utama. Otomatis aktif jika aksi utama macet melebihi batas detik."
+            setTextColor(Color.parseColor("#FDBA74"))
+            textSize = 10.5f
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#2A1508"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#EA580C"))
+            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        bodyContainer.addView(infoBox)
+
+        val watchdogEnabled = macro.autoRecoverStuckSec > 0 && macro.stuckRecoveryMode == StuckRecoveryMode.RUN_WATCHDOG_ACTIONS
+        val enableCheck = CheckBox(context).apply {
+            text = "Aktifkan Watchdog Anti-Macet"
+            isChecked = watchdogEnabled
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+        }
+        bodyContainer.addView(enableCheck)
+
+        val secField = addNumberRow(
+            bodyContainer,
+            "Deteksi macet setelah (detik)",
+            if (macro.autoRecoverStuckSec > 0) macro.autoRecoverStuckSec.toString() else "60"
+        )
+        val restartAfterCheck = CheckBox(context).apply {
+            text = "Setelah selesai, ulangi aksi utama dari awal"
+            isChecked = macro.stuckRestartAfter
+            setTextColor(Color.parseColor("#E2E8F0"))
+            textSize = 11f
+        }
+        bodyContainer.addView(restartAfterCheck)
+
+        val cfgBtns = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+                topMargin = dp(2)
+            }
+        }
+        cfgBtns.addView(makeBtn("Simpan Watchdog", "#C2410C", marginEndDp = 5) {
+            val sec = (secField.text.toString().toIntOrNull() ?: 60).coerceIn(5, 3600)
+            val updated = macro.copy(
+                autoRecoverStuckSec = if (enableCheck.isChecked) sec else 0,
+                stuckRecoveryMode = if (enableCheck.isChecked) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else macro.stuckRecoveryMode,
+                stuckRestartAfter = restartAfterCheck.isChecked
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            updateHeader()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(5) })
+        cfgBtns.addView(makeBtn("+ Aksi Anti-Macet", "#1D4ED8", marginEndDp = 0) {
+            addPickerForStuck = true
+            addPickerRef = ContainerRef.ROOT
+            rebuildBody()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        bodyContainer.addView(cfgBtns)
+
+        bodyContainer.addView(makeBtn("⚡ Template: Keluar & Masuk Ulang Aplikasi", "#0F766E", marginEndDp = 0) {
+            val launchAct = LaunchAppAction(delayAfterMs = 8000L)
+            val tpl = listOf(
+                ExitAppAction(delayAfterMs = 1500L),
+                WaitAction(durationMs = 1500L, delayAfterMs = 0L),
+                launchAct
+            )
+            val sec = (secField.text.toString().toIntOrNull() ?: 60).coerceIn(5, 3600)
+            val updated = macro.copy(
+                stuckActions = macro.stuckActions + tpl,
+                stuckRecoveryMode = StuckRecoveryMode.RUN_WATCHDOG_ACTIONS,
+                autoRecoverStuckSec = if (macro.autoRecoverStuckSec <= 0) sec else macro.autoRecoverStuckSec
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            editingActionId = launchAct.id
+            rebuildBody()
+        }.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        })
+
+        if (macro.stuckActions.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Belum ada aksi Anti-Macet. Tambahkan aksi (mis. Keluar Aplikasi → Masuk Aplikasi) agar otomatis berjalan saat aksi utama macet."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 11f
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+            })
+        } else {
+            macro.stuckActions.forEachIndexed { idx, action ->
+                bodyContainer.addView(buildActionCard(idx, macro.stuckActions.size, action, depth = 0, isStuckTree = true))
+            }
+        }
+    }
+
+    private fun buildActionCard(
+        idx: Int,
+        siblingCount: Int,
+        action: Action,
+        depth: Int,
+        isStuckTree: Boolean = false
+    ): LinearLayout {
         val card = LinearLayout(context).apply {
             orientation = VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(6))
@@ -670,15 +873,16 @@ class OverlayMacroSettingsView(
                     layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
                 })
                 bHeader.addView(makeSmallIconBtn("+🎯 Klik", "#0F766E", marginEndDp = 4) {
-                    onAddBranchClickTargetOnScreen(action.id, slot)
+                    onAddBranchClickTargetOnScreen(action.id, slot, isStuckTree)
                 })
                 bHeader.addView(makeSmallIconBtn("+ Aksi", "#1E293B", marginEndDp = 0) {
+                    addPickerForStuck = isStuckTree
                     addPickerRef = ContainerRef(action.id, slot)
                     rebuildBody()
                 })
                 box.addView(bHeader)
                 children.forEachIndexed { cIdx, child ->
-                    box.addView(buildActionCard(cIdx, children.size, child, depth + 1))
+                    box.addView(buildActionCard(cIdx, children.size, child, depth + 1, isStuckTree = isStuckTree))
                 }
                 card.addView(box)
             }
@@ -694,7 +898,7 @@ class OverlayMacroSettingsView(
 
     // ---- Add Action Picker inside Overlay ----
 
-    private fun buildAddActionPicker(ref: ContainerRef) {
+    private fun buildAddActionPicker(ref: ContainerRef, forStuck: Boolean) {
         val bar = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -705,7 +909,11 @@ class OverlayMacroSettingsView(
             rebuildBody()
         })
         bar.addView(TextView(context).apply {
-            text = if (ref.slot != null) "Tambah ke: ${ref.slot.label}" else "Pilih Jenis Aksi"
+            text = when {
+                ref.slot != null -> "Tambah ke: ${ref.slot.label}"
+                forStuck -> "Tambah Aksi Anti-Macet"
+                else -> "Pilih Jenis Aksi"
+            }
             setTextColor(Color.WHITE)
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
@@ -713,7 +921,9 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(bar)
 
         val kinds = listOf(
-            ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR, ActionKind.CLICK, ActionKind.LONG_PRESS,
+            ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR,
+            ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
+            ActionKind.CLICK, ActionKind.LONG_PRESS,
             ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
             ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP
         )
@@ -731,7 +941,7 @@ class OverlayMacroSettingsView(
                 setOnClickListener {
                     val defaultImg = store.images.value.firstOrNull()?.name.orEmpty()
                     val created = k.create(screenW, screenH, imageName = defaultImg)
-                    onAddAction(ref, created)
+                    onAddAction(ref, created, forStuck)
                     addPickerRef = null
                     editingActionId = if (k == ActionKind.STOP || k == ActionKind.RESTART) null else created.id
                 }
@@ -1296,6 +1506,76 @@ class OverlayMacroSettingsView(
                 }
             }
 
+            is ExitAppAction -> {
+                var chosenMode = action.mode
+                bodyContainer.addView(sectionLabel("Cara Keluar Aplikasi"))
+                val modeBtns = mutableListOf<Pair<ExitAppMode, TextView>>()
+                ExitAppMode.entries.forEach { mode ->
+                    val b = makeBtn(mode.label, if (mode == chosenMode) "#EA580C" else "#1E293B", marginEndDp = 0) {
+                        chosenMode = mode
+                        modeBtns.forEach { (m, tv) ->
+                            (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenMode) "#EA580C" else "#1E293B"))
+                        }
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                            bottomMargin = dp(4)
+                        }
+                    }
+                    modeBtns += mode to b
+                    bodyContainer.addView(b)
+                }
+                addPickTargetBtn(
+                    if (action.packageName.isBlank()) "📱 Pilih Aplikasi Target (Opsional)"
+                    else "📱 Target: ${action.appLabel.ifBlank { action.packageName }}"
+                ) {
+                    appPickerActionId = action.id
+                    rebuildBody()
+                }
+                val pkgF = addTextRow(bodyContainer, "Package Name (opsional)", action.packageName)
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah keluar (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    val pkg = pkgF.text.toString().trim()
+                    saveEdited {
+                        action.copy(
+                            mode = chosenMode,
+                            packageName = pkg,
+                            appLabel = if (pkg == action.packageName) action.appLabel else "",
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is LaunchAppAction -> {
+                addPickTargetBtn(
+                    if (action.packageName.isBlank()) "📱 Pilih Aplikasi / Game Terpasang"
+                    else "📱 Ganti: ${action.appLabel.ifBlank { action.packageName }}"
+                ) {
+                    appPickerActionId = action.id
+                    rebuildBody()
+                }
+                val pkgF = addTextRow(bodyContainer, "Package Name Aplikasi", action.packageName)
+                val freshChk = CheckBox(context).apply {
+                    text = "Buka ulang bersih dari awal (Fresh Start)"
+                    isChecked = action.freshStart
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                bodyContainer.addView(freshChk)
+                val delF = addNumberRow(bodyContainer, "Jeda loading sesudah masuk (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    val pkg = pkgF.text.toString().trim()
+                    saveEdited {
+                        action.copy(
+                            packageName = pkg,
+                            appLabel = if (pkg == action.packageName) action.appLabel else "",
+                            freshStart = freshChk.isChecked,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
             is RestartAction, is StopAction -> {
                 bodyContainer.addView(TextView(context).apply {
                     text = "Aksi kontrol alur (dapat diatur peluang Random Event di atas)."
@@ -1307,6 +1587,110 @@ class OverlayMacroSettingsView(
                 }
             }
         }
+    }
+
+    private fun buildInstalledAppPickerView(action: Action) {
+        val bar = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        bar.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            appPickerActionId = null
+            rebuildBody()
+        })
+        bar.addView(TextView(context).apply {
+            text = "Pilih Aplikasi Terpasang"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        bodyContainer.addView(bar)
+
+        val searchF = addTextRow(bodyContainer, "Cari nama / package", "")
+        val listHolder = LinearLayout(context).apply { orientation = VERTICAL }
+        bodyContainer.addView(listHolder)
+
+        val allApps = InstalledAppsHelper.loadLaunchableApps(context)
+
+        fun renderFiltered(queryRaw: String) {
+            listHolder.removeAllViews()
+            val q = queryRaw.trim().lowercase()
+            if (action is ExitAppAction) {
+                listHolder.addView(makeBtn("Kosongkan (aplikasi apa saja yang aktif)", "#475569", marginEndDp = 0) {
+                    onUpdateAction(action.id) { cur ->
+                        if (cur is ExitAppAction) cur.copy(packageName = "", appLabel = "") else cur
+                    }
+                    appPickerActionId = null
+                    editingActionId = action.id
+                    rebuildBody()
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+            }
+            val matched = if (q.isEmpty()) allApps else allApps.filter {
+                it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q)
+            }
+            if (matched.isEmpty()) {
+                listHolder.addView(TextView(context).apply {
+                    text = "Tidak ada aplikasi cocok."
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 11f
+                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                })
+                return
+            }
+            for (info in matched.take(60)) {
+                val item = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1E293B"))
+                        cornerRadius = dp(9).toFloat()
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                        bottomMargin = dp(4)
+                    }
+                    setOnClickListener {
+                        onUpdateAction(action.id) { cur ->
+                            when (cur) {
+                                is LaunchAppAction -> cur.copy(packageName = info.packageName, appLabel = info.label)
+                                is ExitAppAction -> cur.copy(packageName = info.packageName, appLabel = info.label)
+                                else -> cur
+                            }
+                        }
+                        appPickerActionId = null
+                        editingActionId = action.id
+                        rebuildBody()
+                    }
+                }
+                item.addView(TextView(context).apply {
+                    text = info.label
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                item.addView(TextView(context).apply {
+                    text = info.packageName
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 9.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                listHolder.addView(item)
+            }
+        }
+
+        searchF.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                renderFiltered(s?.toString().orEmpty())
+            }
+        })
+        renderFiltered("")
     }
 
     private fun addPickTargetBtn(label: String, onClick: () -> Unit) {
@@ -1323,6 +1707,7 @@ class OverlayMacroSettingsView(
         children: List<Action>,
         accentBgHex: String
     ) {
+        val isStuckParent = macro.isStuckAction(parentId)
         // Show existing branch actions with 1-tap 🎯 target positioning & ✎ edit
         if (children.isNotEmpty()) {
             children.forEachIndexed { idx, child ->
@@ -1369,9 +1754,10 @@ class OverlayMacroSettingsView(
             }
         }
         btnRow.addView(makeBtn("+ 🎯 Target Klik", "#0F766E", marginEndDp = 5) {
-            onAddBranchClickTargetOnScreen(parentId, slot)
+            onAddBranchClickTargetOnScreen(parentId, slot, isStuckParent)
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.15f).apply { marginEnd = dp(5) })
         btnRow.addView(makeBtn("+ Aksi Lain (${children.size})", accentBgHex) {
+            addPickerForStuck = isStuckParent
             addPickerRef = ContainerRef(parentId, slot)
             rebuildBody()
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))

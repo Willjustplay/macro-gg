@@ -59,6 +59,7 @@ import com.example.data.Slot
 import com.example.data.SwipeAction
 import com.example.data.TextAction
 import com.example.data.ZoomAction
+import com.example.data.isStuckAction
 import com.example.data.walkWithSlot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -672,9 +673,19 @@ class FloatingOverlayService : Service() {
                 AutomationCoordinator.updateActiveMacro(persist = true) { updated }
                 Toast.makeText(this, "Setelan macro disimpan", Toast.LENGTH_SHORT).show()
             },
-            onAddAction = { ref, newAction ->
+            onUpdateAutoScale = { enabled, srcW, srcH, mode ->
+                val saved = AutomationCoordinator.updateAutoScaleWithoutUnlock(enabled, srcW, srcH, mode)
+                macroSettingsView?.refreshWithMacro(saved)
+                val st = if (saved.autoScaleResolution) "ON (${saved.scaleMode.label})" else "OFF"
+                Toast.makeText(this, "Auto-Scale disimpan: $st", Toast.LENGTH_SHORT).show()
+            },
+            onAddAction = { ref, newAction, forStuck ->
                 refreshScreenSize()
-                AutomationCoordinator.addActionFromOverlay(ref, newAction, screenWidth, screenHeight)
+                if (forStuck) {
+                    AutomationCoordinator.addStuckActionFromOverlay(ref, newAction, screenWidth, screenHeight)
+                } else {
+                    AutomationCoordinator.addActionFromOverlay(ref, newAction, screenWidth, screenHeight)
+                }
                 macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
             onUpdateAction = { actionId, transform ->
@@ -709,7 +720,7 @@ class FloatingOverlayService : Service() {
                 dismissMacroSettingsPanel()
                 launchRegionPicker(actionId, reopenSettingsActionId = actionId)
             },
-            onAddBranchClickTargetOnScreen = { parentId, slot ->
+            onAddBranchClickTargetOnScreen = { parentId, slot, isStuckBranch ->
                 refreshScreenSize()
                 val tapMs = store.settings.value.defaultTapDurationMs
                 val created = ClickAction(
@@ -718,7 +729,11 @@ class FloatingOverlayService : Service() {
                     durationMs = tapMs,
                     delayAfterMs = 250L
                 )
-                AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                if (isStuckBranch) {
+                    AutomationCoordinator.addStuckActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                } else {
+                    AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                }
                 dismissMacroSettingsPanel()
                 launchTargetPicker(created.id, reopenSettingsActionId = parentId)
             },
@@ -762,6 +777,9 @@ class FloatingOverlayService : Service() {
         val found = activeMacro.actions
             .walkWithSlot()
             .firstOrNull { it.first.id == actionId }
+            ?: activeMacro.stuckActions
+                .walkWithSlot()
+                .firstOrNull { it.first.id == actionId }
         if (found == null) {
             Toast.makeText(this, "Aksi target tidak ditemukan.", Toast.LENGTH_SHORT).show()
             return
@@ -862,13 +880,15 @@ class FloatingOverlayService : Service() {
                 dismissTargetPicker()
                 Toast.makeText(this, "Posisi target disimpan ($nx1, $ny1)", Toast.LENGTH_SHORT).show()
                 if (reopenSettingsActionId != null) {
-                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             },
             onCancel = {
                 dismissTargetPicker()
                 if (reopenSettingsActionId != null) {
-                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             }
         )
@@ -1167,13 +1187,15 @@ class FloatingOverlayService : Service() {
                 }
                 dismissCropOverlay()
                 if (!reopenSettingsActionId.isNullOrBlank()) {
-                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             },
             onCancel = {
                 dismissCropOverlay()
                 if (!reopenSettingsActionId.isNullOrBlank()) {
-                    showMacroSettingsPanel(initialTab = 1, initialEditActionId = reopenSettingsActionId)
+                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             }
         )

@@ -280,5 +280,40 @@ class MacroAccessibilityService : AccessibilityService() {
             val svc = instance ?: return false
             return svc.performRecordedGesture(gesture, speed)
         }
+
+        suspend fun dispatchGlobalHome(): Boolean {
+            val svc = instance ?: return false
+            return withContext(Dispatchers.Main.immediate) {
+                runCatching { svc.performGlobalAction(GLOBAL_ACTION_HOME) }.getOrDefault(false)
+            }
+        }
+
+        suspend fun dispatchGlobalBack(): Boolean {
+            val svc = instance ?: return false
+            return withContext(Dispatchers.Main.immediate) {
+                runCatching { svc.performGlobalAction(GLOBAL_ACTION_BACK) }.getOrDefault(false)
+            }
+        }
+
+        suspend fun dispatchGlobalRecents(): Boolean {
+            val svc = instance ?: return false
+            return withContext(Dispatchers.Main.immediate) {
+                runCatching { svc.performGlobalAction(GLOBAL_ACTION_RECENTS) }.getOrDefault(false)
+            }
+        }
+
+        /**
+         * Launches an activity intent using the active AccessibilityService context, which is
+         * exempt from Android 10–16 Background Activity Launch restrictions.
+         */
+        suspend fun launchActivityIntent(intent: android.content.Intent): Boolean {
+            val svc = instance ?: return false
+            return withContext(Dispatchers.Main.immediate) {
+                runCatching {
+                    svc.startActivity(intent)
+                    true
+                }.getOrDefault(false)
+            }
+        }
     }
 }

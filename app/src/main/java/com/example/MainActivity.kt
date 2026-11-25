@@ -135,6 +135,7 @@ private fun WjustMacroApp() {
     var editingMacroId by remember { mutableStateOf<String?>(null) }
     var unlockedMacroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var securitySheetMacroId by remember { mutableStateOf<String?>(null) }
+    var autoScaleSheetMacroId by remember { mutableStateOf<String?>(null) }
     var logoSheetMacroId by remember { mutableStateOf<String?>(null) }
     var passwordPromptMacroId by remember { mutableStateOf<String?>(null) }
     var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
@@ -505,7 +506,7 @@ private fun WjustMacroApp() {
                 snackbarHostState = snackbarHostState,
                 onUpdateMacro = { updated ->
                     val toSave = if (
-                        updated.actions != editingMacro.actions &&
+                        (updated.actions != editingMacro.actions || updated.stuckActions != editingMacro.stuckActions) &&
                         (updated.sourceWidth <= 0 || updated.sourceHeight <= 0) &&
                         com.example.data.ResolutionScaler.hasCoordinateActions(updated)
                     ) {
@@ -649,6 +650,7 @@ private fun WjustMacroApp() {
                             onLaunchMacroOverlay = ::launchMacroIfAllowed,
                             onChangeMacroLogo = ::requestChangeLogo,
                             onOpenMacroSecurity = ::requestOpenSecurity,
+                            onOpenAutoScale = { m -> autoScaleSheetMacroId = m.id },
                             onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
                             onExportMacro = ::safeExportMacro,
@@ -806,6 +808,22 @@ private fun WjustMacroApp() {
                     }
                 },
                 onDismiss = { securitySheetMacroId = null }
+            )
+        }
+
+        // Passwordless Auto-Scale Settings Sheet (always accessible even when macro is locked)
+        val scaleMacro = autoScaleSheetMacroId?.let { id -> macros.firstOrNull { it.id == id } }
+        if (scaleMacro != null) {
+            val (scaleSw, scaleSh) = screenMetrics()
+            com.example.ui.AutoScaleSettingsSheet(
+                macro = scaleMacro,
+                screenW = scaleSw,
+                screenH = scaleSh,
+                onSave = { enabled, srcW, srcH, mode ->
+                    viewModel.updateMacroAutoScale(scaleMacro, enabled, srcW, srcH, mode)
+                    autoScaleSheetMacroId = null
+                },
+                onDismiss = { autoScaleSheetMacroId = null }
             )
         }
 

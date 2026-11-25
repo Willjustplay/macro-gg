@@ -43,7 +43,7 @@ object MacroBundleCodec {
         fun visit(m: Macro) {
             if (!visited.add(m.id)) return
             result += m
-            for (action in m.actions.walk()) {
+            for (action in m.allActionsSequence()) {
                 if (action is RunMacroAction && action.targetMacroId.isNotBlank()) {
                     lookupMacro(action.targetMacroId)?.let { visit(it) }
                 }
@@ -131,7 +131,8 @@ object MacroBundleCodec {
             val cloned = macro.copy(
                 id = idGenerator(),
                 originId = macro.originId.ifBlank { macro.id },
-                actions = macro.actions.map { it.withNewIds() }
+                actions = macro.actions.map { it.withNewIds() },
+                stuckActions = macro.stuckActions.map { it.withNewIds() }
             )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
         }
@@ -194,7 +195,7 @@ object MacroBundleCodec {
         val idRemap = HashMap<String, String>()
         rawMacros.forEach { m -> idRemap[m.id] = idGenerator() }
         val remappedMacros = rawMacros.map { m ->
-            val mappedActions = m.actions.map { it.withNewIds() }.mapAllActions { a ->
+            fun remapList(list: List<Action>) = list.map { it.withNewIds() }.mapAllActions { a ->
                 if (a is RunMacroAction && a.targetMacroId in idRemap) {
                     a.copy(targetMacroId = idRemap[a.targetMacroId]!!)
                 } else a
@@ -202,7 +203,8 @@ object MacroBundleCodec {
             m.copy(
                 id = idRemap[m.id] ?: idGenerator(),
                 originId = m.originId.ifBlank { m.id },
-                actions = mappedActions
+                actions = remapList(m.actions),
+                stuckActions = remapList(m.stuckActions)
             )
         }
 

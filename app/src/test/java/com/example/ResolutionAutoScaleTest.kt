@@ -451,4 +451,106 @@ class ResolutionAutoScaleTest {
         assertTrue("Expected Y near 207, got ${clicks[0].second}", abs(clicks[0].second - 207) <= 3)
         assertTrue("Expected scale info in log: $logs", logs.any { it.contains("skala ") })
     }
+
+    @Test
+    fun adaptiveAndFitInsideMapAcrossAllDeviceFormFactorsAndRoundTrip() {
+        val targetDevices = listOf(
+            "16:9 HD" to (720 to 1280),
+            "16:9 540p" to (540 to 960),
+            "HP QHD+ 20:9" to (1440 to 3200),
+            "HP 21:9" to (1080 to 2520),
+            "Tablet 16:10" to (1600 to 2560),
+            "Tablet 4:3" to (1536 to 2048),
+            "Foldable" to (1812 to 2176),
+            "Tablet Landscape" to (2560 to 1600)
+        )
+        val samplePoints = listOf(
+            54 to 120,     // Top-left edge HUD
+            1026 to 120,   // Top-right edge HUD
+            540 to 1200,   // Exact center
+            54 to 2280,    // Bottom-left edge HUD
+            1026 to 2280,  // Bottom-right edge HUD
+            350 to 800     // Interior mid-point
+        )
+
+        for ((label, dims) in targetDevices) {
+            val (dw, dh) = dims
+            for (mode in listOf(ResolutionScaleMode.ADAPTIVE, ResolutionScaleMode.FIT_INSIDE)) {
+                val macro = Macro(
+                    sourceWidth = 1080,
+                    sourceHeight = 2400,
+                    autoScaleResolution = true,
+                    scaleMode = mode
+                )
+                val t = ResolutionScaler.forMacro(macro, dw, dh)
+                assertTrue("$label $mode should scale", t.isScaling)
+
+                // Exact center always maps to exact target center
+                val (cx, cy) = t.scalePoint(t.srcW / 2, t.srcH / 2)
+                assertTrue("$label $mode center X", abs(cx - dw / 2) <= 1)
+                assertTrue("$label $mode center Y", abs(cy - dh / 2) <= 1)
+
+                // Every point stays in bounds and round-trips accurately via unscalePoint
+                for ((px, py) in samplePoints) {
+                    val ax = if (t.srcW > t.srcH) py else px
+                    val ay = if (t.srcW > t.srcH) px else py
+                    val (nx, ny) = t.scalePoint(ax, ay)
+                    assertTrue("$label $mode X in bounds: $nx", nx in 0 until dw)
+                    assertTrue("$label $mode Y in bounds: $ny", ny in 0 until dh)
+                    val (bx, by) = t.unscalePoint(nx, ny)
+                    assertTrue("$label $mode round-trip X ($ax -> $nx -> $bx)", abs(bx - ax) <= 3)
+                    assertTrue("$label $mode round-trip Y ($ay -> $ny -> $by)", abs(by - ay) <= 3)
+                }
+
+                // Region round-trip stays valid
+                val reg = Region(t.srcW / 10, t.srcH / 10, t.srcW * 9 / 10, t.srcH * 9 / 10)
+                val scaledReg = t.scaleRegion(reg)
+                assertTrue("$label $mode scaled region valid", scaledReg.width > 0 && scaledReg.height > 0)
+                val backReg = t.unscaleRegion(scaledReg)
+                assertTrue("$label $mode region left round-trip", abs(backReg.left - reg.left) <= 4)
+                assertTrue("$label $mode region right round-trip", abs(backReg.right - reg.right) <= 4)
+            }
+        }
+    }
+
+    @Test
+    fun lockedMacroAllowsAutoScaleUpdateWithoutBreakingSecuritySeal() {
+        val locked = MacroSecurity.applySecurity(
+            macro = Macro(
+                id = "locked_1",
+                name = "Macro Terkunci",
+                sourceWidth = 1080,
+                sourceHeight = 2400,
+                autoScaleResolution = true,
+                scaleMode = ResolutionScaleMode.PROPORTIONAL,
+                actions = listOf(ClickAction(x = 540, y = 1200))
+            ),
+            isLocked = true,
+            isPassive = false,
+            expiresAtEpochMs = 1_900_000_000_000L,
+            expiryLabel = "30 Hari",
+            newPassword = "pw123"
+        )
+
+        // Update Auto-Scale without unlocking or passing password
+        val updated = MacroSecurity.updateAutoScale(
+            macro = locked,
+            autoScaleResolution = true,
+            sourceWidth = 1536,
+            sourceHeight = 2048,
+            scaleMode = ResolutionScaleMode.ADAPTIVE
+        )
+        assertTrue(updated.isLocked)
+        assertEquals(1536, updated.sourceWidth)
+        assertEquals(2048, updated.sourceHeight)
+        assertEquals(ResolutionScaleMode.ADAPTIVE, updated.scaleMode)
+        assertFalse("Security seal must remain valid after Auto-Scale edit", MacroSecurity.isTampered(updated))
+        assertTrue("Password must still verify", MacroSecurity.verifyPassword(updated, "pw123"))
+
+        // Tampered macro refuses updateAutoScale
+        val tampered = locked.copy(isLocked = false)
+        assertTrue(MacroSecurity.isTampered(tampered))
+        val refused = MacroSecurity.updateAutoScale(tampered, false, 720, 1280, ResolutionScaleMode.FIT_INSIDE)
+        assertEquals(tampered.sourceWidth, refused.sourceWidth)
+    }
 }

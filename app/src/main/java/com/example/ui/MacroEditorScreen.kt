@@ -53,10 +53,12 @@ import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -76,6 +78,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -86,6 +91,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -114,8 +120,10 @@ import com.example.data.ActionKind
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
+import com.example.data.ExitAppAction
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
+import com.example.data.LaunchAppAction
 import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.ResolutionScaleMode
@@ -123,6 +131,7 @@ import com.example.data.ResolutionScaler
 import com.example.data.Slot
 import com.example.data.StuckRecoveryMode
 import com.example.data.TextAction
+import com.example.data.WaitAction
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.duplicateAction
@@ -134,10 +143,11 @@ import com.example.data.reorderInContainer
 import com.example.data.slots
 import com.example.data.summary
 import com.example.data.updateAction
+import com.example.data.updateAnyAction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MacroEditorScreen(
     macro: Macro,
@@ -161,6 +171,7 @@ fun MacroEditorScreen(
     onLaunchRecorderOverlay: (Macro) -> Unit,
     onBack: () -> Unit
 ) {
+    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi Utama, 1 = Anti-Macet (Watchdog)
     var editingAction by remember { mutableStateOf<Action?>(null) }
     var quickSwapImageAction by remember { mutableStateOf<ImageAction?>(null) }
     var addTargetRef by remember { mutableStateOf<ContainerRef?>(null) }
@@ -169,13 +180,15 @@ fun MacroEditorScreen(
     // Smooth in-memory drag preview so drag-and-drop runs at full frame rate without disk I/O jitter.
     val latestMacro by rememberUpdatedState(macro)
     val latestOnUpdateMacro by rememberUpdatedState(onUpdateMacro)
-    var dragPreviewActions by remember(macro.id) { mutableStateOf<List<Action>?>(null) }
-    val displayedActions = dragPreviewActions ?: macro.actions
+    val latestEditorTab by rememberUpdatedState(editorTab)
+    var dragPreviewActions by remember(macro.id, editorTab) { mutableStateOf<List<Action>?>(null) }
+    val activeSourceList = if (editorTab == 0) macro.actions else macro.stuckActions
+    val displayedActions = dragPreviewActions ?: activeSourceList
 
     val listState = rememberLazyListState()
-    var draggingRootId by remember(macro.id) { mutableStateOf<String?>(null) }
-    var draggingRootOffsetY by remember(macro.id) { mutableFloatStateOf(0f) }
-    var overscrollSpeed by remember(macro.id) { mutableFloatStateOf(0f) }
+    var draggingRootId by remember(macro.id, editorTab) { mutableStateOf<String?>(null) }
+    var draggingRootOffsetY by remember(macro.id, editorTab) { mutableFloatStateOf(0f) }
+    var overscrollSpeed by remember(macro.id, editorTab) { mutableFloatStateOf(0f) }
 
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
@@ -188,11 +201,23 @@ fun MacroEditorScreen(
     fun mutateActions(block: (List<Action>) -> List<Action>) {
         dragPreviewActions = null
         val cur = latestMacro
-        latestOnUpdateMacro(cur.copy(actions = block(cur.actions)))
+        if (latestEditorTab == 0) {
+            latestOnUpdateMacro(cur.copy(actions = block(cur.actions)))
+        } else {
+            val wasEmpty = cur.stuckActions.isEmpty()
+            val nextStuck = block(cur.stuckActions)
+            latestOnUpdateMacro(
+                cur.copy(
+                    stuckActions = nextStuck,
+                    stuckRecoveryMode = if (wasEmpty && nextStuck.isNotEmpty()) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else cur.stuckRecoveryMode,
+                    autoRecoverStuckSec = if (wasEmpty && nextStuck.isNotEmpty() && cur.autoRecoverStuckSec <= 0) 60 else cur.autoRecoverStuckSec
+                )
+            )
+        }
     }
 
     fun previewReorder(ref: ContainerRef, fromIndex: Int, toIndex: Int) {
-        val current = dragPreviewActions ?: latestMacro.actions
+        val current = dragPreviewActions ?: (if (latestEditorTab == 0) latestMacro.actions else latestMacro.stuckActions)
         val reordered = current.reorderInContainer(ref, fromIndex, toIndex)
         if (reordered !== current) {
             dragPreviewActions = reordered
@@ -203,13 +228,19 @@ fun MacroEditorScreen(
         val pending = dragPreviewActions
         dragPreviewActions = null
         val cur = latestMacro
-        if (pending != null && pending != cur.actions) {
-            latestOnUpdateMacro(cur.copy(actions = pending))
+        if (latestEditorTab == 0) {
+            if (pending != null && pending != cur.actions) {
+                latestOnUpdateMacro(cur.copy(actions = pending))
+            }
+        } else {
+            if (pending != null && pending != cur.stuckActions) {
+                latestOnUpdateMacro(cur.copy(stuckActions = pending))
+            }
         }
     }
 
     fun checkRootSwap(actionId: String) {
-        val actionsList = dragPreviewActions ?: latestMacro.actions
+        val actionsList = dragPreviewActions ?: (if (latestEditorTab == 0) latestMacro.actions else latestMacro.stuckActions)
         val fromIdx = actionsList.indexOfFirst { it.id == actionId }
         if (fromIdx < 0) return
 
@@ -342,7 +373,12 @@ fun MacroEditorScreen(
                 onClick = { addTargetRef = ContainerRef.ROOT },
                 shape = RoundedCornerShape(16.dp),
                 icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = { Text("Tambah Aksi", fontWeight = FontWeight.SemiBold) }
+                text = {
+                    Text(
+                        if (editorTab == 0) "Tambah Aksi" else "Tambah Aksi Anti-Macet",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             )
         }
     ) { padding ->
@@ -354,31 +390,205 @@ fun MacroEditorScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Quick capture shortcuts
-            item(key = "quick_tools") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = { onLaunchCropOverlay(macro, null) },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
-                    ) {
-                        Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Crop Gambar", maxLines = 1)
+            // Mode Switcher: Aksi Utama vs Aksi Anti-Macet (Watchdog di luar aksi utama)
+            item(key = "editor_tab_switcher") {
+                val tabLabels = listOf(
+                    "Aksi Utama (${macro.actions.size})",
+                    "Anti-Macet (${macro.stuckActions.size})"
+                )
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    tabLabels.forEachIndexed { idx, label ->
+                        SegmentedButton(
+                            selected = editorTab == idx,
+                            onClick = {
+                                editorTab = idx
+                                dragPreviewActions = null
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabLabels.size)
+                        ) {
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
-                    OutlinedButton(
-                        onClick = { onLaunchRecorderOverlay(macro) },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
+                }
+            }
+
+            if (editorTab == 0) {
+                // Quick capture shortcuts for Main Actions
+                item(key = "quick_tools") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Rekam Sentuhan", maxLines = 1)
+                        OutlinedButton(
+                            onClick = { onLaunchCropOverlay(macro, null) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
+                        ) {
+                            Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Crop Gambar", maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = { onLaunchRecorderOverlay(macro) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
+                        ) {
+                            Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Rekam Sentuhan", maxLines = 1)
+                        }
+                    }
+                }
+            } else {
+                // Watchdog Anti-Macet Configuration Card (out-of-band recovery actions)
+                item(key = "watchdog_config") {
+                    val watchdogActive = macro.autoRecoverStuckSec > 0 && macro.stuckRecoveryMode == StuckRecoveryMode.RUN_WATCHDOG_ACTIONS
+                    var secText by remember(macro.id, macro.autoRecoverStuckSec) {
+                        mutableStateOf(if (macro.autoRecoverStuckSec > 0) macro.autoRecoverStuckSec.toString() else "60")
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFFF97316).copy(alpha = 0.09f),
+                        border = BorderStroke(1.dp, Color(0xFFF97316).copy(alpha = 0.42f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Shield,
+                                        contentDescription = null,
+                                        tint = Color(0xFFF97316),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            "Watchdog Anti-Macet (Di Luar Aksi Utama)",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFF97316)
+                                        )
+                                        Text(
+                                            "Jika aksi utama tidak ada progres / macet sesuai batas detik, daftar aksi di bawah otomatis aktif untuk memulihkan.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Switch(
+                                    checked = watchdogActive,
+                                    onCheckedChange = { on ->
+                                        val parsed = (secText.toIntOrNull() ?: 60).coerceIn(5, 3600)
+                                        onUpdateMacro(
+                                            macro.copy(
+                                                autoRecoverStuckSec = if (on) parsed else 0,
+                                                stuckRecoveryMode = if (on) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else macro.stuckRecoveryMode
+                                            )
+                                        )
+                                    }
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = secText,
+                                    onValueChange = { raw ->
+                                        val digits = raw.filter(Char::isDigit).take(4)
+                                        secText = digits
+                                        val v = digits.toIntOrNull()
+                                        if (v != null && v > 0) {
+                                            onUpdateMacro(
+                                                macro.copy(
+                                                    autoRecoverStuckSec = v.coerceIn(5, 3600),
+                                                    stuckRecoveryMode = StuckRecoveryMode.RUN_WATCHDOG_ACTIONS
+                                                )
+                                            )
+                                        }
+                                    },
+                                    label = { Text("Deteksi macet setelah (detik)") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf(20, 45, 60, 120, 180).forEach { presetSec ->
+                                    FilterChip(
+                                        selected = macro.autoRecoverStuckSec == presetSec,
+                                        onClick = {
+                                            secText = presetSec.toString()
+                                            onUpdateMacro(
+                                                macro.copy(
+                                                    autoRecoverStuckSec = presetSec,
+                                                    stuckRecoveryMode = StuckRecoveryMode.RUN_WATCHDOG_ACTIONS
+                                                )
+                                            )
+                                        },
+                                        label = { Text("${presetSec}d", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    "Setelah selesai: ulangi aksi utama dari awal",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Switch(
+                                    checked = macro.stuckRestartAfter,
+                                    onCheckedChange = { onUpdateMacro(macro.copy(stuckRestartAfter = it)) }
+                                )
+                            }
+
+                            FilledTonalButton(
+                                onClick = {
+                                    val launchAct = LaunchAppAction(delayAfterMs = 8000L)
+                                    val template = listOf(
+                                        ExitAppAction(delayAfterMs = 1500L),
+                                        WaitAction(durationMs = 1500L, delayAfterMs = 0L),
+                                        launchAct
+                                    )
+                                    onUpdateMacro(
+                                        macro.copy(
+                                            stuckActions = macro.stuckActions + template,
+                                            stuckRecoveryMode = StuckRecoveryMode.RUN_WATCHDOG_ACTIONS,
+                                            autoRecoverStuckSec = if (macro.autoRecoverStuckSec <= 0) 60 else macro.autoRecoverStuckSec
+                                        )
+                                    )
+                                    editingAction = launchAct
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Filled.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Tambah Template: Keluar & Masuk Ulang Aplikasi", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
                     }
                 }
             }
@@ -424,9 +634,17 @@ fun MacroEditorScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Belum ada aksi", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Deteksi Teks/Nilai, Deteksi Warna, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan' langsung di layar.",
+                                if (editorTab == 0) "Belum ada aksi utama" else "Belum ada aksi Anti-Macet",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                if (editorTab == 0) {
+                                    "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Deteksi Teks/Nilai, Deteksi Warna, Keluar/Masuk Aplikasi, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan'."
+                                } else {
+                                    "Aksi di sini terpisah dari aksi utama dan otomatis aktif saat aksi utama macet. Ketuk 'Tambah Template' di atas atau '+ Tambah Aksi Anti-Macet' di bawah."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -488,7 +706,11 @@ fun MacroEditorScreen(
                         onPickRegionOnScreen = { id -> onLaunchRegionPickerOverlay(macro, id) },
                         onAddBranchClickTarget = { parentId, slot ->
                             val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
-                            val updatedMacro = macro.copy(actions = macro.actions.insertInto(ContainerRef(parentId, slot), newClick))
+                            val updatedMacro = if (editorTab == 0) {
+                                macro.copy(actions = macro.actions.insertInto(ContainerRef(parentId, slot), newClick))
+                            } else {
+                                macro.copy(stuckActions = macro.stuckActions.insertInto(ContainerRef(parentId, slot), newClick))
+                            }
                             onUpdateMacro(updatedMacro)
                             onLaunchTargetPickerOverlay(updatedMacro, newClick.id)
                         },
@@ -563,20 +785,20 @@ fun MacroEditorScreen(
                 onLaunchCropOverlay(macro, actionId)
             },
             onPickTargetOnScreen = { updatedDraft, targetActionId ->
-                val updatedMacro = macro.copy(actions = macro.actions.updateAction(updatedDraft.id) { updatedDraft })
+                val updatedMacro = macro.updateAnyAction(updatedDraft.id) { updatedDraft }
                 onUpdateMacro(updatedMacro)
                 editingAction = null
                 onLaunchTargetPickerOverlay(updatedMacro, targetActionId)
             },
             onPickRegionOnScreen = { updatedDraft, targetActionId ->
-                val updatedMacro = macro.copy(actions = macro.actions.updateAction(updatedDraft.id) { updatedDraft })
+                val updatedMacro = macro.updateAnyAction(updatedDraft.id) { updatedDraft }
                 onUpdateMacro(updatedMacro)
                 editingAction = null
                 onLaunchRegionPickerOverlay(updatedMacro, targetActionId)
             },
             onRecropImage = onRecropImage,
             onSave = { updated ->
-                mutateActions { it.updateAction(updated.id) { updated } }
+                onUpdateMacro(macro.updateAnyAction(updated.id) { updated })
                 editingAction = null
             },
             onDismiss = { editingAction = null }
@@ -1169,6 +1391,7 @@ private fun AddActionPickerSheet(
     val groups = listOf(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
+        "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
         "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP)
     )
 
@@ -1481,135 +1704,20 @@ private fun MacroSettingsSheet(
 
             HorizontalDivider()
 
-            // Auto-Scale Resolusi Layar (Phone <-> Redfinger / different screen sizes)
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                            Text(
-                                "Auto-Scale Resolusi Layar",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "Otomatis menyesuaikan titik klik, swipe, zoom, rekaman, area & gambar saat dipindah ke perangkat lain (mis. Redfinger).",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(checked = autoScale, onCheckedChange = { autoScale = it })
-                    }
-
-                    if (autoScale) {
-                        val parsedSrcW = sourceWText.toIntOrNull()?.coerceAtLeast(0) ?: 0
-                        val parsedSrcH = sourceHText.toIntOrNull()?.coerceAtLeast(0) ?: 0
-                        val previewTransform = ResolutionScaler.forMacro(
-                            macro.copy(
-                                sourceWidth = parsedSrcW,
-                                sourceHeight = parsedSrcH,
-                                autoScaleResolution = autoScale,
-                                scaleMode = scaleMode
-                            ),
-                            screenW,
-                            screenH
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedTextField(
-                                value = sourceWText,
-                                onValueChange = { sourceWText = it.filter(Char::isDigit).take(4) },
-                                label = { Text("Lebar asal (px)") },
-                                placeholder = { Text("$screenW") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f)
-                            )
-                            OutlinedTextField(
-                                value = sourceHText,
-                                onValueChange = { sourceHText = it.filter(Char::isDigit).take(4) },
-                                label = { Text("Tinggi asal (px)") },
-                                placeholder = { Text("$screenH") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = {
-                                    val wVal = sourceWText.ifBlank { screenW.toString() }
-                                    val hVal = sourceHText.ifBlank { screenH.toString() }
-                                    sourceWText = hVal
-                                    sourceHText = wVal
-                                }
-                            ) {
-                                Icon(Icons.Filled.SwapHoriz, contentDescription = "Tukar Portrait/Landscape")
-                            }
-                        }
-
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            FilterChip(
-                                selected = parsedSrcW == screenW && parsedSrcH == screenH,
-                                onClick = {
-                                    sourceWText = screenW.toString()
-                                    sourceHText = screenH.toString()
-                                },
-                                label = { Text("Layar Ini (${screenW}×${screenH})", style = MaterialTheme.typography.labelSmall) }
-                            )
-                            ResolutionScaler.COMMON_PRESETS.forEach { (pw, ph) ->
-                                if (pw != screenW || ph != screenH) {
-                                    FilterChip(
-                                        selected = (parsedSrcW == pw && parsedSrcH == ph) || (parsedSrcW == ph && parsedSrcH == pw),
-                                        onClick = {
-                                            sourceWText = pw.toString()
-                                            sourceHText = ph.toString()
-                                        },
-                                        label = { Text("${pw}×${ph}", style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                            }
-                        }
-
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            ResolutionScaleMode.entries.forEach { m ->
-                                FilterChip(
-                                    selected = scaleMode == m,
-                                    onClick = { scaleMode = m },
-                                    label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
-                                )
-                            }
-                        }
-
-                        Text(
-                            text = when {
-                                parsedSrcW <= 0 || parsedSrcH <= 0 ->
-                                    "Resolusi asal belum disetel (akan diisi otomatis saat menambah aksi atau ekspor .zip). Layar ini: ${screenW}×${screenH}."
-                                previewTransform.isScaling ->
-                                    "Skala aktif: ${previewTransform.describe()} • ${scaleMode.description}"
-                                else ->
-                                    "Resolusi asal cocok dengan layar ini (${screenW}×${screenH}) — berjalan 1:1. ${scaleMode.description}"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (previewTransform.isScaling) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
+            // Auto-Scale Resolusi Layar (semua perangkat: HP, Tablet, Foldable, Emulator, CloudPhone)
+            AutoScaleControlsBlock(
+                macro = macro,
+                screenW = screenW,
+                screenH = screenH,
+                autoScale = autoScale,
+                onAutoScaleChange = { autoScale = it },
+                sourceWText = sourceWText,
+                onSourceWChange = { sourceWText = it },
+                sourceHText = sourceHText,
+                onSourceHChange = { sourceHText = it },
+                scaleMode = scaleMode,
+                onScaleModeChange = { scaleMode = it }
+            )
 
             HorizontalDivider()
             Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)

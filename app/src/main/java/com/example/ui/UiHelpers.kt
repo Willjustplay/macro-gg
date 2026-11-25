@@ -2,6 +2,8 @@ package com.example.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AdsClick
 import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.FiberManualRecord
@@ -41,6 +43,8 @@ fun ActionKind.icon(): ImageVector = when (this) {
     ActionKind.COLOR -> Icons.Filled.Colorize
     ActionKind.LOOP -> Icons.Filled.Loop
     ActionKind.RUN_MACRO -> Icons.Filled.Link
+    ActionKind.EXIT_APP -> Icons.AutoMirrored.Filled.ExitToApp
+    ActionKind.LAUNCH_APP -> Icons.AutoMirrored.Filled.OpenInNew
     ActionKind.RECORD -> Icons.Filled.FiberManualRecord
     ActionKind.RESTART -> Icons.Filled.Replay
     ActionKind.STOP -> Icons.Filled.StopCircle
@@ -57,6 +61,8 @@ fun ActionKind.accentColor(): Color = when (this) {
     ActionKind.COLOR -> Color(0xFF8B5CF6)
     ActionKind.LOOP -> Color(0xFFF59E0B)
     ActionKind.RUN_MACRO -> Color(0xFFEC4899)
+    ActionKind.EXIT_APP -> Color(0xFFF97316)
+    ActionKind.LAUNCH_APP -> Color(0xFF22C55E)
     ActionKind.RECORD -> Color(0xFFEF4444)
     ActionKind.RESTART -> Color(0xFF06B6D4)
     ActionKind.STOP -> Color(0xFFDC2626)

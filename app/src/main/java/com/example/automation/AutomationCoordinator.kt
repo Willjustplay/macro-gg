@@ -1,10 +1,13 @@
 package com.example.automation
 
+import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
 import com.example.data.Action
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
+import com.example.data.ExitAppMode
 import com.example.data.ImageAction
 import com.example.data.LocalStore
 import com.example.data.LongPressAction
@@ -14,16 +17,18 @@ import com.example.data.MacroSecurity
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.ResolutionScaleMode
 import com.example.data.ResolutionScaler
 import com.example.data.RunMacroAction
+import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
 import com.example.data.TextAction
 import com.example.data.ZoomAction
+import com.example.data.allActionsSequence
 import com.example.data.insertInto
-import com.example.data.moveAction
-import com.example.data.removeAction
-import com.example.data.updateAction
-import com.example.data.walk
+import com.example.data.moveAnyAction
+import com.example.data.removeAnyAction
+import com.example.data.updateAnyAction
 import com.example.vision.Frame
 import com.example.vision.MatchResult
 import com.example.vision.OcrBlock
@@ -82,6 +87,8 @@ object AutomationCoordinator {
 
     @Volatile
     private var store: LocalStore? = null
+    @Volatile
+    private var appCtx: Context? = null
 
     private val _engineState = MutableStateFlow(EngineState.IDLE)
     val engineState: StateFlow<EngineState> = _engineState.asStateFlow()
@@ -111,6 +118,7 @@ object AutomationCoordinator {
     val actionsExecuted: StateFlow<Int> = _actionsExecuted.asStateFlow()
 
     fun attachStore(context: Context) {
+        appCtx = context.applicationContext
         if (store == null) {
             store = LocalStore.get(context)
         }
@@ -240,11 +248,9 @@ object AutomationCoordinator {
     fun bindImageToAction(actionId: String, imageName: String) {
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(
-                actions = macro.actions.updateAction(actionId) { a ->
-                    if (a is ImageAction) a.copy(imageName = imageName) else a
-                }
-            )
+            macro.updateAnyAction(actionId) { a ->
+                if (a is ImageAction) a.copy(imageName = imageName) else a
+            }
         }
         ExecutionLogBus.image("Gambar '$imageName' dipasang ke aksi Deteksi Gambar.")
     }
@@ -256,15 +262,13 @@ object AutomationCoordinator {
             val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
             val t = ResolutionScaler.forMacro(base, sw, sh)
             val storedRegion = t.unscaleRegion(region)
-            base.copy(
-                actions = base.actions.updateAction(actionId) { a ->
-                    when (a) {
-                        is TextAction -> a.copy(region = storedRegion)
-                        is ImageAction -> a.copy(region = storedRegion)
-                        else -> a
-                    }
+            base.updateAnyAction(actionId) { a ->
+                when (a) {
+                    is TextAction -> a.copy(region = storedRegion)
+                    is ImageAction -> a.copy(region = storedRegion)
+                    else -> a
                 }
-            )
+            }
         }
         ExecutionLogBus.info("Area baca (${region.left},${region.top})–(${region.right},${region.bottom}) disimpan.")
     }
@@ -296,6 +300,31 @@ object AutomationCoordinator {
         ExecutionLogBus.info("${if (zoomIn) "Zoom In" else "Zoom Out"} ditambahkan di ($cx, $cy).")
     }
 
+    private fun unscaleActionForStorage(t: ResolutionScaler.ScreenTransform, action: Action): Action = when (action) {
+        is ClickAction -> {
+            val (ox, oy) = t.unscalePoint(action.x, action.y)
+            action.copy(x = ox, y = oy)
+        }
+        is LongPressAction -> {
+            val (ox, oy) = t.unscalePoint(action.x, action.y)
+            action.copy(x = ox, y = oy)
+        }
+        is SwipeAction -> {
+            val (ox1, oy1) = t.unscalePoint(action.x1, action.y1)
+            val (ox2, oy2) = t.unscalePoint(action.x2, action.y2)
+            action.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
+        }
+        is ZoomAction -> {
+            val (ox, oy) = t.unscalePoint(action.cx, action.cy)
+            action.copy(cx = ox, cy = oy)
+        }
+        is ColorAction -> {
+            val (ox, oy) = t.unscalePoint(action.x, action.y)
+            action.copy(x = ox, y = oy)
+        }
+        else -> action
+    }
+
     fun addActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
         if (rejectIfActiveMacroLocked()) return
         val (sw, sh) = resolveScreenSize(screenW, screenH)
@@ -303,38 +332,55 @@ object AutomationCoordinator {
         updateActiveMacro(persist = true) { macro ->
             val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
             val t = ResolutionScaler.forMacro(base, sw, sh)
-            val storedAction = when (action) {
-                is ClickAction -> {
-                    val (ox, oy) = t.unscalePoint(action.x, action.y)
-                    action.copy(x = ox, y = oy)
-                }
-                is LongPressAction -> {
-                    val (ox, oy) = t.unscalePoint(action.x, action.y)
-                    action.copy(x = ox, y = oy)
-                }
-                is SwipeAction -> {
-                    val (ox1, oy1) = t.unscalePoint(action.x1, action.y1)
-                    val (ox2, oy2) = t.unscalePoint(action.x2, action.y2)
-                    action.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
-                }
-                is ZoomAction -> {
-                    val (ox, oy) = t.unscalePoint(action.cx, action.cy)
-                    action.copy(cx = ox, cy = oy)
-                }
-                is ColorAction -> {
-                    val (ox, oy) = t.unscalePoint(action.x, action.y)
-                    action.copy(x = ox, y = oy)
-                }
-                else -> action
-            }
+            val storedAction = unscaleActionForStorage(t, action)
             base.copy(actions = base.actions.insertInto(ref, storedAction))
         }
+    }
+
+    fun addStuckActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
+        if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedAction = unscaleActionForStorage(t, action)
+            val wasEmpty = base.stuckActions.isEmpty()
+            base.copy(
+                stuckActions = base.stuckActions.insertInto(ref, storedAction),
+                stuckRecoveryMode = if (wasEmpty) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else base.stuckRecoveryMode,
+                autoRecoverStuckSec = if (wasEmpty && base.autoRecoverStuckSec <= 0) 60 else base.autoRecoverStuckSec
+            )
+        }
+    }
+
+    /**
+     * Updates Auto-Scale settings on the active macro WITHOUT password even when [Macro.isLocked] is true,
+     * preserving locked actions and security integrity seal.
+     */
+    fun updateAutoScaleWithoutUnlock(
+        autoScaleResolution: Boolean,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        scaleMode: ResolutionScaleMode
+    ): Macro {
+        val current = _activeMacro.value
+        val updated = MacroSecurity.updateAutoScale(
+            macro = current,
+            autoScaleResolution = autoScaleResolution,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            scaleMode = scaleMode
+        )
+        val saved = store?.saveMacro(updated) ?: updated
+        _activeMacro.value = saved
+        return saved
     }
 
     fun moveActionFromOverlay(actionId: String, delta: Int) {
         if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions.moveAction(actionId, delta))
+            macro.moveAnyAction(actionId, delta)
         }
     }
 
@@ -351,18 +397,16 @@ object AutomationCoordinator {
             val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
             val t = ResolutionScaler.forMacro(base, sw, sh)
             val (ox, oy) = t.unscalePoint(newX, newY)
-            base.copy(
-                actions = base.actions.updateAction(actionId) { a ->
-                    when (a) {
-                        is ClickAction -> a.copy(x = ox, y = oy)
-                        is LongPressAction -> a.copy(x = ox, y = oy)
-                        is SwipeAction -> if (isEndNode) a.copy(x2 = ox, y2 = oy) else a.copy(x1 = ox, y1 = oy)
-                        is ZoomAction -> a.copy(cx = ox, cy = oy)
-                        is ColorAction -> a.copy(x = ox, y = oy)
-                        else -> a
-                    }
+            base.updateAnyAction(actionId) { a ->
+                when (a) {
+                    is ClickAction -> a.copy(x = ox, y = oy)
+                    is LongPressAction -> a.copy(x = ox, y = oy)
+                    is SwipeAction -> if (isEndNode) a.copy(x2 = ox, y2 = oy) else a.copy(x1 = ox, y1 = oy)
+                    is ZoomAction -> a.copy(cx = ox, cy = oy)
+                    is ColorAction -> a.copy(x = ox, y = oy)
+                    else -> a
                 }
-            )
+            }
         }
     }
 
@@ -383,32 +427,30 @@ object AutomationCoordinator {
             val t = ResolutionScaler.forMacro(base, sw, sh)
             val (ox1, oy1) = t.unscalePoint(screenX1, screenY1)
             val (ox2, oy2) = t.unscalePoint(screenX2, screenY2)
-            base.copy(
-                actions = base.actions.updateAction(actionId) { cur ->
-                    when (cur) {
-                        is ClickAction -> cur.copy(x = ox1, y = oy1)
-                        is LongPressAction -> cur.copy(x = ox1, y = oy1)
-                        is SwipeAction -> cur.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
-                        is ZoomAction -> cur.copy(cx = ox1, cy = oy1)
-                        is ColorAction -> cur.copy(x = ox1, y = oy1, color = hexColor ?: cur.color)
-                        else -> cur
-                    }
+            base.updateAnyAction(actionId) { cur ->
+                when (cur) {
+                    is ClickAction -> cur.copy(x = ox1, y = oy1)
+                    is LongPressAction -> cur.copy(x = ox1, y = oy1)
+                    is SwipeAction -> cur.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
+                    is ZoomAction -> cur.copy(cx = ox1, cy = oy1)
+                    is ColorAction -> cur.copy(x = ox1, y = oy1, color = hexColor ?: cur.color)
+                    else -> cur
                 }
-            )
+            }
         }
     }
 
     fun updateActionFromOverlay(actionId: String, transform: (Action) -> Action) {
         if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions.updateAction(actionId, transform))
+            macro.updateAnyAction(actionId, transform)
         }
     }
 
     fun removeActionFromOverlay(actionId: String) {
         if (rejectIfActiveMacroLocked()) return
         updateActiveMacro(persist = true) { macro ->
-            macro.copy(actions = macro.actions.removeAction(actionId))
+            macro.removeAnyAction(actionId)
         }
     }
 
@@ -423,7 +465,7 @@ object AutomationCoordinator {
         val visited = HashSet<String>()
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
-            for (a in m.actions.walk()) {
+            for (a in m.allActionsSequence()) {
                 if (a is ImageAction || a is TextAction || a is ColorAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
@@ -514,6 +556,74 @@ object AutomationCoordinator {
 
                 override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean =
                     MacroAccessibilityService.dispatchRecordedGesture(gesture, speed)
+
+                override suspend fun exitApp(mode: ExitAppMode, packageName: String): Boolean {
+                    val cleanPkg = packageName.trim()
+                    val ok = when (mode) {
+                        ExitAppMode.HOME_ONLY -> {
+                            val h = MacroAccessibilityService.dispatchGlobalHome()
+                            cooperativeDelay(350L)
+                            h
+                        }
+                        ExitAppMode.BACK_THEN_HOME -> {
+                            MacroAccessibilityService.dispatchGlobalBack()
+                            cooperativeDelay(250L)
+                            MacroAccessibilityService.dispatchGlobalBack()
+                            cooperativeDelay(250L)
+                            val h = MacroAccessibilityService.dispatchGlobalHome()
+                            cooperativeDelay(350L)
+                            h
+                        }
+                        ExitAppMode.CLOSE_RECENT_AND_HOME -> {
+                            val openedRecents = MacroAccessibilityService.dispatchGlobalRecents()
+                            if (openedRecents) {
+                                cooperativeDelay(700L)
+                                val (sw, sh) = liveScreenSize(screenWidth, screenHeight)
+                                val cx = sw * 0.50f
+                                val startY = sh * 0.58f
+                                val endY = sh * 0.10f
+                                MacroAccessibilityService.dispatchSwipe(cx, startY, cx, endY, 220L)
+                                cooperativeDelay(450L)
+                            }
+                            val h = MacroAccessibilityService.dispatchGlobalHome()
+                            cooperativeDelay(350L)
+                            openedRecents || h
+                        }
+                    }
+                    if (cleanPkg.isNotBlank()) {
+                        runCatching {
+                            val am = appCtx?.getSystemService(ActivityManager::class.java)
+                            @Suppress("DEPRECATION")
+                            am?.killBackgroundProcesses(cleanPkg)
+                        }
+                    }
+                    return ok
+                }
+
+                override suspend fun launchApp(packageName: String, freshStart: Boolean): Boolean {
+                    val cleanPkg = packageName.trim()
+                    if (cleanPkg.isBlank()) return false
+                    val ctx = appCtx ?: return false
+                    val launchIntent = runCatching {
+                        ctx.packageManager.getLaunchIntentForPackage(cleanPkg)
+                    }.getOrNull()
+                    if (launchIntent == null) {
+                        ExecutionLogBus.error("Masuk Aplikasi gagal: paket '$cleanPkg' tidak ditemukan di perangkat.")
+                        return false
+                    }
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                    if (freshStart) {
+                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    }
+                    val startedByAcc = MacroAccessibilityService.launchActivityIntent(launchIntent)
+                    if (startedByAcc) return true
+                    return runCatching {
+                        ctx.startActivity(launchIntent)
+                        true
+                    }.onFailure { err ->
+                        ExecutionLogBus.error("Gagal membuka '$cleanPkg': ${err.message}")
+                    }.getOrDefault(false)
+                }
 
                 override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
                 override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
