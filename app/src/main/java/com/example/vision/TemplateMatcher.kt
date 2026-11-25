@@ -187,9 +187,13 @@ data class MultiScaleOutcome(
     val bestScale: Double
 )
 
-/** Template prepared once (gray + power-of-2 pyramid levels) and cached across searches. */
-class PreparedTemplate private constructor(val name: String, val gray: GrayImage) {
-    constructor(name: String, frame: Frame) : this(name, GrayImage.fromFrame(frame))
+/** Template prepared once (gray + optional ARGB color frame + power-of-2 pyramid levels) and cached across searches. */
+class PreparedTemplate private constructor(
+    val name: String,
+    val gray: GrayImage,
+    val colorFrame: Frame? = null
+) {
+    constructor(name: String, frame: Frame) : this(name, GrayImage.fromFrame(frame), frame)
 
     val width = gray.width
     val height = gray.height

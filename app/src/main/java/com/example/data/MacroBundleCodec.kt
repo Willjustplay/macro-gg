@@ -14,18 +14,19 @@ import java.util.zip.ZipOutputStream
 /** Thrown when importing a single-use (1× import) bundle that was already used or tampered with. */
 class SingleUseImportException(message: String) : IllegalStateException(message)
 
-/** Optional signed manifest stored as `bundle_meta.json` inside exported macro `.zip` files. */
+/** Optional signed manifest stored as `bundle_meta.json` inside exported macro / macro-set `.zip` files. */
 @Serializable
 data class ExportBundleMeta(
     val singleUseImport: Boolean = false,
     val importToken: String = "",
     val exportedAtEpochMs: Long = 0L,
     val macroOriginId: String = "",
-    val metaSeal: String = ""
+    val metaSeal: String = "",
+    val bundleKind: String = "MACRO"
 )
 
 /**
- * Pure-Kotlin portable ZIP bundle encoder/decoder for MacroGG macros, linked sub-macros,
+ * Pure-Kotlin portable ZIP bundle encoder/decoder for MacroGG macros, macro sets, linked sub-macros,
  * Lua scripts, and target PNG image assets.
  */
 object MacroBundleCodec {
@@ -40,7 +41,8 @@ object MacroBundleCodec {
         val macrosExported: Int,
         val imagesExported: Int,
         val singleUseImport: Boolean = false,
-        val importToken: String = ""
+        val importToken: String = "",
+        val setsExported: Int = 0
     )
 
     data class DecodedBundle(
@@ -48,7 +50,8 @@ object MacroBundleCodec {
         val scripts: List<LuaScript>,
         val images: Map<String, ByteArray>,
         val macroIcons: Map<String, ByteArray> = emptyMap(),
-        val bundleMeta: ExportBundleMeta? = null
+        val bundleMeta: ExportBundleMeta? = null,
+        val macroSets: List<MacroSet> = emptyList()
     )
 
     /**
@@ -166,8 +169,141 @@ object MacroBundleCodec {
     }
 
     /**
-     * Reads either a raw single-macro JSON stream or a .zip bundle (macro export or full backup),
-     * remapping macro IDs so [RunMacroAction] links remain intact after import.
+     * Writes a portable Macro Set `.zip` containing:
+     * - `macro_set.json` (set metadata, lock, expiry, seal)
+     * - `bundle_meta.json` (when [singleUseImport] is enabled, carrying signed 1× import token)
+     * - `macros/<id>.json` (all member macros belonging to [set])
+     * - `linked_macros/<id>.json` (any external linked sub-macros referenced by members)
+     * - `images/<filename>.png` (every referenced target image across all bundled macros)
+     * - `macro_icons/<filename>.png` (custom set logo and member macro logos)
+     */
+    fun writeMacroSetZip(
+        set: MacroSet,
+        memberMacros: List<Macro>,
+        lookupMacro: (String) -> Macro?,
+        loadImage: (imageName: String) -> Pair<String, ByteArray>?,
+        output: OutputStream,
+        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null },
+        singleUseImport: Boolean = false,
+        exportedAtEpochMs: Long = System.currentTimeMillis()
+    ): ExportResult {
+        val stableSetOrigin = set.originId.ifBlank { set.id }
+        val baseSet = set.copy(originId = stableSetOrigin)
+        val generatedToken = if (singleUseImport) MacroSecurity.generateSalt() else ""
+        val exportSet = if (singleUseImport) {
+            MacroSecurity.attachOneTimeExportToken(baseSet, generatedToken)
+        } else {
+            baseSet
+        }
+
+        val memberIds = memberMacros.map { it.id }.toHashSet()
+        val exportMembers = memberMacros.map { rawMember ->
+            val withOriginAndSet = rawMember.copy(
+                originId = rawMember.originId.ifBlank { rawMember.id },
+                setId = exportSet.id
+            )
+            if (singleUseImport) {
+                MacroSecurity.attachOneTimeExportToken(withOriginAndSet, generatedToken)
+            } else {
+                withOriginAndSet
+            }
+        }
+
+        // Collect any recursively linked sub-macros outside the set so RunMacro/FinishMacro links never break
+        val visited = HashSet<String>(memberIds)
+        val externalLinked = ArrayList<Macro>()
+        for (member in exportMembers) {
+            for (linked in collectMacroBundle(member, lookupMacro).drop(1)) {
+                if (visited.add(linked.id)) {
+                    val prepared = linked.copy(
+                        originId = linked.originId.ifBlank { linked.id },
+                        setId = ""
+                    )
+                    externalLinked += if (singleUseImport) {
+                        MacroSecurity.attachOneTimeExportToken(prepared, generatedToken)
+                    } else {
+                        prepared
+                    }
+                }
+            }
+        }
+
+        val allMacros = exportMembers + externalLinked
+        val referencedImages = LinkedHashSet<String>()
+        val referencedIcons = LinkedHashSet<String>()
+        if (exportSet.logoImage.isNotBlank()) referencedIcons += exportSet.logoImage
+        allMacros.forEach { m ->
+            referencedImages += m.imageNames()
+            if (m.logoImage.isNotBlank()) referencedIcons += m.logoImage
+        }
+
+        var imagesWritten = 0
+        ZipOutputStream(output).use { zip ->
+            if (singleUseImport) {
+                val meta = ExportBundleMeta(
+                    singleUseImport = true,
+                    importToken = generatedToken,
+                    exportedAtEpochMs = exportedAtEpochMs,
+                    macroOriginId = stableSetOrigin,
+                    metaSeal = MacroSecurity.computeOneTimeBundleSeal(generatedToken, exportedAtEpochMs, stableSetOrigin),
+                    bundleKind = "MACRO_SET"
+                )
+                zip.putNextEntry(ZipEntry("bundle_meta.json"))
+                zip.write(json.encodeToString(meta).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+
+            zip.putNextEntry(ZipEntry("macro_set.json"))
+            zip.write(json.encodeToString(exportSet).toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+
+            for (member in exportMembers) {
+                zip.putNextEntry(ZipEntry("macros/${sanitizeFileName(member.id)}.json"))
+                zip.write(json.encodeToString(member).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+
+            for (linked in externalLinked) {
+                zip.putNextEntry(ZipEntry("linked_macros/${sanitizeFileName(linked.id)}.json"))
+                zip.write(json.encodeToString(linked).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+
+            val writtenNames = HashSet<String>()
+            for (imgName in referencedImages) {
+                val resolved = loadImage(imgName) ?: continue
+                val (fileName, bytes) = resolved
+                if (fileName.isNotBlank() && bytes.isNotEmpty() && writtenNames.add(fileName)) {
+                    zip.putNextEntry(ZipEntry("images/$fileName"))
+                    zip.write(bytes)
+                    zip.closeEntry()
+                    imagesWritten++
+                }
+            }
+
+            val writtenIcons = HashSet<String>()
+            for (iconName in referencedIcons) {
+                val resolved = loadMacroIcon(iconName) ?: continue
+                val (fileName, bytes) = resolved
+                if (fileName.isNotBlank() && bytes.isNotEmpty() && writtenIcons.add(fileName)) {
+                    zip.putNextEntry(ZipEntry("macro_icons/$fileName"))
+                    zip.write(bytes)
+                    zip.closeEntry()
+                }
+            }
+        }
+        return ExportResult(
+            macrosExported = allMacros.size,
+            imagesExported = imagesWritten,
+            singleUseImport = singleUseImport,
+            importToken = generatedToken,
+            setsExported = 1
+        )
+    }
+
+    /**
+     * Reads either a raw single-macro JSON stream or a .zip bundle (macro export, macro set export,
+     * or full backup), remapping macro & set IDs so [RunMacroAction] and [Macro.setId] links stay intact.
      */
     fun readBundle(input: InputStream, idGenerator: () -> String = { newId() }): DecodedBundle {
         val buffered = BufferedInputStream(input)
@@ -183,6 +319,7 @@ object MacroBundleCodec {
             val cloned = macro.copy(
                 id = idGenerator(),
                 originId = macro.originId.ifBlank { macro.id },
+                setId = "",
                 actions = macro.actions.cloneWithRemappedIds(),
                 stuckActions = macro.stuckActions.cloneWithRemappedIds()
             )
@@ -190,6 +327,7 @@ object MacroBundleCodec {
         }
 
         val rawMacros = ArrayList<Macro>()
+        val rawSets = ArrayList<MacroSet>()
         val scripts = ArrayList<LuaScript>()
         val images = LinkedHashMap<String, ByteArray>()
         val macroIcons = LinkedHashMap<String, ByteArray>()
@@ -209,6 +347,11 @@ object MacroBundleCodec {
                         bundleMeta = runCatching {
                             json.decodeFromString<ExportBundleMeta>(bytes.toString(Charsets.UTF_8))
                         }.getOrNull() ?: ExportBundleMeta(singleUseImport = true, importToken = "", metaSeal = "INVALID")
+                    }
+                    name == "macro_set.json" ||
+                        (name.startsWith("macro_sets/") && name.endsWith(".json")) -> {
+                        runCatching { json.decodeFromString<MacroSet>(bytes.toString(Charsets.UTF_8)) }
+                            .getOrNull()?.let { rawSets += it }
                     }
                     name == "macro.json" ||
                         (name.startsWith("macros/") && name.endsWith(".json")) ||
@@ -249,7 +392,17 @@ object MacroBundleCodec {
             }
         }
 
-        // Remap old macro IDs -> fresh IDs while preserving originId so same-macro overwrite & deadline stacking work
+        // Remap old MacroSet IDs -> fresh IDs while preserving originId
+        val setIdRemap = HashMap<String, String>()
+        rawSets.forEach { s -> setIdRemap[s.id] = idGenerator() }
+        val remappedSets = rawSets.map { s ->
+            s.copy(
+                id = setIdRemap[s.id] ?: idGenerator(),
+                originId = s.originId.ifBlank { s.id }
+            )
+        }
+
+        // Remap old macro IDs -> fresh IDs while preserving originId and set membership
         val idRemap = HashMap<String, String>()
         rawMacros.forEach { m -> idRemap[m.id] = idGenerator() }
         val remappedMacros = rawMacros.map { m ->
@@ -265,6 +418,7 @@ object MacroBundleCodec {
             m.copy(
                 id = idRemap[m.id] ?: idGenerator(),
                 originId = m.originId.ifBlank { m.id },
+                setId = if (m.setId.isNotBlank()) setIdRemap[m.setId].orEmpty() else "",
                 actions = remapList(m.actions),
                 stuckActions = remapList(m.stuckActions)
             )
@@ -275,7 +429,8 @@ object MacroBundleCodec {
             scripts = scripts,
             images = images,
             macroIcons = macroIcons,
-            bundleMeta = bundleMeta
+            bundleMeta = bundleMeta,
+            macroSets = remappedSets
         )
     }
 
@@ -301,6 +456,20 @@ object MacroBundleCodec {
                 throw SingleUseImportException("File ekspor 1× impor tidak valid atau telah dimodifikasi.")
             }
             tokens += meta.importToken.trim()
+        }
+
+        for (s in decoded.macroSets) {
+            val tok = s.oneTimeImportToken.trim()
+            val seal = s.oneTimeImportSeal.trim()
+            if (tok.isNotBlank() || seal.isNotBlank()) {
+                if (!MacroSecurity.verifySetOneTimeToken(s)) {
+                    throw SingleUseImportException("Token sekali-impor pada Macro Set '${s.name}' tidak valid atau telah diubah.")
+                }
+                tokens += tok
+            }
+            if (meta != null && meta.singleUseImport && tok.isNotBlank() && tok != meta.importToken.trim()) {
+                throw SingleUseImportException("Token bundle 1× impor tidak cocok dengan isi Macro Set '${s.name}'.")
+            }
         }
 
         for (m in decoded.macros) {

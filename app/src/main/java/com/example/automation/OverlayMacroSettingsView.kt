@@ -108,6 +108,8 @@ class OverlayMacroSettingsView(
     private var appPickerActionId: String? = null
     private var addPickerRef: ContainerRef? = null
     private var addPickerForStuck: Boolean = false
+    private var selectedOverlaySetFilter: String =
+        if (macro.setId.isNotBlank() && store.getMacroSetById(macro.setId) != null) macro.setId else "__ALL__"
 
     private val bodyContainer = LinearLayout(context).apply { orientation = VERTICAL }
     private val tabSettingsBtn: TextView
@@ -207,18 +209,28 @@ class OverlayMacroSettingsView(
         rebuildBody()
     }
 
+    private fun isMacroEffectivelyLocked(m: Macro = macro): Boolean {
+        val parentSet = store.getMacroSetById(m.setId)
+        return MacroSecurity.isEffectivelyLocked(m, parentSet)
+    }
+
     private fun updateHeader() {
-        val lockIcon = if (macro.isLocked) "🔒 " else ""
+        val parentSet = store.getMacroSetById(macro.setId)
+        val effectivelyLocked = MacroSecurity.isEffectivelyLocked(macro, parentSet)
+        val lockIcon = if (effectivelyLocked) "🔒 " else ""
         titleView.text = lockIcon + macro.name.ifBlank { "Macro Aktif" }
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
         val recStr = if (macro.autoRecoverStuckSec > 0) " • Anti-Macet ${macro.autoRecoverStuckSec}d" else ""
         val extra = buildList {
+            if (parentSet != null) add("📦 ${parentSet.name}")
             if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
-            MacroSecurity.remainingTimeLabel(macro, store.effectiveNowMs())?.let { add(it) }
+            val now = store.effectiveNowMs()
+            (MacroSecurity.remainingTimeLabel(macro, now) ?: parentSet?.let { MacroSecurity.remainingSetTimeLabel(it, now) })
+                ?.let { add(it) }
         }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
         subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$extra"
-        tabActionsBtn.text = if (macro.isLocked) "🔒 Aksi" else "Aksi (${macro.actions.size})"
-        tabWatchdogBtn.text = if (macro.isLocked) "🔒 Macet" else "Macet (${macro.stuckActions.size})"
+        tabActionsBtn.text = if (effectivelyLocked) "🔒 Aksi" else "Aksi (${macro.actions.size})"
+        tabWatchdogBtn.text = if (effectivelyLocked) "🔒 Macet" else "Macet (${macro.stuckActions.size})"
 
         styleTab(tabSettingsBtn, activeTab == 0)
         styleTab(tabActionsBtn, activeTab == 1)
@@ -236,7 +248,7 @@ class OverlayMacroSettingsView(
         updateHeader()
         bodyContainer.removeAllViews()
 
-        if (macro.isLocked) {
+        if (isMacroEffectivelyLocked(macro)) {
             if (activeTab == 0) {
                 buildMacroSwitcherRow()
                 buildPassiveQuickControlsRow()
@@ -283,9 +295,53 @@ class OverlayMacroSettingsView(
         }
     }
 
+    private fun filteredOverlayMacros(): List<Macro> {
+        val all = store.macros.value
+        val sets = store.macroSets.value
+        if (sets.isEmpty()) return all
+        val setIds = sets.map { it.id }.toHashSet()
+        if (selectedOverlaySetFilter != "__ALL__" && selectedOverlaySetFilter != "__UNGROUPED__" && selectedOverlaySetFilter !in setIds) {
+            selectedOverlaySetFilter = "__ALL__"
+        }
+        return when (selectedOverlaySetFilter) {
+            "__ALL__" -> all
+            "__UNGROUPED__" -> all.filter { it.setId.isBlank() || it.setId !in setIds }
+            else -> all.filter { it.setId == selectedOverlaySetFilter }
+        }
+    }
+
     private fun buildMacroSwitcherRow() {
-        val allMacros = store.macros.value
-        if (allMacros.size > 1) {
+        val sets = store.macroSets.value
+        if (sets.isNotEmpty()) {
+            bodyContainer.addView(sectionLabel("Filter Macro Set"))
+            val setScroll = HorizontalScrollView(context).apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+            val setRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+            setRow.addView(makeBtn("Semua", if (selectedOverlaySetFilter == "__ALL__") "#0284C7" else "#1E293B", marginEndDp = 5) {
+                selectedOverlaySetFilter = "__ALL__"
+                rebuildBody()
+            })
+            for (s in sets) {
+                val sel = selectedOverlaySetFilter == s.id
+                val prefix = if (s.isLocked) "🔒 " else "📦 "
+                setRow.addView(makeBtn((prefix + s.name).take(16), if (sel) "#7C3AED" else "#1E293B", marginEndDp = 5) {
+                    selectedOverlaySetFilter = s.id
+                    rebuildBody()
+                })
+            }
+            setRow.addView(makeBtn("Umum", if (selectedOverlaySetFilter == "__UNGROUPED__") "#0284C7" else "#1E293B", marginEndDp = 5) {
+                selectedOverlaySetFilter = "__UNGROUPED__"
+                rebuildBody()
+            })
+            setScroll.addView(setRow)
+            bodyContainer.addView(setScroll)
+        }
+
+        val visibleMacros = filteredOverlayMacros()
+        if (visibleMacros.size > 1 || (visibleMacros.size == 1 && visibleMacros.first().id != macro.id)) {
             bodyContainer.addView(sectionLabel("Ganti Macro Aktif"))
             val hScroll = HorizontalScrollView(context).apply {
                 layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
@@ -293,10 +349,11 @@ class OverlayMacroSettingsView(
                 }
             }
             val row = LinearLayout(context).apply { orientation = HORIZONTAL }
-            for (m in allMacros) {
+            for (m in visibleMacros) {
                 val sel = m.id == macro.id
+                val locked = isMacroEffectivelyLocked(m)
                 val prefix = when {
-                    m.isLocked -> "🔒 "
+                    locked -> "🔒 "
                     m.isPassive && !m.passiveEnabled -> "⛔ "
                     m.isPassive -> "🔗 "
                     else -> ""
@@ -316,8 +373,12 @@ class OverlayMacroSettingsView(
 
     private fun buildPassiveQuickControlsRow() {
         val now = store.effectiveNowMs()
-        val passiveMacros = store.macros.value.filter {
-            it.isPassive && !MacroSecurity.isTampered(it) && !MacroSecurity.isExpired(it, now)
+        val passiveMacros = filteredOverlayMacros().filter { m ->
+            val pSet = store.getMacroSetById(m.setId)
+            m.isPassive &&
+                !MacroSecurity.isTampered(m) &&
+                !MacroSecurity.isExpired(m, now) &&
+                (pSet == null || (!MacroSecurity.isSetTampered(pSet) && !MacroSecurity.isSetExpired(pSet, now)))
         }
         if (passiveMacros.isEmpty()) return
 
@@ -349,9 +410,15 @@ class OverlayMacroSettingsView(
 
     private fun buildLockedOverlayNotice() {
         val now = store.effectiveNowMs()
+        val parentSet = store.getMacroSetById(macro.setId)
         val expLabel = MacroSecurity.remainingTimeLabel(macro, now)
+            ?: parentSet?.let { MacroSecurity.remainingSetTimeLabel(it, now) }
         val lines = buildList {
-            add("🔒 Macro ini dikunci dengan sandi.")
+            if (parentSet != null && parentSet.isLocked) {
+                add("🔒 Macro ini dikunci oleh Macro Set '${parentSet.name}'.")
+            } else {
+                add("🔒 Macro ini dikunci dengan sandi.")
+            }
             add("Daftar aksi & setelan lain disembunyikan, namun Auto-Scale Layar & Pasif ON/OFF tetap bebas diatur tanpa sandi.")
             if (macro.isPassive) {
                 add(
@@ -773,7 +840,7 @@ class OverlayMacroSettingsView(
 
         val rowThumbName = when (action) {
             is ImageAction -> action.imageName
-            is TrackObjectAction -> action.imageName
+            is TrackObjectAction -> if (action.trackAnyMotion) "" else action.imageName
             else -> ""
         }
         if (rowThumbName.isNotBlank()) {
@@ -827,12 +894,12 @@ class OverlayMacroSettingsView(
         if (idx < siblingCount - 1) {
             row.addView(makeSmallIconBtn("↓", "#334155") { onMoveAction(action.id, 1) })
         }
-        if (action is ImageAction || action is TrackObjectAction) {
+        if (action is ImageAction || (action is TrackObjectAction && !action.trackAnyMotion)) {
             row.addView(makeSmallIconBtn("🖼", "#0F766E") {
                 quickImageSwapActionId = action.id
                 rebuildBody()
             })
-        } else if (action is TextAction) {
+        } else if (action is TextAction || (action is TrackObjectAction && action.trackAnyMotion)) {
             row.addView(makeSmallIconBtn("📐", "#0369A1") {
                 onPickRegionOnScreen(action.id)
             })
@@ -1246,6 +1313,35 @@ class OverlayMacroSettingsView(
                 var foundMode = action.foundMode
                 var notFoundMode = action.notFound
 
+                val templateBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val templateOptionsBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val anyMotionTip = TextView(context).apply {
+                    text = "Mode Bebas Warna aktif: mengejar pasukan/kerumunan bergerak apa saja tanpa terikat gambar atau warna. Disarankan batasi Area Lacak ke arena base."
+                    setTextColor(Color.parseColor("#FDA4AF"))
+                    textSize = 10.5f
+                    setPadding(dp(8), dp(6), dp(8), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#4C0519"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val anyMotionChk = CheckBox(context).apply {
+                    text = "Lacak Semua Pasukan Bergerak (Bebas Warna / Tanpa Gambar)"
+                    isChecked = action.trackAnyMotion
+                    setTextColor(Color.parseColor("#FECDD3"))
+                    textSize = 11.5f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setOnCheckedChangeListener { _, checked ->
+                        templateBox.visibility = if (checked) GONE else VISIBLE
+                        templateOptionsBox.visibility = if (checked) GONE else VISIBLE
+                        anyMotionTip.visibility = if (checked) VISIBLE else GONE
+                    }
+                }
+                bodyContainer.addView(anyMotionChk)
+                bodyContainer.addView(anyMotionTip)
+                anyMotionTip.visibility = if (action.trackAnyMotion) VISIBLE else GONE
+
                 // Crop primary object & crop extra animation pose directly from live game screen
                 val cropRow = LinearLayout(context).apply {
                     orientation = HORIZONTAL
@@ -1257,10 +1353,10 @@ class OverlayMacroSettingsView(
                 cropRow.addView(makeBtn("+ ✂ Pose Lain", "#0F766E") {
                     onCropExtraFrameForTrackAction(action.id)
                 }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-                bodyContainer.addView(cropRow)
+                templateBox.addView(cropRow)
 
                 if (selectedImg.isNotBlank() && store.imageFile(selectedImg).exists()) {
-                    bodyContainer.addView(makeBtn("✂ Potong Ulang Gambar Utama", "#0284C7", marginEndDp = 0) {
+                    templateBox.addView(makeBtn("✂ Potong Ulang Gambar Utama", "#0284C7", marginEndDp = 0) {
                         onRecropExistingImage(selectedImg)
                     }.apply {
                         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
@@ -1268,17 +1364,19 @@ class OverlayMacroSettingsView(
                 }
 
                 // Visual folder-aware thumbnail picker for primary image
+                val savedBody = bodyContainer
                 addVisualImageSelector(
                     initialSelected = selectedImg,
                     onSelect = {
                         selectedImg = it
                         extraImgs.remove(it)
-                    }
+                    },
+                    targetParent = templateBox
                 )
 
                 // Extra pose frames summary & removable pills
                 if (extraImgs.isNotEmpty()) {
-                    bodyContainer.addView(sectionLabel("Pose Tambahan (${extraImgs.size}/3) — ketuk untuk hapus"))
+                    templateBox.addView(sectionLabel("Pose Tambahan (${extraImgs.size}/3) — ketuk untuk hapus"))
                     val extraWrap = LinearLayout(context).apply {
                         orientation = VERTICAL
                         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
@@ -1292,8 +1390,10 @@ class OverlayMacroSettingsView(
                             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
                         })
                     }
-                    bodyContainer.addView(extraWrap)
+                    templateBox.addView(extraWrap)
                 }
+                templateBox.visibility = if (action.trackAnyMotion) GONE else VISIBLE
+                savedBody.addView(templateBox)
 
                 // Tap / Drag interaction mode selector
                 bodyContainer.addView(dividerLine())
@@ -1394,14 +1494,14 @@ class OverlayMacroSettingsView(
                 }
                 thrRow.addView(thrLabel)
                 thrRow.addView(makeSmallIconBtn("-5%", "#334155") {
-                    threshold = (threshold - 0.05f).coerceIn(0.50f, 0.99f)
+                    threshold = (threshold - 0.05f).coerceIn(0.45f, 0.99f)
                     thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
                 })
                 thrRow.addView(makeSmallIconBtn("+5%", "#334155", marginEndDp = 0) {
-                    threshold = (threshold + 0.05f).coerceIn(0.50f, 0.99f)
+                    threshold = (threshold + 0.05f).coerceIn(0.45f, 0.99f)
                     thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
                 })
-                bodyContainer.addView(thrRow)
+                templateOptionsBox.addView(thrRow)
 
                 // Lead prediction stepper
                 val leadRow = LinearLayout(context).apply {
@@ -1426,13 +1526,29 @@ class OverlayMacroSettingsView(
                 })
                 bodyContainer.addView(leadRow)
 
+                val colorChk = CheckBox(context).apply {
+                    text = "Cocokkan Warna Pasukan (RGB/HSV, tahan putaran & zoom)"
+                    isChecked = action.useColorMatch
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                templateOptionsBox.addView(colorChk)
+
+                val motionChk = CheckBox(context).apply {
+                    text = "Prioritaskan Objek Bergerak (abaikan bangunan diam)"
+                    isChecked = action.prioritizeMotion
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                templateOptionsBox.addView(motionChk)
+
                 val mirrorChk = CheckBox(context).apply {
                     text = "Cek Mirror Kiri ↔ Kanan (objek berbalik arah)"
                     isChecked = action.matchMirrorX
                     setTextColor(Color.WHITE)
                     textSize = 11.2f
                 }
-                bodyContainer.addView(mirrorChk)
+                templateOptionsBox.addView(mirrorChk)
 
                 val coreChk = CheckBox(context).apply {
                     text = "Fokus Tengah (abaikan latar belakang pinggir)"
@@ -1440,7 +1556,9 @@ class OverlayMacroSettingsView(
                     setTextColor(Color.WHITE)
                     textSize = 11.2f
                 }
-                bodyContainer.addView(coreChk)
+                templateOptionsBox.addView(coreChk)
+                templateOptionsBox.visibility = if (action.trackAnyMotion) GONE else VISIBLE
+                bodyContainer.addView(templateOptionsBox)
 
                 val timeoutF = addNumberRow(bodyContainer, "Batas cari awal (ms)", action.timeoutMs.toString())
                 val radiusF = addNumberRow(bodyContainer, "Radius lacak lokal (px)", action.trackRadiusPx.toString())
@@ -1505,6 +1623,9 @@ class OverlayMacroSettingsView(
                             offsetY = oyF.text.toString().toIntOrNull() ?: tCur.offsetY,
                             leadPredictionMs = leadMs,
                             trackRadiusPx = (radiusF.text.toString().toIntOrNull() ?: tCur.trackRadiusPx).coerceIn(60, 1200),
+                            trackAnyMotion = anyMotionChk.isChecked,
+                            useColorMatch = colorChk.isChecked,
+                            prioritizeMotion = motionChk.isChecked,
                             matchMirrorX = mirrorChk.isChecked,
                             ignoreBackgroundEdges = coreChk.isChecked,
                             foundMode = foundMode,
@@ -2415,12 +2536,13 @@ class OverlayMacroSettingsView(
 
     private fun addVisualImageSelector(
         initialSelected: String,
-        onSelect: (String) -> Unit
+        onSelect: (String) -> Unit,
+        targetParent: LinearLayout = bodyContainer
     ) {
         val allImages = store.images.value
         val folders = store.imageFolders.value
         if (allImages.isEmpty()) {
-            bodyContainer.addView(TextView(context).apply {
+            targetParent.addView(TextView(context).apply {
                 text = "Pustaka gambar masih kosong. Ketuk '✂ Crop Baru' untuk mengambil gambar target."
                 setTextColor(Color.parseColor("#94A3B8"))
                 textSize = 11f
@@ -2505,7 +2627,7 @@ class OverlayMacroSettingsView(
             thumbStripContainer.addView(hScroll)
         }
 
-        bodyContainer.addView(sectionLabel("Pilih Gambar (${allImages.size})"))
+        targetParent.addView(sectionLabel("Pilih Gambar (${allImages.size})"))
         if (folders.isNotEmpty()) {
             val fScroll = HorizontalScrollView(context).apply {
                 layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(5) }
@@ -2529,9 +2651,9 @@ class OverlayMacroSettingsView(
             }
             fScroll.addView(fRow)
             folderContainer.addView(fScroll)
-            bodyContainer.addView(folderContainer)
+            targetParent.addView(folderContainer)
         }
-        bodyContainer.addView(thumbStripContainer)
+        targetParent.addView(thumbStripContainer)
         renderThumbStrip()
     }
 

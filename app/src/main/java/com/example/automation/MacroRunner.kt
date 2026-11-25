@@ -15,6 +15,7 @@ import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
 import com.example.data.MacroSecurity
+import com.example.data.MacroSet
 import com.example.data.NotFoundMode
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
@@ -35,6 +36,7 @@ import com.example.data.kind
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
 import com.example.vision.MatchResult
+import com.example.vision.MovingObjectTracker
 import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
 import com.example.vision.TemplateMatcher
@@ -77,6 +79,7 @@ interface MacroRuntime {
     suspend fun recognizeText(region: Region?, enhanced: Boolean): List<OcrBlock> = recognizeText(region)
     fun loadTemplate(name: String): PreparedTemplate?
     fun loadMacro(id: String): Macro? = null
+    fun loadMacroSet(id: String): MacroSet? = null
     fun onActiveMacroSwitched(target: Macro) {}
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
@@ -133,8 +136,9 @@ class MacroRunner(
 
     suspend fun run(macro: Macro) {
         val now = runtime.nowMs()
-        MacroSecurity.checkDirectRun(macro, now)?.let { denial ->
-            runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, denial))
+        val parentSet = if (macro.setId.isNotBlank()) runtime.loadMacroSet(macro.setId) else null
+        MacroSecurity.checkDirectRun(macro, now, parentSet)?.let { denial ->
+            runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, denial, parentSet))
             return
         }
         var currentMacro = macro
@@ -176,15 +180,17 @@ class MacroRunner(
         while (!runtime.isStopped() && iteration < maxLoops) {
             val now = runtime.nowMs()
             if (depth == 0) {
-                if (MacroSecurity.isExpired(macro, now)) {
-                    runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
+                val pSet = if (macro.setId.isNotBlank()) runtime.loadMacroSet(macro.setId) else null
+                if (MacroSecurity.isExpired(macro, now) || (pSet != null && MacroSecurity.isSetExpired(pSet, now))) {
+                    runtime.log(LogLevel.ERROR, MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED, pSet))
                     return FlowControl.STOP_MACRO
                 }
             } else {
                 val liveSub = runtime.loadMacro(macro.id) ?: macro
-                MacroSecurity.checkLinkedRun(liveSub, now)?.let { denial ->
+                val pSet = if (liveSub.setId.isNotBlank()) runtime.loadMacroSet(liveSub.setId) else null
+                MacroSecurity.checkLinkedRun(liveSub, now, pSet)?.let { denial ->
                     val level = if (denial == com.example.data.RunDenialReason.PASSIVE_OFF) LogLevel.INFO else LogLevel.WARN
-                    runtime.log(level, MacroSecurity.denialMessage(liveSub, denial))
+                    runtime.log(level, MacroSecurity.denialMessage(liveSub, denial, pSet))
                     markProgress()
                     return FlowControl.NEXT
                 }
@@ -643,9 +649,10 @@ class MacroRunner(
                 }
                 // Linked execution allows Passive ON macros; cleanly skips Passive OFF, Expired, or Tampered macros
                 // without hanging or triggering the stuck-macro watchdog.
-                MacroSecurity.checkLinkedRun(target, runtime.nowMs())?.let { denial ->
+                val targetSet = if (target.setId.isNotBlank()) runtime.loadMacroSet(target.setId) else null
+                MacroSecurity.checkLinkedRun(target, runtime.nowMs(), targetSet)?.let { denial ->
                     val level = if (denial == com.example.data.RunDenialReason.PASSIVE_OFF) LogLevel.INFO else LogLevel.WARN
-                    runtime.log(level, MacroSecurity.denialMessage(target, denial))
+                    runtime.log(level, MacroSecurity.denialMessage(target, denial, targetSet))
                     markProgress()
                     return FlowControl.NEXT
                 }
@@ -704,9 +711,10 @@ class MacroRunner(
                                 runtime.log(LogLevel.WARN, "Selesaikan Macro: macro tujuan '${action.targetMacroName}' tidak ditemukan — kembali ke macro aktif pemanggil.")
                                 FlowControl.FINISH_TO_ACTIVE_CONTINUE
                             } else {
-                                val denial = MacroSecurity.checkDirectRun(target, runtime.nowMs())
+                                val targetSet = if (target.setId.isNotBlank()) runtime.loadMacroSet(target.setId) else null
+                                val denial = MacroSecurity.checkDirectRun(target, runtime.nowMs(), targetSet)
                                 if (denial != null) {
-                                    runtime.log(LogLevel.WARN, "Selesaikan Macro: ${MacroSecurity.denialMessage(target, denial)} — kembali ke macro aktif pemanggil.")
+                                    runtime.log(LogLevel.WARN, "Selesaikan Macro: ${MacroSecurity.denialMessage(target, denial, targetSet)} — kembali ke macro aktif pemanggil.")
                                     FlowControl.FINISH_TO_ACTIVE_CONTINUE
                                 } else {
                                     runtime.log(LogLevel.INFO, "Selesaikan Macro '${macro.name}' — switch langsung ke macro aktif '${target.name}' tanpa berhenti.")
@@ -921,14 +929,23 @@ class MacroRunner(
     private data class TrackVariant(
         val template: PreparedTemplate,
         val label: String,
-        val cacheKey: String
+        val cacheKey: String,
+        val colorSig: MovingObjectTracker.ColorSignature? = null
+    )
+
+    private data class ColorTrackVariant(
+        val sig: MovingObjectTracker.ColorSignature,
+        val label: String
     )
 
     private data class TrackHit(
         val match: MatchResult,
         val usedScale: Double,
         val label: String,
-        val variantIndex: Int
+        val variantIndex: Int,
+        val colorSig: MovingObjectTracker.ColorSignature? = null,
+        val colorScore: Double = 0.0,
+        val viaHybrid: Boolean = false
     )
 
     private suspend fun executeTrackObjectAction(
@@ -939,37 +956,47 @@ class MacroRunner(
         depth: Int
     ): FlowControl {
         val names = action.allTemplateNames()
-        if (names.isEmpty()) {
+        val displayTargetName = if (action.trackAnyMotion) "Semua Gerakan" else (names.firstOrNull() ?: "Objek")
+        if (!action.trackAnyMotion && names.isEmpty()) {
             runtime.log(LogLevel.WARN, "Kejar Objek dilewati: belum ada tangkapan gambar objek yang dipilih.")
             return FlowControl.NEXT
         }
 
         val variants = ArrayList<TrackVariant>(names.size * 4)
-        for (name in names) {
-            val raw = runtime.loadTemplate(name) ?: continue
-            val shortLabel = name.substringAfterLast('/')
-            if (action.ignoreBackgroundEdges) {
-                val core = raw.centerFocused()
-                variants += TrackVariant(core, shortLabel, "$name#core")
-                if (action.matchMirrorX) {
-                    variants += TrackVariant(core.mirroredX(), "$shortLabel↔", "$name#core#mirror")
-                }
-                if (core !== raw) {
-                    variants += TrackVariant(raw, shortLabel, name)
+        val colorVariants = ArrayList<ColorTrackVariant>(names.size)
+        if (!action.trackAnyMotion) {
+            for (name in names) {
+                val raw = runtime.loadTemplate(name) ?: continue
+                val shortLabel = name.substringAfterLast('/')
+                val colorSig = if (action.useColorMatch && raw.colorFrame != null) {
+                    MovingObjectTracker.buildSignature(shortLabel, raw.colorFrame, action.ignoreBackgroundEdges).also {
+                        colorVariants += ColorTrackVariant(it, shortLabel)
+                    }
+                } else null
+
+                if (action.ignoreBackgroundEdges) {
+                    val core = raw.centerFocused()
+                    variants += TrackVariant(core, shortLabel, "$name#core", colorSig)
                     if (action.matchMirrorX) {
-                        variants += TrackVariant(raw.mirroredX(), "$shortLabel↔", "$name#mirror")
+                        variants += TrackVariant(core.mirroredX(), "$shortLabel↔", "$name#core#mirror", colorSig)
+                    }
+                    if (core !== raw) {
+                        variants += TrackVariant(raw, shortLabel, name, colorSig)
+                        if (action.matchMirrorX) {
+                            variants += TrackVariant(raw.mirroredX(), "$shortLabel↔", "$name#mirror", colorSig)
+                        }
+                    }
+                } else {
+                    variants += TrackVariant(raw, shortLabel, name, colorSig)
+                    if (action.matchMirrorX) {
+                        variants += TrackVariant(raw.mirroredX(), "$shortLabel↔", "$name#mirror", colorSig)
                     }
                 }
-            } else {
-                variants += TrackVariant(raw, shortLabel, name)
-                if (action.matchMirrorX) {
-                    variants += TrackVariant(raw.mirroredX(), "$shortLabel↔", "$name#mirror")
-                }
             }
-        }
-        if (variants.isEmpty()) {
-            runtime.log(LogLevel.WARN, "Gambar objek '${names.first()}' tidak ditemukan di pustaka.")
-            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            if (variants.isEmpty()) {
+                runtime.log(LogLevel.WARN, "Gambar objek '$displayTargetName' tidak ditemukan di pustaka.")
+                return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            }
         }
 
         val threshold = action.threshold.toDouble().coerceIn(0.45, 0.99)
@@ -977,8 +1004,30 @@ class MacroRunner(
         var bestScore = 0.0
         var sawFrame = false
         var lastWinnerIdx = 0
+        var lastColorWinnerIdx = 0
+        var lastScale = 1.0
         var lastMultiScaleMs = Long.MIN_VALUE / 2
         var multiScaleCount = 0
+
+        fun recordBest(score: Double) {
+            if (score > bestScore) bestScore = score
+        }
+
+        fun verifyCandidateColorAndMotion(
+            frame: Frame,
+            match: MatchResult,
+            colorSig: MovingObjectTracker.ColorSignature?,
+            motion: MovingObjectTracker.MotionField?
+        ): Boolean {
+            if (action.useColorMatch && colorSig != null && colorSig.hasChromaticSignature) {
+                if (!MovingObjectTracker.verifyTemplateMatchColor(frame, match, colorSig)) return false
+            }
+            if (action.prioritizeMotion && motion != null && !motion.isGlobalCameraMotion && motion.blobs.isNotEmpty()) {
+                val mr = motion.motionRatioIn(match.x, match.y, match.x + match.width, match.y + match.height)
+                if (mr < 0.02 && match.score < max(threshold + 0.14, 0.85)) return false
+            }
+            return true
+        }
 
         fun searchVariantsInBounds(
             frame: Frame,
@@ -987,9 +1036,12 @@ class MacroRunner(
             rTop: Int,
             rRight: Int,
             rBottom: Int,
-            allowMultiScale: Boolean
+            allowMultiScale: Boolean,
+            minScoreOverride: Double? = null,
+            motion: MovingObjectTracker.MotionField? = null
         ): TrackHit? {
             if (rRight <= rLeft || rBottom <= rTop) return null
+            val effThreshold = minScoreOverride ?: threshold
             val frameTransform = ResolutionScaler.forMacro(macroRef, frame.width, frame.height)
             val macroKey = "${macroRef.id}@${frame.width}x${frame.height}"
             val order = IntArray(variants.size) { i -> (lastWinnerIdx + i) % variants.size }
@@ -1015,17 +1067,24 @@ class MacroRunner(
                     val cand = v.template.scaled(sx, sy)
                     if (cand.width > (rRight - rLeft) || cand.height > (rBottom - rTop)) continue
                     val outcome = TemplateMatcher.findWithStats(
-                        frame, cand, threshold, rLeft, rTop, rRight, rBottom
+                        frame, cand, effThreshold, rLeft, rTop, rRight, rBottom
                     )
-                    if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
-                    if (outcome.match != null) {
+                    val matched = outcome.match
+                    if (matched != null && verifyCandidateColorAndMotion(frame, matched, v.colorSig, motion)) {
+                        recordBest(outcome.bestScore)
                         val scale = (sx + sy) / 2.0
                         if (macroRef.autoScaleResolution && abs(sx - sy) < 0.02) {
                             discoveredTemplateScale[tplKey] = sx
                             if (abs(sx - 1.0) >= 0.02) discoveredMacroScale[macroKey] = sx
                         }
                         lastWinnerIdx = idx
-                        return TrackHit(outcome.match, scale, v.label, idx)
+                        lastScale = scale
+                        val cScore = if (v.colorSig != null) {
+                            MovingObjectTracker.scoreColorWindow(frame, v.colorSig, matched.x, matched.y, matched.width, matched.height)
+                        } else 0.0
+                        return TrackHit(matched, scale, v.label, idx, v.colorSig, cScore, viaHybrid = false)
+                    } else if (matched == null) {
+                        recordBest(outcome.bestScore)
                     }
                 }
             }
@@ -1044,19 +1103,26 @@ class MacroRunner(
                         val ms = TemplateMatcher.findMultiScale(
                             frame = frame,
                             template = v.template,
-                            threshold = threshold,
+                            threshold = effThreshold,
                             regionLeft = rLeft,
                             regionTop = rTop,
                             regionRight = rRight,
                             regionBottom = rBottom
                         )
-                        if (ms.bestScore > bestScore) bestScore = ms.bestScore
-                        if (ms.match != null) {
+                        val matched = ms.match
+                        if (matched != null && verifyCandidateColorAndMotion(frame, matched, v.colorSig, motion)) {
+                            recordBest(ms.bestScore)
                             val tplKey = "${v.cacheKey}@${frame.width}x${frame.height}"
                             discoveredTemplateScale[tplKey] = ms.bestScale
                             discoveredMacroScale[macroKey] = ms.bestScale
                             lastWinnerIdx = idx
-                            return TrackHit(ms.match, ms.bestScale, v.label, idx)
+                            lastScale = ms.bestScale
+                            val cScore = if (v.colorSig != null) {
+                                MovingObjectTracker.scoreColorWindow(frame, v.colorSig, matched.x, matched.y, matched.width, matched.height)
+                            } else 0.0
+                            return TrackHit(matched, ms.bestScale, v.label, idx, v.colorSig, cScore, viaHybrid = false)
+                        } else if (matched == null) {
+                            recordBest(ms.bestScore)
                         }
                     }
                 }
@@ -1064,10 +1130,109 @@ class MacroRunner(
             return null
         }
 
+        fun searchColorHybridInBounds(
+            frame: Frame,
+            rLeft: Int,
+            rTop: Int,
+            rRight: Int,
+            rBottom: Int,
+            scales: DoubleArray,
+            motion: MovingObjectTracker.MotionField?,
+            livePatch: MovingObjectTracker.LiveTrackPatch?,
+            requireMovingBlob: Boolean
+        ): TrackHit? {
+            if (colorVariants.isEmpty()) return null
+            val order = IntArray(colorVariants.size) { i -> (lastColorWinnerIdx + i) % colorVariants.size }
+            var bestTrackHit: TrackHit? = null
+            for (idx in order) {
+                val cv = colorVariants[idx]
+                val hit = MovingObjectTracker.findHybridInBounds(
+                    frame = frame,
+                    sig = cv.sig,
+                    threshold = threshold,
+                    rLeft = rLeft,
+                    rTop = rTop,
+                    rRight = rRight,
+                    rBottom = rBottom,
+                    scales = scales,
+                    motion = motion,
+                    livePatch = livePatch,
+                    matchMirrorX = action.matchMirrorX,
+                    prioritizeMotion = action.prioritizeMotion,
+                    requireMovingBlob = requireMovingBlob,
+                    onBestScore = ::recordBest
+                )
+                if (hit != null && (bestTrackHit == null || hit.match.score > bestTrackHit.match.score)) {
+                    lastColorWinnerIdx = idx
+                    lastScale = hit.usedScale
+                    bestTrackHit = TrackHit(
+                        match = hit.match,
+                        usedScale = hit.usedScale,
+                        label = cv.label,
+                        variantIndex = idx,
+                        colorSig = cv.sig,
+                        colorScore = hit.colorScore,
+                        viaHybrid = true
+                    )
+                }
+            }
+            return bestTrackHit
+        }
+
+        fun searchColorInMovingBlobs(
+            frame: Frame,
+            motion: MovingObjectTracker.MotionField,
+            livePatch: MovingObjectTracker.LiveTrackPatch?,
+            fullLeft: Int,
+            fullTop: Int,
+            fullRight: Int,
+            fullBottom: Int
+        ): TrackHit? {
+            if (colorVariants.isEmpty() || motion.isGlobalCameraMotion || motion.blobs.isEmpty()) return null
+            val order = IntArray(colorVariants.size) { i -> (lastColorWinnerIdx + i) % colorVariants.size }
+            var bestTrackHit: TrackHit? = null
+            for (idx in order) {
+                val cv = colorVariants[idx]
+                val hit = MovingObjectTracker.findInMovingBlobs(
+                    frame = frame,
+                    sig = cv.sig,
+                    threshold = threshold,
+                    motion = motion,
+                    livePatch = livePatch,
+                    matchMirrorX = action.matchMirrorX,
+                    prioritizeMotion = action.prioritizeMotion,
+                    regionLeft = fullLeft,
+                    regionTop = fullTop,
+                    regionRight = fullRight,
+                    regionBottom = fullBottom,
+                    onBestScore = ::recordBest
+                )
+                if (hit != null && (bestTrackHit == null || hit.match.score > bestTrackHit.match.score)) {
+                    lastColorWinnerIdx = idx
+                    lastScale = hit.usedScale
+                    bestTrackHit = TrackHit(
+                        match = hit.match,
+                        usedScale = hit.usedScale,
+                        label = cv.label,
+                        variantIndex = idx,
+                        colorSig = cv.sig,
+                        colorScore = hit.colorScore,
+                        viaHybrid = true
+                    )
+                }
+            }
+            return bestTrackHit
+        }
+
         fun locateInFrame(
             frame: Frame,
+            prevFrame: Frame?,
             lastPos: Pair<Int, Int>?,
-            allowMultiScale: Boolean
+            predictedPos: Pair<Int, Int>?,
+            radiusMultiplier: Double,
+            livePatch: MovingObjectTracker.LiveTrackPatch?,
+            allowMultiScale: Boolean,
+            preferWaitForMotion: Boolean
         ): TrackHit? {
             val ft = ResolutionScaler.forMacro(macro, frame.width, frame.height)
             val region = action.region?.let { ft.scaleRegion(it) }
@@ -1076,18 +1241,113 @@ class MacroRunner(
             val fullRight = (region?.right ?: frame.width).coerceIn(fullLeft, frame.width)
             val fullBottom = (region?.bottom ?: frame.height).coerceIn(fullTop, frame.height)
 
-            // Fast local ROI tracking window around last known object position
-            if (lastPos != null) {
-                val radius = ft.scaleDistance(action.trackRadiusPx.coerceIn(60, 1200)).coerceAtLeast(60)
-                val l = (lastPos.first - radius).coerceIn(fullLeft, fullRight)
-                val t = (lastPos.second - radius).coerceIn(fullTop, fullBottom)
-                val r = (lastPos.first + radius).coerceIn(l, fullRight)
-                val b = (lastPos.second + radius).coerceIn(t, fullBottom)
-                searchVariantsInBounds(frame, macro, l, t, r, b, allowMultiScale = false)?.let { return it }
+            val motion = if (prevFrame != null && (action.trackAnyMotion || action.prioritizeMotion || action.useColorMatch)) {
+                MovingObjectTracker.computeMotionField(prevFrame, frame, fullLeft, fullTop, fullRight, fullBottom)
+            } else null
+
+            // Color-free Any-Motion mode: lock directly onto the strongest/nearest moving troop or army clump
+            if (action.trackAnyMotion) {
+                if (motion == null || motion.isGlobalCameraMotion) return null
+                val preferred = predictedPos ?: lastPos
+                val baseRadius = ft.scaleDistance(action.trackRadiusPx.coerceIn(60, 1200)).coerceAtLeast(60)
+                val maxRad = if (preferred != null) {
+                    (baseRadius * radiusMultiplier).roundToInt().coerceAtMost(max(frame.width, frame.height))
+                } else {
+                    Int.MAX_VALUE
+                }
+                val match = MovingObjectTracker.pickBestMovingBlob(
+                    motion = motion,
+                    preferredCenter = preferred,
+                    maxRadiusPx = maxRad,
+                    minCells = 4
+                ) ?: return null
+                recordBest(match.score)
+                return TrackHit(
+                    match = match,
+                    usedScale = 1.0,
+                    label = "Semua Gerakan",
+                    variantIndex = 0,
+                    colorSig = null,
+                    colorScore = 0.0,
+                    viaHybrid = true
+                )
             }
 
-            // Fallback: full region / full screen
-            return searchVariantsInBounds(frame, macro, fullLeft, fullTop, fullRight, fullBottom, allowMultiScale)
+            // Tier 1: Fast local predictive ROI tracking around last known / predicted position
+            if (lastPos != null) {
+                val center = predictedPos ?: lastPos
+                val baseRadius = ft.scaleDistance(action.trackRadiusPx.coerceIn(60, 1200)).coerceAtLeast(60)
+                val radius = (baseRadius * radiusMultiplier).roundToInt().coerceAtMost(max(frame.width, frame.height))
+                val l = (center.first - radius).coerceIn(fullLeft, fullRight)
+                val t = (center.second - radius).coerceIn(fullTop, fullBottom)
+                val r = (center.first + radius).coerceIn(l, fullRight)
+                val b = (center.second + radius).coerceIn(t, fullBottom)
+
+                // Exact crisp template match inside local ROI first
+                searchVariantsInBounds(frame, macro, l, t, r, b, allowMultiScale = false, motion = motion)?.let { return it }
+
+                // Hybrid HSV-Color + Elliptical RGB-NCC + Adaptive Live Patch + Motion inside local ROI
+                if (colorVariants.isNotEmpty()) {
+                    val s0 = lastScale.coerceIn(0.55, 1.55)
+                    val localScales = doubleArrayOf(s0, (s0 * 0.86).coerceAtLeast(0.55), (s0 * 1.16).coerceAtMost(1.60))
+                    searchColorHybridInBounds(
+                        frame = frame,
+                        rLeft = l, rTop = t, rRight = r, rBottom = b,
+                        scales = localScales,
+                        motion = motion,
+                        livePatch = livePatch,
+                        requireMovingBlob = false
+                    )?.let { return it }
+                }
+            }
+
+            // Tier 2: Motion-guided global troop acquisition (checks every moving blob on screen in ~3-6ms, ignores static buildings!)
+            if (motion != null && !motion.isGlobalCameraMotion && motion.blobs.isNotEmpty() && colorVariants.isNotEmpty()) {
+                searchColorInMovingBlobs(frame, motion, livePatch, fullLeft, fullTop, fullRight, fullBottom)?.let { return it }
+            }
+
+            // Tier 3: Standard TemplateMatcher (with color & motion verification)
+            val minExactScore = if (preferWaitForMotion && prevFrame == null) max(threshold, 0.80) else null
+            searchVariantsInBounds(
+                frame, macro, fullLeft, fullTop, fullRight, fullBottom,
+                allowMultiScale = allowMultiScale,
+                minScoreOverride = minExactScore,
+                motion = motion
+            )?.let { return it }
+
+            // Tier 4: Full-screen color backprojection fallback (catches momentarily stationary / rotated troops or after camera pan)
+            if (colorVariants.isNotEmpty() && (!preferWaitForMotion || prevFrame != null)) {
+                val hasChromatic = colorVariants.any { it.sig.hasChromaticSignature }
+                if (hasChromatic) {
+                    val globalScales = doubleArrayOf(1.0, 0.80, 1.22, 0.66, 1.40)
+                    searchColorHybridInBounds(
+                        frame = frame,
+                        rLeft = fullLeft, rTop = fullTop, rRight = fullRight, rBottom = fullBottom,
+                        scales = globalScales,
+                        motion = motion,
+                        livePatch = livePatch,
+                        requireMovingBlob = false
+                    )?.let { return it }
+                }
+            }
+
+            return null
+        }
+
+        fun updateLivePatch(frame: Frame, hit: TrackHit, current: MovingObjectTracker.LiveTrackPatch?): MovingObjectTracker.LiveTrackPatch? {
+            val sig = hit.colorSig ?: return current
+            // Only adapt live patch when foreground color similarity is solid (prevents drifting onto background!)
+            if (hit.colorScore >= 0.45 || (!sig.hasChromaticSignature && hit.match.score >= 0.78)) {
+                return MovingObjectTracker.captureLivePatch(
+                    frame = frame,
+                    cx = hit.match.centerX,
+                    cy = hit.match.centerY,
+                    width = hit.match.width,
+                    height = hit.match.height,
+                    fgWeight = sig.fgWeight
+                ) ?: current
+            }
+            return current
         }
 
         fun predictAim(
@@ -1110,50 +1370,57 @@ class MacroRunner(
                 dx *= ratio
                 dy *= ratio
             }
-            val px = (curX + dx.roundToInt()).coerceIn(2, (sw - 3).coerceAtLeast(2))
-            val py = (curY + dy.roundToInt()).coerceIn(2, (sh - 3).coerceAtLeast(2))
+            val px = (curX + dx.roundToInt()).coerceIn(1, (sw - 2).coerceAtLeast(1))
+            val py = (curY + dy.roundToInt()).coerceIn(1, (sh - 2).coerceAtLeast(1))
             return px to py
         }
 
         suspend fun performInteraction(aimX: Int, aimY: Int, sw: Int, sh: Int, hit: TrackHit): Boolean {
             val clickTransform = ResolutionScaler.forMacro(macro, sw, sh)
             val (ox, oy) = clickTransform.scaleDelta(action.offsetX, action.offsetY)
-            val (gx, gy) = applyJitter(
-                (aimX + ox).coerceIn(2, (sw - 3).coerceAtLeast(2)),
-                (aimY + oy).coerceIn(2, (sh - 3).coerceAtLeast(2)),
+            val (rawGx, rawGy) = applyJitter(
+                (aimX + ox).coerceIn(1, (sw - 2).coerceAtLeast(1)),
+                (aimY + oy).coerceIn(1, (sh - 2).coerceAtLeast(1)),
                 clickTransform.scaleDistance(macro.jitterPx)
             )
+            val gx = rawGx.coerceIn(1, (sw - 2).coerceAtLeast(1))
+            val gy = rawGy.coerceIn(1, (sh - 2).coerceAtLeast(1))
             val pct = (hit.match.score * 100).toInt()
+            val modeTag = when {
+                action.trackAnyMotion -> " [bebas warna]"
+                hit.viaHybrid -> " [warna+gerak]"
+                else -> ""
+            }
             val leadTag = if (aimX != hit.match.centerX || aimY != hit.match.centerY) " (prediksi)" else ""
             val ok = when (action.interactionMode) {
                 TrackInteractionMode.TAP_ONCE,
                 TrackInteractionMode.TAP_CONTINUOUS -> {
                     val tapDur = action.tapDurationMs.coerceIn(20L, 400L)
-                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct% → Tap ($gx,$gy)$leadTag")
+                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Tap ($gx,$gy)$leadTag")
                     runtime.click(gx, gy, tapDur)
                 }
                 TrackInteractionMode.DRAG_TO_POINT -> {
                     val (destX, destY) = clickTransform.scalePoint(action.targetX, action.targetY)
-                    val cx = destX.coerceIn(2, (sw - 3).coerceAtLeast(2))
-                    val cy = destY.coerceIn(2, (sh - 3).coerceAtLeast(2))
+                    val cx = destX.coerceIn(1, (sw - 2).coerceAtLeast(1))
+                    val cy = destY.coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
-                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct% → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
+                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
                     runtime.swipe(gx, gy, cx, cy, dur)
                 }
                 TrackInteractionMode.DRAG_BY_OFFSET -> {
                     val (ddx, ddy) = clickTransform.scaleDelta(action.dragOffsetX, action.dragOffsetY)
-                    val cx = (gx + ddx).coerceIn(2, (sw - 3).coerceAtLeast(2))
-                    val cy = (gy + ddy).coerceIn(2, (sh - 3).coerceAtLeast(2))
+                    val cx = (gx + ddx).coerceIn(1, (sw - 2).coerceAtLeast(1))
+                    val cy = (gy + ddy).coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
-                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct% → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
+                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
                     runtime.swipe(gx, gy, cx, cy, dur)
                 }
                 TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT -> {
                     val (sx, sy) = clickTransform.scalePoint(action.targetX, action.targetY)
-                    val cx = sx.coerceIn(2, (sw - 3).coerceAtLeast(2))
-                    val cy = sy.coerceIn(2, (sh - 3).coerceAtLeast(2))
+                    val cx = sx.coerceIn(1, (sw - 2).coerceAtLeast(1))
+                    val cy = sy.coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
-                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct% → Drag ($cx,$cy)→($gx,$gy) ${dur}ms$leadTag")
+                    runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($cx,$cy)→($gx,$gy) ${dur}ms$leadTag")
                     runtime.swipe(cx, cy, gx, gy, dur)
                 }
             }
@@ -1166,12 +1433,15 @@ class MacroRunner(
 
         runtime.setTrackingBoost(true)
         try {
-            // Phase 1: Initial object acquisition
+            // Phase 1: Initial object acquisition (with frame-to-frame motion diff)
             val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
             var firstHit: TrackHit? = null
             var firstHitTime = 0L
             var firstFrameW = runtime.screenWidth
             var firstFrameH = runtime.screenHeight
+            var prevFrame: Frame? = null
+            var livePatch: MovingObjectTracker.LiveTrackPatch? = null
+            val canWaitForMotion = action.prioritizeMotion && action.timeoutMs >= pollMs * 2L
 
             while (!runtime.isStopped()) {
                 runtime.waitIfPaused()
@@ -1181,10 +1451,21 @@ class MacroRunner(
                     sawFrame = true
                     firstFrameW = frame.width
                     firstFrameH = frame.height
-                    val hit = locateInFrame(frame, lastPos = null, allowMultiScale = true)
+                    val hit = locateInFrame(
+                        frame = frame,
+                        prevFrame = prevFrame,
+                        lastPos = null,
+                        predictedPos = null,
+                        radiusMultiplier = 1.0,
+                        livePatch = null,
+                        allowMultiScale = true,
+                        preferWaitForMotion = canWaitForMotion
+                    )
+                    prevFrame = frame
                     if (hit != null) {
                         firstHit = hit
                         firstHitTime = runtime.nowMs()
+                        livePatch = updateLivePatch(frame, hit, livePatch)
                         break
                     }
                 }
@@ -1197,9 +1478,11 @@ class MacroRunner(
                 val reqPct = (threshold * 100).toInt()
                 val maxPct = (bestScore * 100).toInt()
                 if (!sawFrame) {
-                    runtime.log(LogLevel.WARN, "Kejar Objek '${names.first()}' gagal: Tangkap Layar belum aktif.")
+                    runtime.log(LogLevel.WARN, "Kejar Objek '$displayTargetName' gagal: Tangkap Layar belum aktif.")
+                } else if (action.trackAnyMotion) {
+                    runtime.log(LogLevel.IMAGE, "Belum ada pasukan/objek bergerak terdeteksi di area lacak.")
                 } else {
-                    runtime.log(LogLevel.IMAGE, "Objek '${names.first()}' tidak ditemukan (maks $maxPct% < $reqPct%).")
+                    runtime.log(LogLevel.IMAGE, "Objek '$displayTargetName' tidak ditemukan (maks $maxPct% < $reqPct%).")
                 }
                 return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
             }
@@ -1223,10 +1506,16 @@ class MacroRunner(
                     val frame2 = runtime.captureFrame()
                     if (frame2 != null) {
                         val hit2 = locateInFrame(
-                            frame2,
+                            frame = frame2,
+                            prevFrame = prevFrame,
                             lastPos = acquired.match.centerX to acquired.match.centerY,
-                            allowMultiScale = false
+                            predictedPos = null,
+                            radiusMultiplier = 1.15,
+                            livePatch = livePatch,
+                            allowMultiScale = false,
+                            preferWaitForMotion = false
                         )
+                        prevFrame = frame2
                         if (hit2 != null) {
                             val t2 = runtime.nowMs()
                             val dt = t2 - firstHitTime
@@ -1238,6 +1527,7 @@ class MacroRunner(
                             curTime = t2
                             curW = frame2.width
                             curH = frame2.height
+                            livePatch = updateLivePatch(frame2, hit2, livePatch)
                         }
                     }
                 }
@@ -1250,16 +1540,17 @@ class MacroRunner(
                 markProgress()
                 performInteraction(aimX, aimY, curW, curH, curHit)
             } else {
-                // Continuous chase-and-tap loop until the moving object disappears or maxTrackDurationMs expires
+                // Continuous predictive chase-and-tap loop until the moving troop disappears or maxTrackDurationMs expires
                 val trackDeadline = runtime.nowMs() + action.maxTrackDurationMs.coerceIn(300L, 300_000L)
                 val repeatInterval = action.repeatIntervalMs.coerceIn(40L, 5000L)
-                val lostGraceMs = max(450L, repeatInterval * 3L).coerceAtMost(2500L)
+                val lostGraceMs = max(900L, repeatInterval * 4L).coerceAtMost(3000L)
                 var prevX = curHit.match.centerX
                 var prevY = curHit.match.centerY
                 var prevT = curTime
                 var lastSeenMs = curTime
                 var lastActionMs = Long.MIN_VALUE / 2
                 var chaseCount = 0
+                var missedFrames = 0
 
                 // Fire first tap immediately on the acquired (and velocity-predicted) object
                 val (initAimX, initAimY) = predictAim(prevX, prevY, vx, vy, leadMs, maxLeadPx, curW, curH)
@@ -1277,15 +1568,32 @@ class MacroRunner(
 
                     val frame = runtime.captureFrame() ?: continue
                     val now = runtime.nowMs()
-                    val hit = locateInFrame(frame, lastPos = prevX to prevY, allowMultiScale = false)
+                    val dtPred = (now - prevT).coerceIn(0L, 450L)
+                    val predPos = if (dtPred > 0L && (abs(vx) > 0.01 || abs(vy) > 0.01)) {
+                        predictAim(prevX, prevY, vx, vy, dtPred, maxLeadPx, frame.width, frame.height)
+                    } else {
+                        prevX to prevY
+                    }
+                    val radiusMul = (1.0 + missedFrames * 0.45).coerceAtMost(2.8)
+                    val hit = locateInFrame(
+                        frame = frame,
+                        prevFrame = prevFrame,
+                        lastPos = prevX to prevY,
+                        predictedPos = predPos,
+                        radiusMultiplier = radiusMul,
+                        livePatch = livePatch,
+                        allowMultiScale = missedFrames >= 3,
+                        preferWaitForMotion = false
+                    )
+                    prevFrame = frame
                     if (hit != null) {
                         val dt = now - prevT
-                        if (dt in 15L..600L) {
+                        if (dt in 15L..700L) {
                             val instVx = (hit.match.centerX - prevX).toDouble() / dt.toDouble()
                             val instVy = (hit.match.centerY - prevY).toDouble() / dt.toDouble()
                             vx = vx * 0.35 + instVx * 0.65
                             vy = vy * 0.35 + instVy * 0.65
-                        } else if (dt > 600L) {
+                        } else if (dt > 700L) {
                             vx = 0.0
                             vy = 0.0
                         }
@@ -1293,6 +1601,8 @@ class MacroRunner(
                         prevY = hit.match.centerY
                         prevT = now
                         lastSeenMs = now
+                        missedFrames = 0
+                        livePatch = updateLivePatch(frame, hit, livePatch)
                         runtime.onMatchFound(hit.match, "🎯 ${hit.label} ${(hit.match.score * 100).toInt()}%")
                         if (now - lastActionMs >= repeatInterval) {
                             val (aimX, aimY) = predictAim(prevX, prevY, vx, vy, leadMs, maxLeadPx, frame.width, frame.height)
@@ -1301,9 +1611,12 @@ class MacroRunner(
                                 lastActionMs = runtime.nowMs()
                             }
                         }
-                    } else if (now - lastSeenMs >= lostGraceMs) {
-                        runtime.log(LogLevel.IMAGE, "Kejar Objek '${names.first()}' selesai: objek hilang setelah $chaseCount× aksi.")
-                        break
+                    } else {
+                        missedFrames++
+                        if (now - lastSeenMs >= lostGraceMs) {
+                            runtime.log(LogLevel.IMAGE, "Kejar Objek '$displayTargetName' selesai: objek hilang setelah $chaseCount× aksi.")
+                            break
+                        }
                     }
                 }
             }

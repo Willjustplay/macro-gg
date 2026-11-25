@@ -524,6 +524,44 @@ fun ActionEditorSheet(
                     val selectedAsset = images.firstOrNull { it.name == a.imageName }
                     var showExtraPicker by remember(a.id) { mutableStateOf(false) }
 
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (a.trackAnyMotion) Color(0xFFE11D48).copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = if (a.trackAnyMotion) androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFE11D48)) else null
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    "Lacak Semua Pasukan Bergerak (Bebas Warna)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "Kejar pasukan / kerumunan bergerak apa saja tanpa terikat gambar, warna, level, atau skin (cocok untuk semua jenis pasukan COC).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = a.trackAnyMotion,
+                                onCheckedChange = { draft = a.copy(trackAnyMotion = it) }
+                            )
+                        }
+                    }
+
+                    if (a.trackAnyMotion) {
+                        Text(
+                            "Tips: Aktifkan 'Batasi area pelacakan' di bawah ke area arena/base agar tidak terganggu tombol UI di pinggir layar.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -700,6 +738,7 @@ fun ActionEditorSheet(
                             }
                         }
                     }
+                    }
 
                     HorizontalDivider()
                     Text("Aksi ke Objek (Tap / Drag)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
@@ -788,17 +827,19 @@ fun ActionEditorSheet(
                     }
 
                     HorizontalDivider()
-                    // Similarity slider
-                    Column {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Kemiripan (Akurasi)", style = MaterialTheme.typography.bodyMedium)
-                            Text("${(a.threshold * 100).roundToInt()}%", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    if (!a.trackAnyMotion) {
+                        // Similarity slider
+                        Column {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Kemiripan (Akurasi)", style = MaterialTheme.typography.bodyMedium)
+                                Text("${(a.threshold * 100).roundToInt()}%", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = a.threshold.coerceIn(0.45f, 0.99f),
+                                onValueChange = { draft = a.copy(threshold = it) },
+                                valueRange = 0.45f..0.99f
+                            )
                         }
-                        Slider(
-                            value = a.threshold,
-                            onValueChange = { draft = a.copy(threshold = it) },
-                            valueRange = 0.50f..0.99f
-                        )
                     }
 
                     // Lead prediction slider
@@ -823,28 +864,54 @@ fun ActionEditorSheet(
                         )
                     }
 
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                            Text("Cek Mirror Kiri ↔ Kanan", style = MaterialTheme.typography.bodyMedium)
-                            Text("Cocok jika objek/karakter berbalik arah saat bergerak", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!a.trackAnyMotion) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("Cocokkan Warna Pasukan (RGB/HSV)", style = MaterialTheme.typography.bodyMedium)
+                                Text("Wajib untuk pasukan beranimasi / berputar 8 arah (COC) agar tidak terkecoh rumput & zoom", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = a.useColorMatch, onCheckedChange = { draft = a.copy(useColorMatch = it) })
                         }
-                        Switch(checked = a.matchMirrorX, onCheckedChange = { draft = a.copy(matchMirrorX = it) })
-                    }
 
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                            Text("Fokus Tengah (Abaikan Pinggir Latar)", style = MaterialTheme.typography.bodyMedium)
-                            Text("Mengurangi gangguan saat objek melintas di atas latar berbeda", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("Prioritaskan Objek Bergerak", style = MaterialTheme.typography.bodyMedium)
+                                Text("Deteksi perubahan antar-frame agar mengejar pasukan bergerak & mengabaikan bangunan diam", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = a.prioritizeMotion, onCheckedChange = { draft = a.copy(prioritizeMotion = it) })
                         }
-                        Switch(checked = a.ignoreBackgroundEdges, onCheckedChange = { draft = a.copy(ignoreBackgroundEdges = it) })
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("Cek Mirror Kiri ↔ Kanan", style = MaterialTheme.typography.bodyMedium)
+                                Text("Cocok jika objek/karakter berbalik arah saat bergerak", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = a.matchMirrorX, onCheckedChange = { draft = a.copy(matchMirrorX = it) })
+                        }
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("Fokus Tengah (Abaikan Pinggir Latar)", style = MaterialTheme.typography.bodyMedium)
+                                Text("Mengurangi gangguan saat objek melintas di atas latar berbeda", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = a.ignoreBackgroundEdges, onCheckedChange = { draft = a.copy(ignoreBackgroundEdges = it) })
+                        }
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

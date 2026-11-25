@@ -32,6 +32,7 @@ class LocalStore(context: Context) {
     private val appContext = context.applicationContext
     private val rootDir = File(appContext.filesDir, "macrogg")
     private val macrosDir = File(rootDir, "macros").apply { mkdirs() }
+    private val macroSetsDir = File(rootDir, "macro_sets").apply { mkdirs() }
     private val scriptsDir = File(rootDir, "scripts").apply { mkdirs() }
     private val imagesDir = File(rootDir, "images").apply { mkdirs() }
     private val macroIconsDir = File(rootDir, "macro_icons").apply { mkdirs() }
@@ -55,6 +56,9 @@ class LocalStore(context: Context) {
 
     private val _macros = MutableStateFlow<List<Macro>>(emptyList())
     val macros: StateFlow<List<Macro>> = _macros.asStateFlow()
+
+    private val _macroSets = MutableStateFlow<List<MacroSet>>(emptyList())
+    val macroSets: StateFlow<List<MacroSet>> = _macroSets.asStateFlow()
 
     private val _scripts = MutableStateFlow<List<LuaScript>>(emptyList())
     val scripts: StateFlow<List<LuaScript>> = _scripts.asStateFlow()
@@ -105,6 +109,7 @@ class LocalStore(context: Context) {
     }
 
     fun reloadAll() {
+        _macroSets.value = loadMacroSets()
         _macros.value = loadMacros()
         _scripts.value = loadScripts()
         _imageFolders.value = loadImageFolders()
@@ -272,12 +277,190 @@ class LocalStore(context: Context) {
         }
     }
 
-    fun cleanupUnusedMacroIcon(iconName: String, excludingMacroId: String = "") {
+    fun cleanupUnusedMacroIcon(iconName: String, excludingMacroId: String = "", excludingSetId: String = "") {
         val clean = sanitizeIconFileName(iconName)
         if (clean.isBlank()) return
-        val stillUsed = _macros.value.any { it.id != excludingMacroId && sanitizeIconFileName(it.logoImage) == clean }
-        if (!stillUsed) {
+        val stillUsedByMacro = _macros.value.any { it.id != excludingMacroId && sanitizeIconFileName(it.logoImage) == clean }
+        val stillUsedBySet = _macroSets.value.any { it.id != excludingSetId && sanitizeIconFileName(it.logoImage) == clean }
+        if (!stillUsedByMacro && !stillUsedBySet) {
             File(macroIconsDir, clean).delete()
+        }
+    }
+
+    // ---- Macro Sets ----
+
+    private fun loadMacroSets(): List<MacroSet> {
+        return macroSetsDir.listFiles { f -> f.extension == "json" }
+            .orEmpty()
+            .mapNotNull { file ->
+                runCatching { json.decodeFromString<MacroSet>(file.readText()) }.getOrNull()
+            }
+            .sortedByDescending { it.updatedAt }
+    }
+
+    fun saveMacroSet(set: MacroSet): MacroSet {
+        val updated = set.copy(updatedAt = System.currentTimeMillis())
+        val file = File(macroSetsDir, "${sanitizeFileName(updated.id)}.json")
+        file.writeText(json.encodeToString(updated))
+        _macroSets.update { list ->
+            (list.filterNot { it.id == updated.id } + updated).sortedByDescending { it.updatedAt }
+        }
+        flushClockWatermark()
+        return updated
+    }
+
+    fun getMacroSetById(id: String): MacroSet? {
+        if (id.isBlank()) return null
+        return _macroSets.value.firstOrNull { it.id == id }
+            ?: File(macroSetsDir, "${sanitizeFileName(id)}.json")
+                .takeIf { it.exists() }
+                ?.let { f -> runCatching { json.decodeFromString<MacroSet>(f.readText()) }.getOrNull() }
+    }
+
+    fun getMacrosInSet(setId: String): List<Macro> =
+        if (setId.isBlank()) _macros.value.filter { it.setId.isBlank() || getMacroSetById(it.setId) == null }
+        else _macros.value.filter { it.setId == setId }
+
+    /**
+     * Saves updated security (Lock / Expiry / Password) on [updatedSet] and synchronizes lock, expiry,
+     * and password across all member macros inside the set (preserving each member's Active/Passive state).
+     */
+    fun saveMacroSetSecurity(updatedSet: MacroSet): MacroSet {
+        val saved = saveMacroSet(updatedSet)
+        val members = _macros.value.filter { it.setId == saved.id }
+        for (member in members) {
+            saveMacro(MacroSecurity.syncMacroWithSetSecurity(member, saved))
+        }
+        return saved
+    }
+
+    /**
+     * Updates which macros belong to [setId]. Newly added macros inherit lock/expiry when the set is protected.
+     */
+    fun setMacrosInSet(setId: String, selectedMacroIds: Set<String>) {
+        val set = getMacroSetById(setId) ?: return
+        val protectNew = MacroSecurity.hasAnySetProtection(set) && MacroSecurity.hasSetPassword(set)
+        val snapshot = _macros.value.toList()
+        for (m in snapshot) {
+            val shouldBeInSet = m.id in selectedMacroIds
+            when {
+                shouldBeInSet && m.setId != set.id -> {
+                    val moved = m.copy(setId = set.id)
+                    saveMacro(if (protectNew) MacroSecurity.syncMacroWithSetSecurity(moved, set) else moved)
+                }
+                !shouldBeInSet && m.setId == set.id -> {
+                    saveMacro(m.copy(setId = ""))
+                }
+            }
+        }
+        saveMacroSet(set)
+    }
+
+    /** Moves a single macro into [targetSetId] (or ungrouped when blank), applying set protection if needed. */
+    fun moveMacroToSet(macroId: String, targetSetId: String): Macro? {
+        val m = getMacroById(macroId) ?: return null
+        val targetSet = if (targetSetId.isBlank()) null else getMacroSetById(targetSetId)
+        val newSetId = targetSet?.id.orEmpty()
+        var updated = m.copy(setId = newSetId)
+        if (targetSet != null && MacroSecurity.hasAnySetProtection(targetSet) && MacroSecurity.hasSetPassword(targetSet)) {
+            updated = MacroSecurity.syncMacroWithSetSecurity(updated, targetSet)
+        }
+        val saved = saveMacro(updated)
+        if (targetSet != null) saveMacroSet(targetSet)
+        return saved
+    }
+
+    /**
+     * Duplicates [set] together with all its member macros, remapping internal [RunMacroAction] and
+     * [FinishMacroAction] links so the duplicated set is completely self-contained.
+     */
+    fun duplicateMacroSet(set: MacroSet): MacroSet {
+        val newSetId = newId()
+        val copiedSetLogo = if (set.logoImage.isNotBlank()) {
+            val src = macroIconFile(set.logoImage)
+            if (src != null && src.exists()) {
+                val destName = "logo_set_${sanitizeFileName(newSetId)}.png"
+                runCatching {
+                    src.copyTo(File(macroIconsDir, destName), overwrite = true)
+                    destName
+                }.getOrDefault("")
+            } else ""
+        } else ""
+
+        val now = System.currentTimeMillis()
+        val newSet = saveMacroSet(
+            set.copy(
+                id = newSetId,
+                originId = "",
+                name = "${set.name} (Salinan)",
+                logoImage = copiedSetLogo,
+                oneTimeImportToken = "",
+                oneTimeImportSeal = "",
+                createdAt = now,
+                updatedAt = now
+            )
+        )
+
+        val members = _macros.value.filter { it.setId == set.id }
+        val idMap = HashMap<String, String>()
+        members.forEach { m -> idMap[m.id] = newId() }
+        for (m in members) {
+            val newMid = idMap[m.id]!!
+            val copiedLogo = if (m.logoImage.isNotBlank()) {
+                val src = macroIconFile(m.logoImage)
+                if (src != null && src.exists()) {
+                    val destName = "logo_${sanitizeFileName(newMid)}.png"
+                    runCatching {
+                        src.copyTo(File(macroIconsDir, destName), overwrite = true)
+                        destName
+                    }.getOrDefault("")
+                } else ""
+            } else ""
+            fun remapList(list: List<Action>) = list.cloneWithRemappedIds().mapAllActions { a ->
+                when {
+                    a is RunMacroAction && a.targetMacroId in idMap -> a.copy(targetMacroId = idMap[a.targetMacroId]!!)
+                    a is FinishMacroAction && a.targetMacroId in idMap -> a.copy(targetMacroId = idMap[a.targetMacroId]!!)
+                    else -> a
+                }
+            }
+            saveMacro(
+                m.copy(
+                    id = newMid,
+                    originId = "",
+                    setId = newSet.id,
+                    logoImage = copiedLogo,
+                    oneTimeImportToken = "",
+                    oneTimeImportSeal = "",
+                    actions = remapList(m.actions),
+                    stuckActions = remapList(m.stuckActions),
+                    createdAt = now,
+                    updatedAt = now
+                )
+            )
+        }
+        return newSet
+    }
+
+    /**
+     * Deletes a Macro Set. When [deleteMembers] is true, deletes all macros inside the set;
+     * otherwise moves member macros back to ungrouped (`setId = ""`, keeping their individual locks intact).
+     */
+    fun deleteMacroSet(id: String, deleteMembers: Boolean = false) {
+        val existing = getMacroSetById(id)
+        val members = _macros.value.filter { it.setId == id }
+        if (deleteMembers) {
+            for (m in members) {
+                deleteMacro(m.id)
+            }
+        } else {
+            for (m in members) {
+                saveMacro(m.copy(setId = ""))
+            }
+        }
+        File(macroSetsDir, "${sanitizeFileName(id)}.json").delete()
+        _macroSets.update { list -> list.filterNot { it.id == id } }
+        if (existing != null && existing.logoImage.isNotBlank()) {
+            cleanupUnusedMacroIcon(existing.logoImage, excludingSetId = id)
         }
     }
 
@@ -626,7 +809,8 @@ class LocalStore(context: Context) {
     data class ExportSummary(
         val macrosExported: Int,
         val imagesExported: Int,
-        val singleUseImport: Boolean = false
+        val singleUseImport: Boolean = false,
+        val setsExported: Int = 0
     )
 
     private fun ensureExportSourceResolution(macro: Macro): Macro {
@@ -667,11 +851,59 @@ class LocalStore(context: Context) {
         )
     }
 
-    /** Exports every macro, Lua script, target image, and custom macro logo into a single backup .zip file. */
+    /**
+     * Exports a [MacroSet], all of its member macros, any externally linked sub-macros,
+     * custom logos, and all referenced PNG target images into a single portable `.zip` bundle.
+     */
+    fun exportMacroSetZip(
+        set: MacroSet,
+        output: OutputStream,
+        singleUseImport: Boolean = false
+    ): ExportSummary {
+        val latestSet = getMacroSetById(set.id) ?: set
+        val members = _macros.value
+            .filter { it.setId == latestSet.id }
+            .map(::ensureExportSourceResolution)
+        val res = MacroBundleCodec.writeMacroSetZip(
+            set = latestSet,
+            memberMacros = members,
+            lookupMacro = { id -> getMacroById(id)?.let(::ensureExportSourceResolution) },
+            loadImage = { imgName ->
+                resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
+            },
+            output = output,
+            loadMacroIcon = { iconName ->
+                macroIconFile(iconName)?.takeIf { it.exists() }?.let { f -> f.name to f.readBytes() }
+            },
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = effectiveNowMs()
+        )
+        return ExportSummary(
+            macrosExported = res.macrosExported,
+            imagesExported = res.imagesExported,
+            singleUseImport = res.singleUseImport,
+            setsExported = res.setsExported
+        )
+    }
+
+    /** Exports every macro set, macro, Lua script, target image, and custom logo into a single backup .zip file. */
     fun exportAllBackupZip(output: OutputStream): ExportSummary {
         var imagesWritten = 0
         val writtenIcons = HashSet<String>()
         ZipOutputStream(output).use { zip ->
+            for (set in _macroSets.value) {
+                zip.putNextEntry(ZipEntry("macro_sets/${sanitizeFileName(set.id)}.json"))
+                zip.write(json.encodeToString(set).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+                if (set.logoImage.isNotBlank()) {
+                    val f = macroIconFile(set.logoImage)
+                    if (f != null && f.exists() && writtenIcons.add(f.name)) {
+                        zip.putNextEntry(ZipEntry("macro_icons/${f.name}"))
+                        zip.write(f.readBytes())
+                        zip.closeEntry()
+                    }
+                }
+            }
             for (rawMacro in _macros.value) {
                 val macro = ensureExportSourceResolution(rawMacro)
                 zip.putNextEntry(ZipEntry("macros/${sanitizeFileName(macro.id)}.json"))
@@ -701,7 +933,11 @@ class LocalStore(context: Context) {
                 }
             }
         }
-        return ExportSummary(macrosExported = _macros.value.size, imagesExported = imagesWritten)
+        return ExportSummary(
+            macrosExported = _macros.value.size,
+            imagesExported = imagesWritten,
+            setsExported = _macroSets.value.size
+        )
     }
 
     data class ImportSummary(
@@ -710,8 +946,30 @@ class LocalStore(context: Context) {
         val imagesImported: Int,
         val macrosOverwritten: Int = 0,
         val deadlinesExtended: Int = 0,
-        val singleUseImport: Boolean = false
+        val singleUseImport: Boolean = false,
+        val setsImported: Int = 0,
+        val setsOverwritten: Int = 0
     )
+
+    private fun findMatchingMacroSetForOverwrite(incoming: MacroSet, candidates: List<MacroSet>): MacroSet? {
+        val incOrigin = incoming.originId.trim()
+        if (incOrigin.isNotBlank()) {
+            val byOrigin = candidates.firstOrNull { cur ->
+                cur.originId.equals(incOrigin, ignoreCase = false) || cur.id == incOrigin
+            }
+            if (byOrigin != null) return byOrigin
+        }
+        val incName = incoming.name.trim()
+        if (incName.isBlank()) return null
+        val byName = candidates.firstOrNull { cur -> cur.name.trim().equals(incName, ignoreCase = true) }
+        if (byName != null) {
+            if (MacroSecurity.hasAnySetProtection(byName) && !MacroSecurity.hasAnySetProtection(incoming)) {
+                return null
+            }
+            return byName
+        }
+        return null
+    }
 
     private fun findMatchingMacroForOverwrite(incoming: Macro, candidates: List<Macro>): Macro? {
         val incOrigin = incoming.originId.trim()
@@ -735,16 +993,15 @@ class LocalStore(context: Context) {
     }
 
     /**
-     * Imports either a single macro JSON, a single macro .zip bundle (with linked macros, logos & PNGs),
+     * Imports a single macro JSON, a single macro .zip bundle, a Macro Set .zip bundle,
      * or a full backup .zip.
      * - Rejects tampered or already-used single-use (1× import) bundles before writing anything.
-     * - If an imported macro matches an existing macro (by origin ID or name), overwrites it in-place
-     *   and ADDS the incoming expiry duration onto any remaining active deadline.
-     * - Preserves [RunMacroAction] links across both new and overwritten macros.
+     * - Overwrites matching Macro Sets & macros in-place and stacks active expiry deadlines.
+     * - Preserves [RunMacroAction], [FinishMacroAction], and [Macro.setId] links across all macros.
      */
     fun importFromStream(input: InputStream): ImportSummary {
         val decoded = MacroBundleCodec.readBundle(input)
-        // Enforce single-use (1× import) token check BEFORE saving any image, script, or macro
+        // Enforce single-use (1× import) token check BEFORE saving any image, script, set, or macro
         val oneTimeTokens = MacroBundleCodec.validateAndExtractOneTimeTokens(
             decoded = decoded,
             alreadyConsumedTokens = loadConsumedImportTokens()
@@ -765,6 +1022,31 @@ class LocalStore(context: Context) {
         }
 
         val now = effectiveNowMs()
+        var setsOverwrittenCount = 0
+        var extendedCount = 0
+
+        // 1. Import / merge Macro Sets first so incoming macros can resolve their final setId
+        val existingSetsSnapshot = _macroSets.value.toMutableList()
+        val finalSetIdMap = HashMap<String, String>()
+        for (incomingSet in decoded.macroSets) {
+            val match = findMatchingMacroSetForOverwrite(incomingSet, existingSetsSnapshot)
+            if (match != null) {
+                existingSetsSnapshot.removeAll { it.id == match.id }
+                val res = MacroSecurity.mergeOverwrittenMacroSet(match, incomingSet, now)
+                saveMacroSet(res.merged)
+                finalSetIdMap[incomingSet.id] = res.merged.id
+                setsOverwrittenCount++
+                if (res.deadlineExtended) extendedCount++
+                if (match.logoImage.isNotBlank() && match.logoImage != res.merged.logoImage) {
+                    cleanupUnusedMacroIcon(match.logoImage, excludingSetId = res.merged.id)
+                }
+            } else {
+                saveMacroSet(incomingSet)
+                finalSetIdMap[incomingSet.id] = incomingSet.id
+            }
+        }
+
+        // 2. Import / merge Macros with relinked macro IDs and set IDs
         val existingSnapshot = _macros.value.toMutableList()
         val matchedPairs = ArrayList<Pair<Macro, Macro?>>()
         val finalIdMap = HashMap<String, String>()
@@ -781,7 +1063,6 @@ class LocalStore(context: Context) {
         }
 
         var overwrittenCount = 0
-        var extendedCount = 0
         for ((incoming, existing) in matchedPairs) {
             fun relinkList(list: List<Action>): List<Action> = list.mapAllActions { a ->
                 when {
@@ -792,7 +1073,9 @@ class LocalStore(context: Context) {
                     else -> a
                 }
             }
+            val resolvedSetId = if (incoming.setId.isNotBlank()) finalSetIdMap[incoming.setId].orEmpty() else ""
             val relinked = incoming.copy(
+                setId = resolvedSetId,
                 actions = relinkList(incoming.actions),
                 stuckActions = relinkList(incoming.stuckActions)
             )
@@ -819,7 +1102,9 @@ class LocalStore(context: Context) {
             imagesImported = imagesCount,
             macrosOverwritten = overwrittenCount,
             deadlinesExtended = extendedCount,
-            singleUseImport = oneTimeTokens.isNotEmpty()
+            singleUseImport = oneTimeTokens.isNotEmpty(),
+            setsImported = decoded.macroSets.size,
+            setsOverwritten = setsOverwrittenCount
         )
     }
 

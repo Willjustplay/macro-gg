@@ -26,22 +26,28 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
+import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AdsClick
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Link
@@ -60,6 +66,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -89,6 +98,7 @@ import com.example.data.ColorAction
 import com.example.data.ImageAction
 import com.example.data.Macro
 import com.example.data.MacroSecurity
+import com.example.data.MacroSet
 import com.example.data.RecordAction
 import com.example.data.ResolutionScaler
 import com.example.data.TextAction
@@ -96,9 +106,13 @@ import com.example.data.countActions
 import com.example.data.countStuckActions
 import com.example.data.walk
 
+private const val SET_FILTER_ALL = "__ALL__"
+private const val SET_FILTER_UNGROUPED = "__UNGROUPED__"
+
 @Composable
 fun MacroHomeScreen(
     macros: List<Macro>,
+    macroSets: List<MacroSet> = emptyList(),
     permissions: PermissionHealth,
     engineState: EngineState,
     isOverlayActive: Boolean,
@@ -115,7 +129,17 @@ fun MacroHomeScreen(
     onStopEngine: () -> Unit,
     onQuickAutoClicker: () -> Unit,
     onCreateMacro: () -> Unit,
+    onCreateMacroInSet: (MacroSet) -> Unit = { onCreateMacro() },
     onImportMacro: () -> Unit,
+    onCreateMacroSet: () -> Unit = {},
+    onEditMacroSet: (MacroSet) -> Unit = {},
+    onManageMacroSetMembers: (MacroSet) -> Unit = {},
+    onOpenMacroSetSecurity: (MacroSet) -> Unit = {},
+    onDuplicateMacroSet: (MacroSet) -> Unit = {},
+    onExportMacroSet: (MacroSet, Boolean) -> Unit = { _, _ -> },
+    onExportMacroSetDirectToDownloads: (MacroSet, Boolean) -> Unit = onExportMacroSet,
+    onDeleteMacroSet: (MacroSet) -> Unit = {},
+    onMoveMacroToSet: (Macro) -> Unit = {},
     onEditMacro: (Macro) -> Unit,
     onLaunchMacroOverlay: (Macro) -> Unit,
     onChangeMacroLogo: (Macro) -> Unit,
@@ -129,6 +153,26 @@ fun MacroHomeScreen(
 ) {
     var exportDialogMacro by remember { mutableStateOf<Macro?>(null) }
     var exportDialogPreferDownloads by remember { mutableStateOf(false) }
+    var exportDialogSet by remember { mutableStateOf<MacroSet?>(null) }
+    var exportSetPreferDownloads by remember { mutableStateOf(false) }
+    var selectedSetFilter by remember { mutableStateOf(SET_FILTER_ALL) }
+    var expandedSetIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    val setById = remember(macroSets) { macroSets.associateBy { it.id } }
+    val macrosBySetId = remember(macros, setById) {
+        macros.groupBy { m -> if (m.setId in setById) m.setId else "" }
+    }
+    val ungroupedMacros = macrosBySetId[""].orEmpty()
+
+    LaunchedEffect(macroSets) {
+        if (selectedSetFilter != SET_FILTER_ALL &&
+            selectedSetFilter != SET_FILTER_UNGROUPED &&
+            selectedSetFilter !in setById
+        ) {
+            selectedSetFilter = SET_FILTER_ALL
+        }
+    }
+
     val activePermCount = remember(permissions) {
         listOf(
             permissions.accessibilityEnabled,
@@ -385,96 +429,418 @@ fun MacroHomeScreen(
             }
         }
 
-        // Section Header
-        item(key = "list_header") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Macro Tersimpan",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+        // Macro Set Filter Strip & Quick "+ Buat Set"
+        item(key = "macro_sets_bar") {
+            if (macroSets.isEmpty()) {
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                 ) {
-                    Text(
-                        "${macros.size} item",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Filled.CreateNewFolder,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    "Macro Set",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "Kelompokkan, kunci & ekspor beberapa macro sekaligus",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onCreateMacroSet,
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(3.dp))
+                            Text("Buat Set", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            } else {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    item(key = "chip_all") {
+                        FilterChip(
+                            selected = selectedSetFilter == SET_FILTER_ALL,
+                            onClick = { selectedSetFilter = SET_FILTER_ALL },
+                            label = {
+                                Text("Semua (${macros.size})", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                        )
+                    }
+                    items(macroSets, key = { "chip_${it.id}" }) { set ->
+                        val count = macrosBySetId[set.id]?.size ?: 0
+                        val accent = parseSetAccentColor(set.colorHex)
+                        val selected = selectedSetFilter == set.id
+                        FilterChip(
+                            selected = selected,
+                            onClick = { selectedSetFilter = set.id },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (set.isLocked) Icons.Filled.Lock else Icons.Filled.Folder,
+                                    contentDescription = null,
+                                    tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else accent,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    "${set.name} ($count)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = accent.copy(alpha = 0.22f)
+                            )
+                        )
+                    }
+                    if (ungroupedMacros.isNotEmpty()) {
+                        item(key = "chip_ungrouped") {
+                            FilterChip(
+                                selected = selectedSetFilter == SET_FILTER_UNGROUPED,
+                                onClick = { selectedSetFilter = SET_FILTER_UNGROUPED },
+                                label = {
+                                    Text("Tanpa Set (${ungroupedMacros.size})", style = MaterialTheme.typography.labelMedium)
+                                }
+                            )
+                        }
+                    }
+                    item(key = "chip_add_set") {
+                        FilledTonalButton(
+                            onClick = onCreateMacroSet,
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(Icons.Filled.CreateNewFolder, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("+ Set", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
 
-        if (macros.isEmpty()) {
-            item(key = "empty") {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(28.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+        // Focused Single Macro Set Mode
+        val focusedSet = if (selectedSetFilter != SET_FILTER_ALL && selectedSetFilter != SET_FILTER_UNGROUPED) {
+            setById[selectedSetFilter]
+        } else null
+
+        if (focusedSet != null) {
+            val setMembers = macrosBySetId[focusedSet.id].orEmpty()
+            item(key = "focused_set_banner_${focusedSet.id}") {
+                FocusedMacroSetBanner(
+                    set = focusedSet,
+                    members = setMembers,
+                    nowMs = nowMs,
+                    onBackToAll = { selectedSetFilter = SET_FILTER_ALL },
+                    onCreateMacroInSet = { onCreateMacroInSet(focusedSet) },
+                    onManageMembers = { onManageMacroSetMembers(focusedSet) },
+                    onEditSet = { onEditMacroSet(focusedSet) },
+                    onOpenSecurity = { onOpenMacroSetSecurity(focusedSet) },
+                    onDuplicateSet = { onDuplicateMacroSet(focusedSet) },
+                    onExportSet = {
+                        exportSetPreferDownloads = false
+                        exportDialogSet = focusedSet
+                    },
+                    onExportSetDownloads = {
+                        exportSetPreferDownloads = true
+                        exportDialogSet = focusedSet
+                    },
+                    onDeleteSet = { onDeleteMacroSet(focusedSet) }
+                )
+            }
+            if (setMembers.isEmpty()) {
+                item(key = "focused_set_empty_${focusedSet.id}") {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     ) {
-                        Icon(
-                            Icons.Filled.ImageSearch,
-                            contentDescription = null,
-                            modifier = Modifier.size(40.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            "Belum ada macro tersimpan",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            "Tekan 'Auto Clicker' untuk mulai cepat atau 'Baru' untuk membuat macro deteksi gambar, teks, atau warna.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.FolderOpen,
+                                contentDescription = null,
+                                modifier = Modifier.size(36.dp),
+                                tint = parseSetAccentColor(focusedSet.colorHex)
+                            )
+                            Text("Macro Set ini masih kosong", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Tambahkan macro baru atau pilih macro yang sudah ada untuk dimasukkan ke '${focusedSet.name}'.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { onCreateMacroInSet(focusedSet) }, shape = RoundedCornerShape(10.dp)) {
+                                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Macro Baru")
+                                }
+                                FilledTonalButton(onClick = { onManageMacroSetMembers(focusedSet) }, shape = RoundedCornerShape(10.dp)) {
+                                    Icon(Icons.AutoMirrored.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Pilih Macro")
+                                }
+                            }
+                        }
                     }
+                }
+            } else {
+                items(setMembers, key = { it.id }) { macro ->
+                    MacroListCard(
+                        macro = macro,
+                        parentSet = focusedSet,
+                        isActive = macro.id == activeMacroId && isOverlayActive,
+                        nowMs = nowMs,
+                        screenW = screenW,
+                        screenH = screenH,
+                        logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
+                        modifier = Modifier.animateItem(),
+                        onEdit = { onEditMacro(macro) },
+                        onLaunchOverlay = { onLaunchMacroOverlay(macro) },
+                        onChangeLogo = { onChangeMacroLogo(macro) },
+                        onOpenSecurity = { onOpenMacroSecurity(macro) },
+                        onOpenAutoScale = { onOpenAutoScale(macro) },
+                        onTogglePassivePull = { onTogglePassivePull(macro) },
+                        onMoveToSet = { onMoveMacroToSet(macro) },
+                        onDuplicate = { onDuplicateMacro(macro) },
+                        onExport = {
+                            exportDialogPreferDownloads = false
+                            exportDialogMacro = macro
+                        },
+                        onExportDirectToDownloads = {
+                            exportDialogPreferDownloads = true
+                            exportDialogMacro = macro
+                        },
+                        onDelete = { onDeleteMacro(macro) }
+                    )
                 }
             }
         } else {
-            items(macros, key = { it.id }) { macro ->
-                MacroListCard(
-                    macro = macro,
-                    isActive = macro.id == activeMacroId && isOverlayActive,
-                    nowMs = nowMs,
-                    screenW = screenW,
-                    screenH = screenH,
-                    logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
-                    modifier = Modifier.animateItem(),
-                    onEdit = { onEditMacro(macro) },
-                    onLaunchOverlay = { onLaunchMacroOverlay(macro) },
-                    onChangeLogo = { onChangeMacroLogo(macro) },
-                    onOpenSecurity = { onOpenMacroSecurity(macro) },
-                    onOpenAutoScale = { onOpenAutoScale(macro) },
-                    onTogglePassivePull = { onTogglePassivePull(macro) },
-                    onDuplicate = { onDuplicateMacro(macro) },
-                    onExport = {
-                        exportDialogPreferDownloads = false
-                        exportDialogMacro = macro
-                    },
-                    onExportDirectToDownloads = {
-                        exportDialogPreferDownloads = true
-                        exportDialogMacro = macro
-                    },
-                    onDelete = { onDeleteMacro(macro) }
-                )
+            // "Semua" or "Tanpa Set" mode
+            if (selectedSetFilter == SET_FILTER_ALL && macroSets.isNotEmpty()) {
+                item(key = "sets_section_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Macro Set",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        ) {
+                            Text(
+                                "${macroSets.size} set",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+
+                items(macroSets, key = { "set_card_${it.id}" }) { set ->
+                    val members = macrosBySetId[set.id].orEmpty()
+                    val isExpanded = set.id in expandedSetIds
+                    MacroSetCard(
+                        set = set,
+                        members = members,
+                        isExpanded = isExpanded,
+                        activeMacroId = activeMacroId,
+                        isOverlayActive = isOverlayActive,
+                        nowMs = nowMs,
+                        screenW = screenW,
+                        screenH = screenH,
+                        resolveLogoPath = resolveLogoPath,
+                        modifier = Modifier.animateItem(),
+                        onToggleExpand = {
+                            expandedSetIds = if (isExpanded) expandedSetIds - set.id else expandedSetIds + set.id
+                        },
+                        onFocusSet = { selectedSetFilter = set.id },
+                        onCreateMacroInSet = { onCreateMacroInSet(set) },
+                        onManageMembers = { onManageMacroSetMembers(set) },
+                        onEditSet = { onEditMacroSet(set) },
+                        onOpenSecurity = { onOpenMacroSetSecurity(set) },
+                        onDuplicateSet = { onDuplicateMacroSet(set) },
+                        onExportSet = {
+                            exportSetPreferDownloads = false
+                            exportDialogSet = set
+                        },
+                        onExportSetDownloads = {
+                            exportSetPreferDownloads = true
+                            exportDialogSet = set
+                        },
+                        onDeleteSet = { onDeleteMacroSet(set) },
+                        onEditMacro = onEditMacro,
+                        onLaunchMacroOverlay = onLaunchMacroOverlay,
+                        onChangeMacroLogo = onChangeMacroLogo,
+                        onOpenMacroSecurity = onOpenMacroSecurity,
+                        onOpenAutoScale = onOpenAutoScale,
+                        onTogglePassivePull = onTogglePassivePull,
+                        onMoveMacroToSet = onMoveMacroToSet,
+                        onDuplicateMacro = onDuplicateMacro,
+                        onExportMacro = { m ->
+                            exportDialogPreferDownloads = false
+                            exportDialogMacro = m
+                        },
+                        onExportMacroDownloads = { m ->
+                            exportDialogPreferDownloads = true
+                            exportDialogMacro = m
+                        },
+                        onDeleteMacro = onDeleteMacro
+                    )
+                }
+            }
+
+            // Ungrouped Macros Section
+            val visibleLooseMacros = if (selectedSetFilter == SET_FILTER_UNGROUPED || macroSets.isNotEmpty()) {
+                ungroupedMacros
+            } else {
+                macros
+            }
+            val showLooseHeader = visibleLooseMacros.isNotEmpty() || macroSets.isEmpty() || selectedSetFilter == SET_FILTER_UNGROUPED
+            if (showLooseHeader) {
+                item(key = "list_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            if (macroSets.isEmpty()) "Macro Tersimpan" else "Macro Tanpa Set",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        ) {
+                            Text(
+                                "${visibleLooseMacros.size} item",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (macros.isEmpty() && macroSets.isEmpty()) {
+                item(key = "empty") {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(28.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.ImageSearch,
+                                contentDescription = null,
+                                modifier = Modifier.size(40.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Belum ada macro tersimpan",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                "Tekan 'Auto Clicker' untuk mulai cepat atau 'Baru' untuk membuat macro deteksi gambar, teks, atau warna.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(visibleLooseMacros, key = { it.id }) { macro ->
+                    MacroListCard(
+                        macro = macro,
+                        parentSet = null,
+                        isActive = macro.id == activeMacroId && isOverlayActive,
+                        nowMs = nowMs,
+                        screenW = screenW,
+                        screenH = screenH,
+                        logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
+                        modifier = Modifier.animateItem(),
+                        onEdit = { onEditMacro(macro) },
+                        onLaunchOverlay = { onLaunchMacroOverlay(macro) },
+                        onChangeLogo = { onChangeMacroLogo(macro) },
+                        onOpenSecurity = { onOpenMacroSecurity(macro) },
+                        onOpenAutoScale = { onOpenAutoScale(macro) },
+                        onTogglePassivePull = { onTogglePassivePull(macro) },
+                        onMoveToSet = { onMoveMacroToSet(macro) },
+                        onDuplicate = { onDuplicateMacro(macro) },
+                        onExport = {
+                            exportDialogPreferDownloads = false
+                            exportDialogMacro = macro
+                        },
+                        onExportDirectToDownloads = {
+                            exportDialogPreferDownloads = true
+                            exportDialogMacro = macro
+                        },
+                        onDelete = { onDeleteMacro(macro) }
+                    )
+                }
             }
         }
     }
@@ -492,6 +858,25 @@ fun MacroHomeScreen(
                 onExportMacroDirectToDownloads(targetMacro, singleUse)
             },
             onDismiss = { exportDialogMacro = null }
+        )
+    }
+
+    exportDialogSet?.let { targetSet ->
+        val members = macrosBySetId[targetSet.id].orEmpty()
+        ExportMacroSetOptionsDialog(
+            set = targetSet,
+            memberCount = members.size,
+            passiveCount = members.count { it.isPassive },
+            preferDownloads = exportSetPreferDownloads,
+            onExportToPicker = { singleUse ->
+                exportDialogSet = null
+                onExportMacroSet(targetSet, singleUse)
+            },
+            onExportToDownloads = { singleUse ->
+                exportDialogSet = null
+                onExportMacroSetDirectToDownloads(targetSet, singleUse)
+            },
+            onDismiss = { exportDialogSet = null }
         )
     }
 }
@@ -644,8 +1029,481 @@ private fun PermissionPill(
 }
 
 @Composable
+private fun MacroSetCard(
+    set: MacroSet,
+    members: List<Macro>,
+    isExpanded: Boolean,
+    activeMacroId: String,
+    isOverlayActive: Boolean,
+    nowMs: Long,
+    screenW: Int,
+    screenH: Int,
+    resolveLogoPath: (String) -> String?,
+    modifier: Modifier = Modifier,
+    onToggleExpand: () -> Unit,
+    onFocusSet: () -> Unit,
+    onCreateMacroInSet: () -> Unit,
+    onManageMembers: () -> Unit,
+    onEditSet: () -> Unit,
+    onOpenSecurity: () -> Unit,
+    onDuplicateSet: () -> Unit,
+    onExportSet: () -> Unit,
+    onExportSetDownloads: () -> Unit,
+    onDeleteSet: () -> Unit,
+    onEditMacro: (Macro) -> Unit,
+    onLaunchMacroOverlay: (Macro) -> Unit,
+    onChangeMacroLogo: (Macro) -> Unit,
+    onOpenMacroSecurity: (Macro) -> Unit,
+    onOpenAutoScale: (Macro) -> Unit,
+    onTogglePassivePull: (Macro) -> Unit,
+    onMoveMacroToSet: (Macro) -> Unit,
+    onDuplicateMacro: (Macro) -> Unit,
+    onExportMacro: (Macro) -> Unit,
+    onExportMacroDownloads: (Macro) -> Unit,
+    onDeleteMacro: (Macro) -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val accent = parseSetAccentColor(set.colorHex)
+    val isExpired = MacroSecurity.isSetExpired(set, nowMs)
+    val isTampered = MacroSecurity.isSetTampered(set)
+    val remainingLabel = MacroSecurity.remainingSetTimeLabel(set, nowMs)
+    val passiveCount = remember(members) { members.count { it.isPassive } }
+    val activeCount = (members.size - passiveCount).coerceAtLeast(0)
+    val hasRunningMember = isOverlayActive && members.any { it.id == activeMacroId }
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                isExpired || isTampered -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.14f)
+                hasRunningMember -> accent.copy(alpha = 0.10f)
+                else -> MaterialTheme.colorScheme.surface
+            }
+        ),
+        border = BorderStroke(
+            width = if (isExpanded || hasRunningMember || isExpired) 1.5.dp else 1.dp,
+            color = when {
+                isExpired || isTampered -> MaterialTheme.colorScheme.error.copy(alpha = 0.65f)
+                isExpanded || hasRunningMember -> accent.copy(alpha = 0.8f)
+                else -> accent.copy(alpha = 0.42f)
+            }
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggleExpand)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(accent.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Filled.FolderOpen else Icons.Filled.Folder,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            set.name.ifBlank { "Set Baru" },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (set.isLocked) {
+                            Icon(
+                                Icons.Filled.Lock,
+                                contentDescription = "Set Terkunci",
+                                tint = Color(0xFFA78BFA),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                    val countSummary = buildString {
+                        append("${members.size} macro")
+                        if (members.isNotEmpty()) {
+                            append(" ($activeCount Aktif")
+                            if (passiveCount > 0) append(" • $passiveCount Pasif")
+                            append(")")
+                        }
+                    }
+                    Text(
+                        countSummary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (set.description.isNotBlank()) {
+                        Text(
+                            set.description,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (isExpanded) "Tutup Set" else "Buka Set",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Box {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu Set", modifier = Modifier.size(20.dp))
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Buka Tampilan Fokus Set") },
+                            leadingIcon = { Icon(Icons.Filled.FolderOpen, null) },
+                            onClick = { menuOpen = false; onFocusSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Tambah Macro Baru ke Set") },
+                            leadingIcon = { Icon(Icons.Filled.Add, null) },
+                            onClick = { menuOpen = false; onCreateMacroInSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Kelola Isi Set (${members.size})") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.PlaylistAddCheck, null) },
+                            onClick = { menuOpen = false; onManageMembers() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Edit Nama & Warna Set") },
+                            leadingIcon = { Icon(Icons.Filled.Edit, null) },
+                            onClick = { menuOpen = false; onEditSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Kunci & Tenggat Set") },
+                            leadingIcon = { Icon(Icons.Filled.Lock, null) },
+                            onClick = { menuOpen = false; onOpenSecurity() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Duplikat Set") },
+                            leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                            onClick = { menuOpen = false; onDuplicateSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Ekspor Macro Set (.zip)") },
+                            leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
+                            onClick = { menuOpen = false; onExportSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Simpan Set ke Download (.zip)") },
+                            leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
+                            onClick = { menuOpen = false; onExportSetDownloads() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Hapus Set", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Filled.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; onDeleteSet() }
+                        )
+                    }
+                }
+            }
+
+            if (set.isLocked || remainingLabel != null || isTampered) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (isTampered) FeatureTag("⚠ Set Tidak Valid", Color(0xFFEF4444))
+                    if (set.isLocked) FeatureTag("🔒 Set Terkunci", Color(0xFFA78BFA))
+                    if (remainingLabel != null) {
+                        val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)
+                        FeatureTag((if (isExpired) "⏰ " else "⏳ ") + remainingLabel, expColor)
+                    }
+                }
+            }
+
+            // Quick Action Bar for the Set (Lock, Export, Manage/Expand)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onOpenSecurity,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null,
+                        tint = if (set.isLocked) Color(0xFFA78BFA) else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (set.isLocked) "Terkunci" else "Kunci", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = onExportSet,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(Icons.Filled.FileDownload, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Ekspor", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.weight(1f))
+                FilledTonalButton(
+                    onClick = onToggleExpand,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Text(
+                        if (isExpanded) "Sembunyikan" else "Lihat (${members.size})",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HorizontalDivider(color = accent.copy(alpha = 0.25f))
+                    if (members.isEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Belum ada macro di set ini.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            TextButton(onClick = onManageMembers) {
+                                Text("+ Pilih Macro")
+                            }
+                        }
+                    } else {
+                        members.forEach { macro ->
+                            MacroListCard(
+                                macro = macro,
+                                parentSet = set,
+                                isActive = macro.id == activeMacroId && isOverlayActive,
+                                nowMs = nowMs,
+                                screenW = screenW,
+                                screenH = screenH,
+                                logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
+                                onEdit = { onEditMacro(macro) },
+                                onLaunchOverlay = { onLaunchMacroOverlay(macro) },
+                                onChangeLogo = { onChangeMacroLogo(macro) },
+                                onOpenSecurity = { onOpenMacroSecurity(macro) },
+                                onOpenAutoScale = { onOpenAutoScale(macro) },
+                                onTogglePassivePull = { onTogglePassivePull(macro) },
+                                onMoveToSet = { onMoveMacroToSet(macro) },
+                                onDuplicate = { onDuplicateMacro(macro) },
+                                onExport = { onExportMacro(macro) },
+                                onExportDirectToDownloads = { onExportMacroDownloads(macro) },
+                                onDelete = { onDeleteMacro(macro) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FocusedMacroSetBanner(
+    set: MacroSet,
+    members: List<Macro>,
+    nowMs: Long,
+    onBackToAll: () -> Unit,
+    onCreateMacroInSet: () -> Unit,
+    onManageMembers: () -> Unit,
+    onEditSet: () -> Unit,
+    onOpenSecurity: () -> Unit,
+    onDuplicateSet: () -> Unit,
+    onExportSet: () -> Unit,
+    onExportSetDownloads: () -> Unit,
+    onDeleteSet: () -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val accent = parseSetAccentColor(set.colorHex)
+    val isExpired = MacroSecurity.isSetExpired(set, nowMs)
+    val isTampered = MacroSecurity.isSetTampered(set)
+    val remainingLabel = MacroSecurity.remainingSetTimeLabel(set, nowMs)
+    val passiveCount = members.count { it.isPassive }
+    val activeCount = (members.size - passiveCount).coerceAtLeast(0)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.12f)),
+        border = BorderStroke(1.5.dp, if (isExpired || isTampered) MaterialTheme.colorScheme.error else accent.copy(alpha = 0.7f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(accent.copy(alpha = 0.22f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (set.isLocked) Icons.Filled.Lock else Icons.Filled.FolderOpen,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        set.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${members.size} macro ($activeCount Aktif • $passiveCount Pasif)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (set.description.isNotBlank()) {
+                        Text(
+                            set.description,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Box {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu Set")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Kembali ke Semua") },
+                            leadingIcon = { Icon(Icons.Filled.Folder, null) },
+                            onClick = { menuOpen = false; onBackToAll() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Edit Nama & Warna") },
+                            leadingIcon = { Icon(Icons.Filled.Edit, null) },
+                            onClick = { menuOpen = false; onEditSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Duplikat Set") },
+                            leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                            onClick = { menuOpen = false; onDuplicateSet() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Simpan Set ke Download (.zip)") },
+                            leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
+                            onClick = { menuOpen = false; onExportSetDownloads() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Hapus Set", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Filled.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; onDeleteSet() }
+                        )
+                    }
+                }
+            }
+
+            if (set.isLocked || remainingLabel != null || isTampered) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (isTampered) FeatureTag("⚠ Set Tidak Valid", Color(0xFFEF4444))
+                    if (set.isLocked) FeatureTag("🔒 Set Terkunci", Color(0xFFA78BFA))
+                    if (remainingLabel != null) {
+                        val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)
+                        FeatureTag((if (isExpired) "⏰ " else "⏳ ") + remainingLabel, expColor)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onCreateMacroInSet,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f).height(34.dp)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Macro", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onManageMembers,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f).height(34.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Isi Set", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onOpenSecurity,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f).height(34.dp)
+                ) {
+                    Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Kunci", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+                Button(
+                    onClick = onExportSet,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f).height(34.dp)
+                ) {
+                    Icon(Icons.Filled.FileDownload, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Ekspor", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MacroListCard(
     macro: Macro,
+    parentSet: MacroSet? = null,
     isActive: Boolean,
     nowMs: Long,
     screenW: Int,
@@ -658,6 +1516,7 @@ private fun MacroListCard(
     onOpenSecurity: () -> Unit,
     onOpenAutoScale: () -> Unit,
     onTogglePassivePull: () -> Unit,
+    onMoveToSet: () -> Unit = {},
     onDuplicate: () -> Unit,
     onExport: () -> Unit,
     onExportDirectToDownloads: () -> Unit = onExport,
@@ -676,9 +1535,11 @@ private fun MacroListCard(
         ResolutionScaler.forMacro(macro, screenW, screenH)
     }
 
-    val isExpired = MacroSecurity.isExpired(macro, nowMs)
-    val isTampered = MacroSecurity.isTampered(macro)
+    val effectivelyLocked = MacroSecurity.isEffectivelyLocked(macro, parentSet)
+    val isExpired = MacroSecurity.isExpired(macro, nowMs) || (parentSet != null && MacroSecurity.isSetExpired(parentSet, nowMs))
+    val isTampered = MacroSecurity.isTampered(macro) || (parentSet != null && MacroSecurity.isSetTampered(parentSet))
     val remainingLabel = MacroSecurity.remainingTimeLabel(macro, nowMs)
+        ?: parentSet?.let { MacroSecurity.remainingSetTimeLabel(it, nowMs) }
     val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     val badgeColor = when {
@@ -752,7 +1613,7 @@ private fun MacroListCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (macro.isLocked) {
+                        if (effectivelyLocked) {
                             Icon(
                                 Icons.Filled.Lock,
                                 contentDescription = "Terkunci",
@@ -786,6 +1647,11 @@ private fun MacroListCard(
                             text = { Text("Auto-Scale Layar (Tanpa Sandi)") },
                             leadingIcon = { Icon(Icons.Filled.AspectRatio, null) },
                             onClick = { menuOpen = false; onOpenAutoScale() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Pindah ke Macro Set") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null) },
+                            onClick = { menuOpen = false; onMoveToSet() }
                         )
                         DropdownMenuItem(
                             text = { Text("Ubah Foto Logo") },
@@ -839,17 +1705,17 @@ private fun MacroListCard(
             }
 
             // Security / Expiry / Passive / Auto-Scale / Watchdog badges row (Auto-Scale chip is always clickable without password)
-            if (macro.isLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog) {
+            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
-                    if (macro.isLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
+                    if (effectivelyLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
                     if (macro.isPassive) {
                         FeatureTag(
                             text = if (macro.passiveEnabled) "🔗 Pasif ON" else "⛔ Pasif OFF",
                             color = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
                         )
                     }
-                    if (scaleTransform.isScaling || macro.isLocked) {
+                    if (scaleTransform.isScaling || effectivelyLocked) {
                         val scaleTint = if (macro.autoScaleResolution) Color(0xFF06B6D4) else Color(0xFF64748B)
                         Surface(
                             modifier = Modifier
@@ -899,7 +1765,7 @@ private fun MacroListCard(
                         modifier = Modifier.height(34.dp)
                     ) {
                         Icon(
-                            imageVector = if (macro.isLocked) Icons.Filled.Lock else Icons.Filled.Edit,
+                            imageVector = if (effectivelyLocked) Icons.Filled.Lock else Icons.Filled.Edit,
                             contentDescription = null,
                             modifier = Modifier.size(14.dp)
                         )

@@ -164,7 +164,8 @@ object AutomationCoordinator {
 
     private fun rejectIfActiveMacroLocked(): Boolean {
         val cur = _activeMacro.value
-        if (cur.isLocked) {
+        val parentSet = store?.getMacroSetById(cur.setId)
+        if (MacroSecurity.isEffectivelyLocked(cur, parentSet)) {
             ExecutionLogBus.warn("Macro '${cur.name}' dikunci dengan sandi — buka kunci di aplikasi untuk mengubah.")
             return true
         }
@@ -542,7 +543,8 @@ object AutomationCoordinator {
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
-                    if (linked != null && MacroSecurity.checkLinkedRun(linked, now) == null && check(linked)) {
+                    val linkedSet = if (linked != null) localStore.getMacroSetById(linked.setId) else null
+                    if (linked != null && MacroSecurity.checkLinkedRun(linked, now, linkedSet) == null && check(linked)) {
                         return true
                     }
                 } else if (a is FinishMacroAction &&
@@ -550,7 +552,8 @@ object AutomationCoordinator {
                     a.targetMacroId.isNotBlank()
                 ) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
-                    if (linked != null && MacroSecurity.checkDirectRun(linked, now) == null && check(linked)) {
+                    val linkedSet = if (linked != null) localStore.getMacroSetById(linked.setId) else null
+                    if (linked != null && MacroSecurity.checkDirectRun(linked, now, linkedSet) == null && check(linked)) {
                         return true
                     }
                 }
@@ -591,8 +594,9 @@ object AutomationCoordinator {
     ) {
         stop()
         val effectiveNow = store?.effectiveNowMs() ?: System.currentTimeMillis()
-        MacroSecurity.checkDirectRun(macro, effectiveNow)?.let { denial ->
-            ExecutionLogBus.error(MacroSecurity.denialMessage(macro, denial))
+        val parentSet = store?.getMacroSetById(macro.setId)
+        MacroSecurity.checkDirectRun(macro, effectiveNow, parentSet)?.let { denial ->
+            ExecutionLogBus.error(MacroSecurity.denialMessage(macro, denial, parentSet))
             return
         }
         if (!MacroAccessibilityService.isConnected.value) {
@@ -804,6 +808,7 @@ object AutomationCoordinator {
                 }
                 override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
                 override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)
+                override fun loadMacroSet(id: String): com.example.data.MacroSet? = localStore?.getMacroSetById(id)
                 override fun onActiveMacroSwitched(target: Macro) {
                     selectMacro(target)
                     _currentLoop.value = 0

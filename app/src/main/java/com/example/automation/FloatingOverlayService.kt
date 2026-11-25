@@ -501,7 +501,8 @@ class FloatingOverlayService : Service() {
         })
 
         toolsRow.addView(makeCompactButton("✂", "#0F766E") {
-            if (AutomationCoordinator.activeMacro.value.isLocked) {
+            val active = AutomationCoordinator.activeMacro.value
+            if (MacroSecurity.isEffectivelyLocked(active, store.getMacroSetById(active.setId))) {
                 Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat ditambah aksi", Toast.LENGTH_SHORT).show()
             } else {
                 launchScreenshotCrop(addToMacro = true, targetActionId = null)
@@ -509,7 +510,8 @@ class FloatingOverlayService : Service() {
         })
 
         toolsRow.addView(makeCompactButton("●", "#B91C1C") {
-            if (AutomationCoordinator.activeMacro.value.isLocked) {
+            val active = AutomationCoordinator.activeMacro.value
+            if (MacroSecurity.isEffectivelyLocked(active, store.getMacroSetById(active.setId))) {
                 Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat ditambah rekaman", Toast.LENGTH_SHORT).show()
             } else {
                 openTouchRecorder()
@@ -1006,8 +1008,9 @@ class FloatingOverlayService : Service() {
             dismissMarkerEditor()
             if (AutomationCoordinator.activeMode.value == AutomationMode.MACRO) {
                 val active = AutomationCoordinator.activeMacro.value
-                MacroSecurity.checkDirectRun(active, store.effectiveNowMs())?.let { denial ->
-                    val msg = MacroSecurity.denialMessage(active, denial)
+                val parentSet = store.getMacroSetById(active.setId)
+                MacroSecurity.checkDirectRun(active, store.effectiveNowMs(), parentSet)?.let { denial ->
+                    val msg = MacroSecurity.denialMessage(active, denial, parentSet)
                     ExecutionLogBus.error(msg)
                     Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                     return

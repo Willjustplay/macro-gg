@@ -927,9 +927,9 @@ private fun ActionNodeCard(
                     Spacer(Modifier.width(4.dp))
                 }
 
-                // Leading visual: image thumbnail for ImageAction / TrackObjectAction, color dot for ColorAction, icon otherwise
-                when (action) {
-                    is ImageAction, is TrackObjectAction -> {
+                // Leading visual: image thumbnail for ImageAction / image-based TrackObjectAction, color dot for ColorAction, icon otherwise
+                when {
+                    action is ImageAction || (action is TrackObjectAction && !action.trackAnyMotion) -> {
                         val imgName = if (action is ImageAction) action.imageName else (action as TrackObjectAction).imageName
                         val asset = imageByName[imgName]
                         val bmp = rememberAssetThumbnail(asset?.path, asset?.updatedAt ?: 0L)
@@ -949,7 +949,7 @@ private fun ActionNodeCard(
                             }
                         }
                     }
-                    is ColorAction -> {
+                    action is ColorAction -> {
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
@@ -999,7 +999,7 @@ private fun ActionNodeCard(
                 }
 
                 when {
-                    action is ImageAction || action is TrackObjectAction -> {
+                    action is ImageAction || (action is TrackObjectAction && !action.trackAnyMotion) -> {
                         IconButton(onClick = { onQuickSwapImage(action) }, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.SwapHoriz,
@@ -1009,11 +1009,11 @@ private fun ActionNodeCard(
                             )
                         }
                     }
-                    action is TextAction -> {
+                    action is TextAction || (action is TrackObjectAction && action.trackAnyMotion) -> {
                         IconButton(onClick = { onPickRegionOnScreen(action.id) }, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.CropFree,
-                                contentDescription = "Pilih Area Baca di Layar",
+                                contentDescription = "Pilih Area di Layar",
                                 tint = accent,
                                 modifier = Modifier.size(20.dp)
                             )
@@ -1036,16 +1036,16 @@ private fun ActionNodeCard(
                         Icon(Icons.Filled.MoreVert, contentDescription = "Opsi", modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                        if (action is ImageAction || action is TrackObjectAction) {
+                        if (action is ImageAction || (action is TrackObjectAction && !action.trackAnyMotion)) {
                             DropdownMenuItem(
                                 text = { Text("Ganti Gambar Target") },
                                 leadingIcon = { Icon(Icons.Filled.SwapHoriz, null) },
                                 onClick = { menuExpanded = false; onQuickSwapImage(action) }
                             )
                         }
-                        if (action is TextAction) {
+                        if (action is TextAction || (action is TrackObjectAction && action.trackAnyMotion)) {
                             DropdownMenuItem(
-                                text = { Text("Pilih Area Baca di Layar") },
+                                text = { Text("Pilih Area di Layar") },
                                 leadingIcon = { Icon(Icons.Filled.CropFree, null) },
                                 onClick = { menuExpanded = false; onPickRegionOnScreen(action.id) }
                             )

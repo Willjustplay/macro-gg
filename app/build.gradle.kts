@@ -12,8 +12,8 @@ android {
     applicationId = "com.aistudio.taplua.kxmzqr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 19
-    versionName = "2.12.0"
+    versionCode = 20
+    versionName = "2.13.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

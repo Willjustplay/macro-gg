@@ -449,7 +449,7 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val CHANNEL_ID = "macrogg_screen_capture"
         private const val NOTIFICATION_ID = 4102
-        private const val TRACKING_FRAME_INTERVAL_MS = 42L
+        private const val TRACKING_FRAME_INTERVAL_MS = 33L
         private const val ACTIVE_FRAME_INTERVAL_MS = 120L
         private const val IDLE_FRAME_INTERVAL_MS = 450L
         @Volatile var highFrequencyCapture: Boolean = false

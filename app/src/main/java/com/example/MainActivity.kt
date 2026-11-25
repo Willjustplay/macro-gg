@@ -71,6 +71,9 @@ import com.example.automation.MacroAccessibilityService
 import com.example.automation.ScreenCaptureService
 import com.example.data.Macro
 import com.example.data.MacroSecurity
+import com.example.data.MacroSet
+import com.example.ui.CreateOrEditMacroSetDialog
+import com.example.ui.DeleteMacroSetDialog
 import com.example.ui.ImageLibraryScreen
 import com.example.ui.LiveLogPanel
 import com.example.ui.LuaStudioScreen
@@ -78,7 +81,10 @@ import com.example.ui.MacroEditorScreen
 import com.example.ui.MacroHomeScreen
 import com.example.ui.MacroLogoPickerSheet
 import com.example.ui.MacroSecuritySheet
+import com.example.ui.MacroSetSecuritySheet
 import com.example.ui.MacroViewModel
+import com.example.ui.ManageMacroSetMembersSheet
+import com.example.ui.MoveMacroToSetDialog
 import com.example.ui.PasswordUnlockDialog
 import com.example.ui.SettingsPanel
 import com.example.ui.theme.TapLuaTheme
@@ -115,6 +121,7 @@ private fun WjustMacroApp() {
     val viewModel: MacroViewModel = viewModel(factory = MacroViewModel.Factory(context))
 
     val macros by viewModel.macros.collectAsStateWithLifecycle()
+    val macroSets by viewModel.macroSets.collectAsStateWithLifecycle()
     val scripts by viewModel.scripts.collectAsStateWithLifecycle()
     val images by viewModel.images.collectAsStateWithLifecycle()
     val imageFolders by viewModel.imageFolders.collectAsStateWithLifecycle()
@@ -141,6 +148,22 @@ private fun WjustMacroApp() {
     var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportSingleUse by remember { mutableStateOf(false) }
+
+    // Macro Set modals & password-guard state
+    var showCreateSetDialog by remember { mutableStateOf(false) }
+    var createSetPreselectedMacroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var editingSetId by remember { mutableStateOf<String?>(null) }
+    var managingMembersSetId by remember { mutableStateOf<String?>(null) }
+    var securitySheetSetId by remember { mutableStateOf<String?>(null) }
+    var deletingSetId by remember { mutableStateOf<String?>(null) }
+    var movingMacroId by remember { mutableStateOf<String?>(null) }
+    var passwordPromptSetId by remember { mutableStateOf<String?>(null) }
+    var passwordPromptSetAction by remember { mutableStateOf("") } // "EDIT_SET" | "MEMBERS" | "SECURITY" | "DUPLICATE" | "ADD_MACRO" | "MOVE_IN" | "MOVE_OUT"
+    var pendingMoveMacroId by remember { mutableStateOf<String?>(null) }
+    var pendingMoveTargetSetId by remember { mutableStateOf<String?>(null) }
+    var pendingExportSet by remember { mutableStateOf<MacroSet?>(null) }
+    var pendingExportSetSingleUse by remember { mutableStateOf(false) }
+
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingImportGalleryFolder by remember { mutableStateOf("") }
@@ -173,6 +196,18 @@ private fun WjustMacroApp() {
         pendingExportSingleUse = false
         if (uri != null && macro != null) {
             viewModel.exportMacroToUri(macro, uri, singleUseImport = singleUse)
+        }
+    }
+
+    val exportMacroSetLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val set = pendingExportSet
+        val singleUse = pendingExportSetSingleUse
+        pendingExportSet = null
+        pendingExportSetSingleUse = false
+        if (uri != null && set != null) {
+            viewModel.exportMacroSetToUri(set, uri, singleUseImport = singleUse)
         }
     }
 
@@ -260,6 +295,20 @@ private fun WjustMacroApp() {
             pendingExportMacro = null
             pendingExportSingleUse = false
             viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport)
+        }
+    }
+
+    fun safeExportMacroSet(set: MacroSet, singleUseImport: Boolean = false) {
+        val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
+        val fileName = if (singleUseImport) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
+        pendingExportSet = set
+        pendingExportSetSingleUse = singleUseImport
+        runCatching {
+            exportMacroSetLauncher.launch(fileName)
+        }.onFailure {
+            pendingExportSet = null
+            pendingExportSetSingleUse = false
+            viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUseImport)
         }
     }
 
@@ -435,8 +484,11 @@ private fun WjustMacroApp() {
         return (metrics.widthPixels.takeIf { it > 0 } ?: 1080) to (metrics.heightPixels.takeIf { it > 0 } ?: 2400)
     }
 
+    fun parentSetOf(m: Macro): MacroSet? =
+        if (m.setId.isBlank()) null else macroSets.firstOrNull { it.id == m.setId }
+
     fun requestEditMacro(m: Macro) {
-        if (m.isLocked && m.id !in unlockedMacroIds) {
+        if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
             passwordPromptMacroId = m.id
             passwordPromptAction = "EDIT"
         } else {
@@ -445,7 +497,8 @@ private fun WjustMacroApp() {
     }
 
     fun requestOpenSecurity(m: Macro) {
-        if (com.example.data.MacroSecurity.hasPassword(m)) {
+        val pSet = parentSetOf(m)
+        if (MacroSecurity.hasPassword(m) || (pSet != null && MacroSecurity.hasSetPassword(pSet))) {
             passwordPromptMacroId = m.id
             passwordPromptAction = "SECURITY"
         } else {
@@ -454,7 +507,7 @@ private fun WjustMacroApp() {
     }
 
     fun requestChangeLogo(m: Macro) {
-        if (m.isLocked && m.id !in unlockedMacroIds) {
+        if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
             passwordPromptMacroId = m.id
             passwordPromptAction = "LOGO"
         } else {
@@ -463,11 +516,68 @@ private fun WjustMacroApp() {
     }
 
     fun requestDuplicateMacro(m: Macro) {
-        if (m.isLocked && m.id !in unlockedMacroIds) {
+        if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
             passwordPromptMacroId = m.id
             passwordPromptAction = "DUPLICATE"
         } else {
             viewModel.duplicateMacro(m)
+        }
+    }
+
+    fun requestCreateMacroInSet(set: MacroSet) {
+        if (set.isLocked) {
+            passwordPromptSetId = set.id
+            passwordPromptSetAction = "ADD_MACRO"
+        } else {
+            val created = viewModel.createNewMacro(setId = set.id)
+            editingMacroId = created.id
+        }
+    }
+
+    fun requestEditMacroSet(set: MacroSet) {
+        if (set.isLocked) {
+            passwordPromptSetId = set.id
+            passwordPromptSetAction = "EDIT_SET"
+        } else {
+            editingSetId = set.id
+        }
+    }
+
+    fun requestManageMacroSetMembers(set: MacroSet) {
+        if (set.isLocked) {
+            passwordPromptSetId = set.id
+            passwordPromptSetAction = "MEMBERS"
+        } else {
+            managingMembersSetId = set.id
+        }
+    }
+
+    fun requestOpenMacroSetSecurity(set: MacroSet) {
+        if (MacroSecurity.hasSetPassword(set)) {
+            passwordPromptSetId = set.id
+            passwordPromptSetAction = "SECURITY"
+        } else {
+            securitySheetSetId = set.id
+        }
+    }
+
+    fun requestDuplicateMacroSet(set: MacroSet) {
+        if (set.isLocked) {
+            passwordPromptSetId = set.id
+            passwordPromptSetAction = "DUPLICATE"
+        } else {
+            viewModel.duplicateMacroSet(set)
+        }
+    }
+
+    fun requestMoveMacroToSet(m: Macro) {
+        val curSet = parentSetOf(m)
+        if (curSet != null && curSet.isLocked) {
+            pendingMoveMacroId = m.id
+            passwordPromptSetId = curSet.id
+            passwordPromptSetAction = "MOVE_OUT"
+        } else {
+            movingMacroId = m.id
         }
     }
 
@@ -477,9 +587,10 @@ private fun WjustMacroApp() {
     }
 
     fun launchMacroIfAllowed(m: Macro) {
-        val denial = com.example.data.MacroSecurity.checkDirectRun(m, viewModel.effectiveNowMs())
+        val pSet = parentSetOf(m)
+        val denial = MacroSecurity.checkDirectRun(m, viewModel.effectiveNowMs(), pSet)
         if (denial != null) {
-            scope.launch { snackbarHostState.showSnackbar(com.example.data.MacroSecurity.denialMessage(m, denial)) }
+            scope.launch { snackbarHostState.showSnackbar(MacroSecurity.denialMessage(m, denial, pSet)) }
             return
         }
         AutomationCoordinator.selectMacro(m)
@@ -605,6 +716,7 @@ private fun WjustMacroApp() {
                     when (activeTab) {
                         MainTab.MACROS -> MacroHomeScreen(
                             macros = macros,
+                            macroSets = macroSets,
                             permissions = permissions,
                             engineState = engineState,
                             isOverlayActive = isOverlayActive,
@@ -650,7 +762,24 @@ private fun WjustMacroApp() {
                                 val created = viewModel.createNewMacro()
                                 editingMacroId = created.id
                             },
+                            onCreateMacroInSet = ::requestCreateMacroInSet,
                             onImportMacro = ::safeImportFile,
+                            onCreateMacroSet = {
+                                createSetPreselectedMacroIds = emptySet()
+                                showCreateSetDialog = true
+                            },
+                            onEditMacroSet = ::requestEditMacroSet,
+                            onManageMacroSetMembers = ::requestManageMacroSetMembers,
+                            onOpenMacroSetSecurity = ::requestOpenMacroSetSecurity,
+                            onDuplicateMacroSet = ::requestDuplicateMacroSet,
+                            onExportMacroSet = { set, singleUse -> safeExportMacroSet(set, singleUseImport = singleUse) },
+                            onExportMacroSetDirectToDownloads = { set, singleUse ->
+                                val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
+                                val fileName = if (singleUse) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
+                                viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUse)
+                            },
+                            onDeleteMacroSet = { set -> deletingSetId = set.id },
+                            onMoveMacroToSet = ::requestMoveMacroToSet,
                             onEditMacro = ::requestEditMacro,
                             onLaunchMacroOverlay = ::launchMacroIfAllowed,
                             onChangeMacroLogo = ::requestChangeLogo,
@@ -753,6 +882,7 @@ private fun WjustMacroApp() {
         // Password verification modal (guards locked edit, security/Active-Passive mode changes, logo change, duplicate)
         val promptMacro = passwordPromptMacroId?.let { id -> macros.firstOrNull { it.id == id } }
         if (promptMacro != null) {
+            val pSet = parentSetOf(promptMacro)
             val subtitle = when (passwordPromptAction) {
                 "SECURITY" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah Kunci, Tenggat Waktu, atau status Aktif/Pasif."
                 "LOGO" -> "Masukkan sandi '${promptMacro.name}' untuk mengubah foto logo."
@@ -762,7 +892,7 @@ private fun WjustMacroApp() {
             PasswordUnlockDialog(
                 title = "Sandi Macro Diperlukan",
                 subtitle = subtitle,
-                onVerify = { candidate -> MacroSecurity.verifyPassword(promptMacro, candidate) },
+                onVerify = { candidate -> MacroSecurity.verifyMacroOrSetPassword(promptMacro, pSet, candidate) },
                 onUnlocked = {
                     val actionType = passwordPromptAction
                     val target = promptMacro
@@ -789,6 +919,171 @@ private fun WjustMacroApp() {
                     passwordPromptMacroId = null
                     passwordPromptAction = ""
                 }
+            )
+        }
+
+        // Password verification modal for locked Macro Set actions
+        val promptSet = passwordPromptSetId?.let { id -> macroSets.firstOrNull { it.id == id } }
+        if (promptSet != null) {
+            val subtitle = when (passwordPromptSetAction) {
+                "SECURITY" -> "Masukkan sandi Macro Set '${promptSet.name}' untuk mengubah Kunci atau Tenggat Waktu Set."
+                "MEMBERS" -> "Masukkan sandi Macro Set '${promptSet.name}' untuk menambah/mengeluarkan macro."
+                "EDIT_SET" -> "Masukkan sandi Macro Set '${promptSet.name}' untuk mengubah nama & warna Set."
+                "DUPLICATE" -> "Masukkan sandi Macro Set '${promptSet.name}' untuk menduplikat Set terkunci."
+                "ADD_MACRO" -> "Masukkan sandi Macro Set '${promptSet.name}' untuk menambah macro baru ke dalam Set."
+                "MOVE_IN" -> "Macro Set '${promptSet.name}' terkunci. Masukkan sandi Set untuk memasukkan macro ini."
+                "MOVE_OUT" -> "Macro berada di Set terkunci '${promptSet.name}'. Masukkan sandi Set untuk memindahkannya."
+                else -> "Masukkan sandi Macro Set '${promptSet.name}'."
+            }
+            PasswordUnlockDialog(
+                title = "Sandi Macro Set Diperlukan",
+                subtitle = subtitle,
+                onVerify = { candidate -> MacroSecurity.verifySetPassword(promptSet, candidate) },
+                onUnlocked = {
+                    val actionType = passwordPromptSetAction
+                    val targetSet = promptSet
+                    val moveMId = pendingMoveMacroId
+                    val moveDestId = pendingMoveTargetSetId
+                    passwordPromptSetId = null
+                    passwordPromptSetAction = ""
+                    pendingMoveMacroId = null
+                    pendingMoveTargetSetId = null
+                    when (actionType) {
+                        "SECURITY" -> securitySheetSetId = targetSet.id
+                        "MEMBERS" -> managingMembersSetId = targetSet.id
+                        "EDIT_SET" -> editingSetId = targetSet.id
+                        "DUPLICATE" -> viewModel.duplicateMacroSet(targetSet)
+                        "ADD_MACRO" -> {
+                            val created = viewModel.createNewMacro(setId = targetSet.id)
+                            unlockedMacroIds = unlockedMacroIds + created.id
+                            editingMacroId = created.id
+                        }
+                        "MOVE_OUT" -> {
+                            if (moveMId != null) movingMacroId = moveMId
+                        }
+                        "MOVE_IN" -> {
+                            val m = moveMId?.let { id -> macros.firstOrNull { it.id == id } }
+                            if (m != null && moveDestId != null) {
+                                viewModel.moveMacroToSet(m, moveDestId)
+                            }
+                        }
+                    }
+                },
+                onDismiss = {
+                    passwordPromptSetId = null
+                    passwordPromptSetAction = ""
+                    pendingMoveMacroId = null
+                    pendingMoveTargetSetId = null
+                }
+            )
+        }
+
+        // Create New Macro Set Dialog
+        if (showCreateSetDialog) {
+            CreateOrEditMacroSetDialog(
+                existingSet = null,
+                allMacros = macros,
+                allSets = macroSets,
+                preselectedMacroIds = createSetPreselectedMacroIds,
+                onConfirm = { name, desc, colorHex, selectedIds ->
+                    viewModel.createMacroSet(name, desc, colorHex, selectedIds)
+                    showCreateSetDialog = false
+                    createSetPreselectedMacroIds = emptySet()
+                },
+                onDismiss = {
+                    showCreateSetDialog = false
+                    createSetPreselectedMacroIds = emptySet()
+                }
+            )
+        }
+
+        // Edit Existing Macro Set Info Dialog
+        val editSetTarget = editingSetId?.let { id -> macroSets.firstOrNull { it.id == id } }
+        if (editSetTarget != null) {
+            CreateOrEditMacroSetDialog(
+                existingSet = editSetTarget,
+                onConfirm = { name, desc, colorHex, _ ->
+                    viewModel.updateMacroSetInfo(editSetTarget, name, desc, colorHex)
+                    editingSetId = null
+                },
+                onDismiss = { editingSetId = null }
+            )
+        }
+
+        // Manage Macro Set Members Sheet
+        val manageSetTarget = managingMembersSetId?.let { id -> macroSets.firstOrNull { it.id == id } }
+        if (manageSetTarget != null) {
+            ManageMacroSetMembersSheet(
+                set = manageSetTarget,
+                allMacros = macros,
+                allSets = macroSets,
+                onSave = { selectedIds ->
+                    viewModel.setMacrosInSet(manageSetTarget, selectedIds)
+                    managingMembersSetId = null
+                },
+                onDismiss = { managingMembersSetId = null }
+            )
+        }
+
+        // Macro Set Security & Lock Sheet
+        val secSetTarget = securitySheetSetId?.let { id -> macroSets.firstOrNull { it.id == id } }
+        if (secSetTarget != null) {
+            MacroSetSecuritySheet(
+                set = secSetTarget,
+                memberCount = macros.count { it.setId == secSetTarget.id },
+                nowMs = viewModel.effectiveNowMs(),
+                onSave = { updated ->
+                    viewModel.saveMacroSetSecurity(updated)
+                    securitySheetSetId = null
+                },
+                onDismiss = { securitySheetSetId = null }
+            )
+        }
+
+        // Move Macro to Set Dialog
+        val moveMacroTarget = movingMacroId?.let { id -> macros.firstOrNull { it.id == id } }
+        if (moveMacroTarget != null) {
+            val counts = remember(macros) { macros.groupingBy { it.setId }.eachCount() }
+            MoveMacroToSetDialog(
+                macro = moveMacroTarget,
+                macroSets = macroSets,
+                memberCounts = counts,
+                onSelectSet = { targetSetId ->
+                    movingMacroId = null
+                    val destSet = if (targetSetId.isBlank()) null else macroSets.firstOrNull { it.id == targetSetId }
+                    if (destSet != null && destSet.isLocked && moveMacroTarget.setId != destSet.id) {
+                        pendingMoveMacroId = moveMacroTarget.id
+                        pendingMoveTargetSetId = destSet.id
+                        passwordPromptSetId = destSet.id
+                        passwordPromptSetAction = "MOVE_IN"
+                    } else {
+                        viewModel.moveMacroToSet(moveMacroTarget, targetSetId)
+                    }
+                },
+                onCreateNewSetWithMacro = {
+                    movingMacroId = null
+                    createSetPreselectedMacroIds = setOf(moveMacroTarget.id)
+                    showCreateSetDialog = true
+                },
+                onDismiss = { movingMacroId = null }
+            )
+        }
+
+        // Delete Macro Set Confirmation Dialog
+        val delSetTarget = deletingSetId?.let { id -> macroSets.firstOrNull { it.id == id } }
+        if (delSetTarget != null) {
+            DeleteMacroSetDialog(
+                set = delSetTarget,
+                memberCount = macros.count { it.setId == delSetTarget.id },
+                onDeleteSetOnly = {
+                    viewModel.deleteMacroSet(delSetTarget, deleteMembers = false)
+                    deletingSetId = null
+                },
+                onDeleteSetAndMembers = {
+                    viewModel.deleteMacroSet(delSetTarget, deleteMembers = true)
+                    deletingSetId = null
+                },
+                onDismiss = { deletingSetId = null }
             )
         }
 

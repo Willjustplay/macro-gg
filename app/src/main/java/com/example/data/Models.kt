@@ -320,8 +320,8 @@ data class TrackObjectAction(
     val imageName: String = "",
     /** Up to 3 optional extra pose/animation frames for the moving object. */
     val extraImageNames: List<String> = emptyList(),
-    /** Similarity threshold 0.50..1.0. */
-    val threshold: Float = 0.74f,
+    /** Similarity threshold 0.45..1.0. */
+    val threshold: Float = 0.65f,
     /** Max time (ms) to search initially for the object before timing out. */
     val timeoutMs: Long = 5000,
     /** Optional restricted scan region (null = full screen). */
@@ -338,7 +338,7 @@ data class TrackObjectAction(
     val dragOffsetX: Int = 0,
     val dragOffsetY: Int = -250,
     /** Tap touch duration (ms) for TAP_ONCE / TAP_CONTINUOUS. */
-    val tapDurationMs: Long = 50,
+    val tapDurationMs: Long = 80,
     /** Swipe/drag gesture duration (ms) for DRAG_* modes. */
     val dragDurationMs: Long = 260,
     /** Minimum interval (ms) between taps while chasing in TAP_CONTINUOUS mode. */
@@ -349,10 +349,16 @@ data class TrackObjectAction(
     val matchMirrorX: Boolean = true,
     /** Focus on central core pixels so changing backgrounds around edges don't drop score. */
     val ignoreBackgroundEdges: Boolean = true,
+    /** Track ANY moving troop/object by motion alone (color-free, no template image required — ideal for mixed COC armies/skins). */
+    val trackAnyMotion: Boolean = false,
+    /** Match foreground HSV/RGB colors (auto-suppressing crop border background like grass) — essential for rotating/animated COC troops. */
+    val useColorMatch: Boolean = true,
+    /** Use frame-to-frame motion detection to prioritize moving/animating units and ignore static buildings. */
+    val prioritizeMotion: Boolean = true,
     /** Velocity lead prediction (ms) to aim slightly ahead of moving objects (0 = off). */
     val leadPredictionMs: Long = 110,
     /** Local search half-radius (authoring px) around the last known position for fast tracking. */
-    val trackRadiusPx: Int = 220,
+    val trackRadiusPx: Int = 240,
     val thenActions: List<Action> = emptyList(),
     val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
     val elseActions: List<Action> = emptyList(),
@@ -639,6 +645,8 @@ data class Macro(
     val stuckRestartAfter: Boolean = true,
     /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
     val logoImage: String = "",
+    /** Optional [MacroSet.id] grouping this macro into a Macro Set (empty = ungrouped). */
+    val setId: String = "",
     /** Prevents viewing/editing/duplicating macro actions without password. */
     val isLocked: Boolean = false,
     /** Salted SHA-256 password hash guarding lock, expiry, and passive mode settings. */
@@ -670,6 +678,43 @@ data class Macro(
     val autoScaleResolution: Boolean = true,
     /** Projection mode used when source and target aspect ratios differ across any device. */
     val scaleMode: ResolutionScaleMode = ResolutionScaleMode.ADAPTIVE,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/**
+ * Named group of related macros (e.g. an active macro + its passive sub-macros) that can be
+ * organized together, locked with a password & optional deadline, and exported/imported as one portable .zip set.
+ */
+@Serializable
+data class MacroSet(
+    val id: String = newId(),
+    val name: String = "Set Baru",
+    val description: String = "",
+    /** Accent color hex for visual grouping badge (e.g. "#22D3EE"). */
+    val colorHex: String = "#22D3EE",
+    /** Optional custom logo photo filename stored in macro_icons/ (empty = default icon). */
+    val logoImage: String = "",
+    /** Locks the set and its member macros against editing, member changes, or duplication without password. */
+    val isLocked: Boolean = false,
+    /** Salted SHA-256 password hash guarding set lock, expiry, and member management. */
+    val lockPasswordHash: String = "",
+    val lockSalt: String = "",
+    /** Optional UTC epoch ms deadline after which macros in this set cannot be used (0 = unlimited). */
+    val expiresAtEpochMs: Long = 0L,
+    /** Human-readable duration label configured for set expiry (e.g. "7 Hari", "1 Bulan"). */
+    val expiryLabel: String = "",
+    /** Configured duration amount & unit so overwriting the same set stacks deadlines accurately. */
+    val expiryDurationAmount: Int = 0,
+    val expiryDurationUnit: ExpiryUnit = ExpiryUnit.DAYS,
+    /** Stable origin set ID preserved across ZIP export/import to recognize & overwrite the same set. */
+    val originId: String = "",
+    /** Integrity seal over set protection fields to detect manual JSON tampering. */
+    val securitySeal: String = "",
+    /** Non-blank when exported as a single-use (1× import) set bundle; consumed permanently upon import. */
+    val oneTimeImportToken: String = "",
+    /** Integrity seal verifying [oneTimeImportToken] was issued legitimately during export. */
+    val oneTimeImportSeal: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -744,10 +789,15 @@ fun Action.summary(): String {
         is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
         is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
         is TrackObjectAction -> {
-            val frames = allTemplateNames()
-            val primary = frames.firstOrNull()?.substringAfterLast('/') ?: "(belum dipilih)"
-            val extraTag = if (frames.size > 1) " +${frames.size - 1}" else ""
-            "$primary$extraTag • ${interactionMode.shortLabel} • ${(threshold * 100).toInt()}%"
+            if (trackAnyMotion) {
+                val area = if (region != null) " • area" else ""
+                "Semua Gerakan (Bebas Warna) • ${interactionMode.shortLabel}$area"
+            } else {
+                val frames = allTemplateNames()
+                val primary = frames.firstOrNull()?.substringAfterLast('/') ?: "(belum dipilih)"
+                val extraTag = if (frames.size > 1) " +${frames.size - 1}" else ""
+                "$primary$extraTag • ${interactionMode.shortLabel} • ${(threshold * 100).toInt()}%"
+            }
         }
         is TextAction -> {
             val cond = if (compareMode.isNumeric) {

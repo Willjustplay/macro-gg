@@ -21,6 +21,7 @@ import com.example.data.ImageAsset
 import com.example.data.LocalStore
 import com.example.data.LuaScript
 import com.example.data.Macro
+import com.example.data.MacroSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,6 +44,7 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     private val store = LocalStore.get(appContext)
 
     val macros: StateFlow<List<Macro>> = store.macros
+    val macroSets: StateFlow<List<MacroSet>> = store.macroSets
     val scripts: StateFlow<List<LuaScript>> = store.scripts
     val images: StateFlow<List<ImageAsset>> = store.images
     val imageFolders: StateFlow<List<String>> = store.imageFolders
@@ -84,19 +86,31 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         return saved
     }
 
-    fun createNewMacro(name: String = "Macro Baru", initialActions: List<Action> = emptyList()): Macro {
+    fun createNewMacro(
+        name: String = "Macro Baru",
+        initialActions: List<Action> = emptyList(),
+        setId: String = ""
+    ): Macro {
         val s = settings.value
-        val macro = Macro(
+        val targetSet = if (setId.isNotBlank()) store.getMacroSetById(setId) else null
+        var macro = Macro(
             name = name,
             actions = initialActions,
             loopCount = 1,
             loopDelayMs = 500L,
-            jitterPx = s.defaultJitterPx
+            jitterPx = s.defaultJitterPx,
+            setId = targetSet?.id.orEmpty()
         )
+        if (targetSet != null &&
+            com.example.data.MacroSecurity.hasAnySetProtection(targetSet) &&
+            com.example.data.MacroSecurity.hasSetPassword(targetSet)
+        ) {
+            macro = com.example.data.MacroSecurity.syncMacroWithSetSecurity(macro, targetSet)
+        }
         return store.saveMacro(macro)
     }
 
-    fun createQuickAutoClicker(screenW: Int, screenH: Int): Macro {
+    fun createQuickAutoClicker(screenW: Int, screenH: Int, setId: String = ""): Macro {
         val s = settings.value
         val macro = Macro(
             name = "Auto Clicker",
@@ -105,6 +119,7 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
             jitterPx = s.defaultJitterPx,
             sourceWidth = screenW.coerceAtLeast(0),
             sourceHeight = screenH.coerceAtLeast(0),
+            setId = setId,
             actions = listOf(
                 ClickAction(x = screenW / 2, y = screenH / 2, durationMs = s.defaultTapDurationMs, delayAfterMs = 200L)
             )
@@ -120,6 +135,94 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     fun deleteMacro(id: String) {
         store.deleteMacro(id)
         _messages.tryEmit("Macro dihapus.")
+    }
+
+    // ---- Macro Sets ----
+
+    fun createMacroSet(
+        name: String,
+        description: String = "",
+        colorHex: String = "#22D3EE",
+        initialMemberIds: Set<String> = emptySet()
+    ): MacroSet {
+        val cleanName = name.trim().ifBlank { "Set Baru" }
+        val created = store.saveMacroSet(
+            MacroSet(
+                name = cleanName,
+                description = description.trim(),
+                colorHex = colorHex
+            )
+        )
+        if (initialMemberIds.isNotEmpty()) {
+            store.setMacrosInSet(created.id, initialMemberIds)
+            syncActiveMacroFromStore()
+        }
+        val countNote = if (initialMemberIds.isNotEmpty()) " (${initialMemberIds.size} macro)" else ""
+        _messages.tryEmit("Macro Set '${created.name}' dibuat$countNote.")
+        return created
+    }
+
+    fun updateMacroSetInfo(set: MacroSet, name: String, description: String, colorHex: String): MacroSet {
+        val latest = store.getMacroSetById(set.id) ?: set
+        val saved = store.saveMacroSet(
+            latest.copy(
+                name = name.trim().ifBlank { latest.name },
+                description = description.trim(),
+                colorHex = colorHex
+            )
+        )
+        _messages.tryEmit("Macro Set '${saved.name}' diperbarui.")
+        return saved
+    }
+
+    fun saveMacroSetSecurity(updatedSet: MacroSet): MacroSet {
+        val saved = store.saveMacroSetSecurity(updatedSet)
+        syncActiveMacroFromStore()
+        val memberCount = store.getMacrosInSet(saved.id).size
+        val summary = buildList {
+            if (saved.isLocked) add("Terkunci")
+            if (saved.expiresAtEpochMs > 0L) add("Tenggat ${saved.expiryLabel}")
+        }.joinToString(", ")
+        if (summary.isBlank()) {
+            _messages.tryEmit("Semua proteksi Set '${saved.name}' dimatikan ($memberCount macro ikut dibuka).")
+        } else {
+            _messages.tryEmit("Proteksi Set '${saved.name}' disimpan: $summary ($memberCount macro).")
+        }
+        return saved
+    }
+
+    fun setMacrosInSet(set: MacroSet, selectedMacroIds: Set<String>) {
+        store.setMacrosInSet(set.id, selectedMacroIds)
+        syncActiveMacroFromStore()
+        _messages.tryEmit("Isi Set '${set.name}' diperbarui (${selectedMacroIds.size} macro).")
+    }
+
+    fun moveMacroToSet(macro: Macro, targetSetId: String) {
+        val saved = store.moveMacroToSet(macro.id, targetSetId) ?: return
+        syncActiveMacroFromStore()
+        if (targetSetId.isBlank()) {
+            _messages.tryEmit("'${saved.name}' dikeluarkan dari Macro Set.")
+        } else {
+            val targetName = store.getMacroSetById(targetSetId)?.name ?: "Set"
+            _messages.tryEmit("'${saved.name}' dipindahkan ke Set '$targetName'.")
+        }
+    }
+
+    fun duplicateMacroSet(set: MacroSet) {
+        val copy = store.duplicateMacroSet(set)
+        val count = store.getMacrosInSet(copy.id).size
+        _messages.tryEmit("Set '${set.name}' diduplikat ($count macro).")
+    }
+
+    fun deleteMacroSet(set: MacroSet, deleteMembers: Boolean) {
+        store.deleteMacroSet(set.id, deleteMembers = deleteMembers)
+        syncActiveMacroFromStore()
+        val msg = if (deleteMembers) {
+            "Macro Set '${set.name}' beserta semua macro di dalamnya dihapus."
+        } else {
+            "Macro Set '${set.name}' dihapus (macro tetap aman di daftar utama)."
+        }
+        _messages.tryEmit(msg)
     }
 
     fun effectiveNowMs(): Long = store.effectiveNowMs()
@@ -237,6 +340,50 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun exportMacroSetToUri(set: MacroSet, uri: Uri, singleUseImport: Boolean = false) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    appContext.contentResolver.openOutputStream(uri)?.use { out ->
+                        store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                    } ?: error("Tidak dapat membuka file tujuan.")
+                }
+            }
+            result.onSuccess { summary ->
+                val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
+                val lockTag = if (set.isLocked) " • 🔒 Terkunci" else ""
+                val singleTag = if (summary.singleUseImport) " • 1× Impor" else ""
+                _messages.emit("Set '${set.name}' diekspor: ${summary.macrosExported} macro & $imgNote$lockTag$singleTag (.zip).")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor set: ${err.message}")
+            }
+        }
+    }
+
+    fun exportMacroSetToDownloads(set: MacroSet, fileName: String, singleUseImport: Boolean = false) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.example.data.CloudSafeStorage.writeToDownloads(
+                        context = appContext,
+                        desiredFileName = fileName,
+                        mimeType = "application/zip"
+                    ) { out ->
+                        store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                    }
+                }
+            }
+            result.onSuccess { (saved, summary) ->
+                val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
+                val lockTag = if (set.isLocked) " • 🔒 Terkunci" else ""
+                val singleTag = if (summary.singleUseImport) " • 1× Impor" else ""
+                _messages.emit("Set '${set.name}' tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$lockTag$singleTag).")
+            }.onFailure { err ->
+                _messages.emit("Gagal ekspor set ke Download: ${err.message}")
+            }
+        }
+    }
+
     fun exportAllBackupToUri(uri: Uri) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -247,7 +394,8 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 }
             }
             result.onSuccess { summary ->
-                _messages.emit("Backup selesai: ${summary.macrosExported} macro & ${summary.imagesExported} file gambar (.zip).")
+                val setNote = if (summary.setsExported > 0) "${summary.setsExported} set, " else ""
+                _messages.emit("Backup selesai: $setNote${summary.macrosExported} macro & ${summary.imagesExported} file gambar (.zip).")
             }.onFailure { err ->
                 _messages.emit("Gagal backup: ${err.message}")
             }
@@ -268,7 +416,8 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 }
             }
             result.onSuccess { (saved, summary) ->
-                _messages.emit("Backup tersimpan di ${saved.displayPath} (${summary.macrosExported} macro & ${summary.imagesExported} gambar).")
+                val setNote = if (summary.setsExported > 0) "${summary.setsExported} set, " else ""
+                _messages.emit("Backup tersimpan di ${saved.displayPath} ($setNote${summary.macrosExported} macro & ${summary.imagesExported} gambar).")
             }.onFailure { err ->
                 _messages.emit("Gagal backup ke Download: ${err.message}")
             }
@@ -371,7 +520,13 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
             result.onSuccess { s ->
                 syncActiveMacroFromStore()
                 val msg = buildString {
-                    append("Impor '${entry.displayName}' selesai: ${s.macrosImported} macro")
+                    append("Impor '${entry.displayName}' selesai: ")
+                    if (s.setsImported > 0) {
+                        append("${s.setsImported} set")
+                        if (s.setsOverwritten > 0) append(" (${s.setsOverwritten} ditimpa)")
+                        append(", ")
+                    }
+                    append("${s.macrosImported} macro")
                     if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
                     if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
                     if (s.singleUseImport) append(" • 🔒 1× impor (kini sudah terpakai)")
@@ -388,12 +543,14 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleMacroPassiveEnabled(macro: Macro) {
         if (!macro.isPassive) return
-        if (com.example.data.MacroSecurity.isTampered(macro)) {
-            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.TAMPERED))
+        val parentSet = store.getMacroSetById(macro.setId)
+        val now = effectiveNowMs()
+        if (com.example.data.MacroSecurity.isTampered(macro) || (parentSet != null && com.example.data.MacroSecurity.isSetTampered(parentSet))) {
+            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.TAMPERED, parentSet))
             return
         }
-        if (com.example.data.MacroSecurity.isExpired(macro, effectiveNowMs())) {
-            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED))
+        if (com.example.data.MacroSecurity.isExpired(macro, now) || (parentSet != null && com.example.data.MacroSecurity.isSetExpired(parentSet, now))) {
+            _messages.tryEmit(com.example.data.MacroSecurity.denialMessage(macro, com.example.data.RunDenialReason.EXPIRED, parentSet))
             return
         }
         val nextEnabled = !macro.passiveEnabled
@@ -447,7 +604,13 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
             result.onSuccess { s ->
                 syncActiveMacroFromStore()
                 val msg = buildString {
-                    append("Impor selesai: ${s.macrosImported} macro")
+                    append("Impor selesai: ")
+                    if (s.setsImported > 0) {
+                        append("${s.setsImported} set")
+                        if (s.setsOverwritten > 0) append(" (${s.setsOverwritten} ditimpa)")
+                        append(", ")
+                    }
+                    append("${s.macrosImported} macro")
                     if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
                     if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
                     if (s.singleUseImport) append(" • 🔒 1× impor (kini sudah terpakai)")
