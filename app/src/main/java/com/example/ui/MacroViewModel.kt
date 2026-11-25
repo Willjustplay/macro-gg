@@ -186,12 +186,12 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
 
     // ---- Export / Import ----
 
-    fun exportMacroToUri(macro: Macro, uri: Uri) {
+    fun exportMacroToUri(macro: Macro, uri: Uri, singleUseImport: Boolean = false) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     appContext.contentResolver.openOutputStream(uri)?.use { out ->
-                        store.exportMacroZip(macro, out)
+                        store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
                     } ?: error("Tidak dapat membuka file tujuan.")
                 }
             }
@@ -206,14 +206,15 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 } else {
                     "1 macro"
                 }
-                _messages.emit("Diekspor '${macro.name}': $macroNote & $imgNote (.zip).")
+                val singleTag = if (summary.singleUseImport) " • 🔒 1× Impor" else ""
+                _messages.emit("Diekspor '${macro.name}': $macroNote & $imgNote$singleTag (.zip).")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor: ${err.message}")
             }
         }
     }
 
-    fun exportMacroToDownloads(macro: Macro, fileName: String) {
+    fun exportMacroToDownloads(macro: Macro, fileName: String, singleUseImport: Boolean = false) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -222,13 +223,14 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                         desiredFileName = fileName,
                         mimeType = "application/zip"
                     ) { out ->
-                        store.exportMacroZip(macro, out)
+                        store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
                     }
                 }
             }
             result.onSuccess { (saved, summary) ->
                 val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
-                _messages.emit("Tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote).")
+                val singleTag = if (summary.singleUseImport) " • 🔒 1× Impor" else ""
+                _messages.emit("Tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$singleTag).")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor ke Download: ${err.message}")
             }
@@ -372,6 +374,7 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     append("Impor '${entry.displayName}' selesai: ${s.macrosImported} macro")
                     if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
                     if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
+                    if (s.singleUseImport) append(" • 🔒 1× impor (kini sudah terpakai)")
                     if (s.scriptsImported > 0) append(", ${s.scriptsImported} script")
                     if (s.imagesImported > 0) append(", ${s.imagesImported} gambar")
                     append(".")
@@ -447,6 +450,7 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     append("Impor selesai: ${s.macrosImported} macro")
                     if (s.macrosOverwritten > 0) append(" (${s.macrosOverwritten} ditimpa)")
                     if (s.deadlinesExtended > 0) append(" • tenggat diperpanjang +waktu")
+                    if (s.singleUseImport) append(" • 🔒 1× impor (kini sudah terpakai)")
                     if (s.scriptsImported > 0) append(", ${s.scriptsImported} script")
                     if (s.imagesImported > 0) append(", ${s.imagesImported} gambar")
                     append(".")

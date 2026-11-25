@@ -33,6 +33,7 @@ import com.example.data.LoopAction
 import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.NotFoundMode
+import com.example.data.RecentsSwipeDirection
 import com.example.data.RecordAction
 import com.example.data.Region
 import com.example.data.ResolutionScaleMode
@@ -45,6 +46,8 @@ import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
 import com.example.data.TextAction
 import com.example.data.TextCompareMode
+import com.example.data.TrackInteractionMode
+import com.example.data.TrackObjectAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.childList
@@ -60,7 +63,7 @@ import kotlin.math.roundToInt
  * Full-featured in-overlay Macro Studio matching the in-app Macro Editor:
  * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
  *   all-device Auto-Scale (ALWAYS unlocked even when macro is locked!), and marker preview toggle.
- * - Tab "Aksi": full main action tree (Then/Else/Loop), add any action kind (incl. Exit/Launch App).
+ * - Tab "Aksi": full main action tree (Then/Else/Loop), add any action kind (incl. Track Object, Exit/Launch App).
  * - Tab "Anti-Macet": out-of-band Watchdog actions triggered automatically when main macro gets stuck.
  */
 @SuppressLint("ViewConstructor")
@@ -82,6 +85,7 @@ class OverlayMacroSettingsView(
     private val onMoveAction: (String, Int) -> Unit,
     private val onDeleteAction: (String) -> Unit,
     private val onCropForImageAction: (actionId: String) -> Unit,
+    private val onCropExtraFrameForTrackAction: (actionId: String) -> Unit,
     private val onRecropExistingImage: (imageName: String) -> Unit,
     private val onAddNewCropImageAction: () -> Unit,
     private val onPickTargetOnScreen: (actionId: String) -> Unit,
@@ -253,8 +257,8 @@ class OverlayMacroSettingsView(
                 }
             }
             swapId != null -> {
-                val target = macro.findAnyAction(swapId) as? ImageAction
-                if (target != null) buildQuickImageSwapView(target)
+                val target = macro.findAnyAction(swapId)
+                if (target is ImageAction || target is TrackObjectAction) buildQuickImageSwapView(target)
                 else {
                     quickImageSwapActionId = null
                     rebuildBody()
@@ -762,8 +766,13 @@ class OverlayMacroSettingsView(
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        if (action is ImageAction && action.imageName.isNotBlank()) {
-            val file = store.imageFile(action.imageName)
+        val rowThumbName = when (action) {
+            is ImageAction -> action.imageName
+            is TrackObjectAction -> action.imageName
+            else -> ""
+        }
+        if (rowThumbName.isNotBlank()) {
+            val file = store.imageFile(rowThumbName)
             if (file.exists()) {
                 val bmp = runCatching { BitmapFactory.decodeFile(file.absolutePath) }.getOrNull()
                 if (bmp != null) {
@@ -813,7 +822,7 @@ class OverlayMacroSettingsView(
         if (idx < siblingCount - 1) {
             row.addView(makeSmallIconBtn("↓", "#334155") { onMoveAction(action.id, 1) })
         }
-        if (action is ImageAction) {
+        if (action is ImageAction || action is TrackObjectAction) {
             row.addView(makeSmallIconBtn("🖼", "#0F766E") {
                 quickImageSwapActionId = action.id
                 rebuildBody()
@@ -921,7 +930,7 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(bar)
 
         val kinds = listOf(
-            ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR,
+            ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
             ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
             ActionKind.CLICK, ActionKind.LONG_PRESS,
             ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
@@ -1223,6 +1232,284 @@ class OverlayMacroSettingsView(
                 }
             }
 
+            is TrackObjectAction -> {
+                var selectedImg = action.imageName
+                val extraImgs = action.extraImageNames.toMutableList()
+                var interactionMode = action.interactionMode
+                var threshold = action.threshold
+                var leadMs = action.leadPredictionMs
+                var foundMode = action.foundMode
+                var notFoundMode = action.notFound
+
+                // Crop primary object & crop extra animation pose directly from live game screen
+                val cropRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                cropRow.addView(makeBtn("✂ Tangkap Objek", "#E11D48", marginEndDp = 6) {
+                    onCropForImageAction(action.id)
+                }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+                cropRow.addView(makeBtn("+ ✂ Pose Lain", "#0F766E") {
+                    onCropExtraFrameForTrackAction(action.id)
+                }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                bodyContainer.addView(cropRow)
+
+                if (selectedImg.isNotBlank() && store.imageFile(selectedImg).exists()) {
+                    bodyContainer.addView(makeBtn("✂ Potong Ulang Gambar Utama", "#0284C7", marginEndDp = 0) {
+                        onRecropExistingImage(selectedImg)
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                    })
+                }
+
+                // Visual folder-aware thumbnail picker for primary image
+                addVisualImageSelector(
+                    initialSelected = selectedImg,
+                    onSelect = {
+                        selectedImg = it
+                        extraImgs.remove(it)
+                    }
+                )
+
+                // Extra pose frames summary & removable pills
+                if (extraImgs.isNotEmpty()) {
+                    bodyContainer.addView(sectionLabel("Pose Tambahan (${extraImgs.size}/3) — ketuk untuk hapus"))
+                    val extraWrap = LinearLayout(context).apply {
+                        orientation = VERTICAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                    }
+                    extraImgs.toList().forEach { extraName ->
+                        extraWrap.addView(makeBtn("🖼 ${extraName.substringAfterLast('/').removeSuffix(".png")}  ✕", "#334155", marginEndDp = 0) {
+                            onUpdateAction(action.id) { cur ->
+                                if (cur is TrackObjectAction) cur.copy(extraImageNames = cur.extraImageNames.filter { it != extraName }) else cur
+                            }
+                        }.apply {
+                            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                        })
+                    }
+                    bodyContainer.addView(extraWrap)
+                }
+
+                // Tap / Drag interaction mode selector
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Aksi ke Objek (Tap / Drag)"))
+                val modeBtns = mutableListOf<Pair<TrackInteractionMode, TextView>>()
+                val tapBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val tapContBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val dragPointBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val dragOffsetBox = LinearLayout(context).apply { orientation = VERTICAL }
+                val dragDurBox = LinearLayout(context).apply { orientation = VERTICAL }
+
+                val modeDescTv = TextView(context).apply {
+                    text = interactionMode.description
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 10.2f
+                    setPadding(0, dp(2), 0, dp(6))
+                }
+
+                val pickPointBtn = makeBtn("🎯 Pilih Titik Drag di Layar", "#0F766E", marginEndDp = 0) {
+                    onUpdateAction(action.id) { cur ->
+                        if (cur is TrackObjectAction) cur.copy(interactionMode = interactionMode) else cur
+                    }
+                    onPickTargetOnScreen(action.id)
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+
+                fun syncModeVisibility() {
+                    modeDescTv.text = interactionMode.description
+                    tapBox.visibility = if (interactionMode == TrackInteractionMode.TAP_ONCE || interactionMode == TrackInteractionMode.TAP_CONTINUOUS) View.VISIBLE else View.GONE
+                    tapContBox.visibility = if (interactionMode == TrackInteractionMode.TAP_CONTINUOUS) View.VISIBLE else View.GONE
+                    val isPointDrag = interactionMode == TrackInteractionMode.DRAG_TO_POINT || interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT
+                    dragPointBox.visibility = if (isPointDrag) View.VISIBLE else View.GONE
+                    dragOffsetBox.visibility = if (interactionMode == TrackInteractionMode.DRAG_BY_OFFSET) View.VISIBLE else View.GONE
+                    dragDurBox.visibility = if (isPointDrag || interactionMode == TrackInteractionMode.DRAG_BY_OFFSET) View.VISIBLE else View.GONE
+                    pickPointBtn.text = if (interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT) {
+                        "🎯 Pilih Titik Awal Drag di Layar"
+                    } else {
+                        "🎯 Pilih Titik Tujuan Drag di Layar"
+                    }
+                }
+
+                TrackInteractionMode.entries.forEach { m ->
+                    val b = makeBtn(m.label, if (m == interactionMode) "#E11D48" else "#1E293B", marginEndDp = 0) {
+                        interactionMode = m
+                        modeBtns.forEach { (item, tv) ->
+                            (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == interactionMode) "#E11D48" else "#1E293B"))
+                        }
+                        syncModeVisibility()
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    modeBtns += m to b
+                    bodyContainer.addView(b)
+                }
+                bodyContainer.addView(modeDescTv)
+
+                val tapDurF = addNumberRow(tapBox, "Durasi Tap (ms)", action.tapDurationMs.toString())
+                val repIntF = addNumberRow(tapContBox, "Interval Tap (ms)", action.repeatIntervalMs.toString())
+                val maxTrackF = addNumberRow(tapContBox, "Maks Kejar (ms)", action.maxTrackDurationMs.toString())
+
+                dragPointBox.addView(pickPointBtn)
+                val targetXF = addNumberRow(dragPointBox, "Titik X", action.targetX.toString())
+                val targetYF = addNumberRow(dragPointBox, "Titik Y", action.targetY.toString())
+
+                dragOffsetBox.addView(makeBtn("🎯 Tarik Arah & Jarak Drag (A→B) di Layar", "#0F766E", marginEndDp = 0) {
+                    onUpdateAction(action.id) { cur ->
+                        if (cur is TrackObjectAction) cur.copy(interactionMode = TrackInteractionMode.DRAG_BY_OFFSET) else cur
+                    }
+                    onPickTargetOnScreen(action.id)
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+                val ddxF = addSignedNumberRow(dragOffsetBox, "Geser dX (px)", action.dragOffsetX.toString())
+                val ddyF = addSignedNumberRow(dragOffsetBox, "Geser dY (px)", action.dragOffsetY.toString())
+                val dragDurF = addNumberRow(dragDurBox, "Durasi Drag (ms)", action.dragDurationMs.toString())
+
+                bodyContainer.addView(tapBox)
+                bodyContainer.addView(tapContBox)
+                bodyContainer.addView(dragPointBox)
+                bodyContainer.addView(dragOffsetBox)
+                bodyContainer.addView(dragDurBox)
+                syncModeVisibility()
+
+                bodyContainer.addView(dividerLine())
+
+                // Threshold stepper
+                val thrRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val thrLabel = TextView(context).apply {
+                    text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                }
+                thrRow.addView(thrLabel)
+                thrRow.addView(makeSmallIconBtn("-5%", "#334155") {
+                    threshold = (threshold - 0.05f).coerceIn(0.50f, 0.99f)
+                    thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                })
+                thrRow.addView(makeSmallIconBtn("+5%", "#334155", marginEndDp = 0) {
+                    threshold = (threshold + 0.05f).coerceIn(0.50f, 0.99f)
+                    thrLabel.text = "Akurasi kemiripan: ${(threshold * 100).roundToInt()}%"
+                })
+                bodyContainer.addView(thrRow)
+
+                // Lead prediction stepper
+                val leadRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                val leadLabel = TextView(context).apply {
+                    text = if (leadMs <= 0L) "Prediksi Gerak: Mati" else "Prediksi Gerak: +${leadMs} ms"
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                }
+                leadRow.addView(leadLabel)
+                leadRow.addView(makeSmallIconBtn("-20", "#334155") {
+                    leadMs = (leadMs - 20L).coerceIn(0L, 300L)
+                    leadLabel.text = if (leadMs <= 0L) "Prediksi Gerak: Mati" else "Prediksi Gerak: +${leadMs} ms"
+                })
+                leadRow.addView(makeSmallIconBtn("+20", "#334155", marginEndDp = 0) {
+                    leadMs = (leadMs + 20L).coerceIn(0L, 300L)
+                    leadLabel.text = if (leadMs <= 0L) "Prediksi Gerak: Mati" else "Prediksi Gerak: +${leadMs} ms"
+                })
+                bodyContainer.addView(leadRow)
+
+                val mirrorChk = CheckBox(context).apply {
+                    text = "Cek Mirror Kiri ↔ Kanan (objek berbalik arah)"
+                    isChecked = action.matchMirrorX
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                bodyContainer.addView(mirrorChk)
+
+                val coreChk = CheckBox(context).apply {
+                    text = "Fokus Tengah (abaikan latar belakang pinggir)"
+                    isChecked = action.ignoreBackgroundEdges
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                bodyContainer.addView(coreChk)
+
+                val timeoutF = addNumberRow(bodyContainer, "Batas cari awal (ms)", action.timeoutMs.toString())
+                val radiusF = addNumberRow(bodyContainer, "Radius lacak lokal (px)", action.trackRadiusPx.toString())
+                val oxF = addSignedNumberRow(bodyContainer, "Offset X objek (px)", action.offsetX.toString())
+                val oyF = addSignedNumberRow(bodyContainer, "Offset Y objek (px)", action.offsetY.toString())
+                val delayF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+
+                bodyContainer.addView(dividerLine())
+                val regCheck = CheckBox(context).apply {
+                    text = "Batasi area pelacakan (Region)"
+                    isChecked = action.region != null
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11.5f
+                }
+                bodyContainer.addView(regCheck)
+                bodyContainer.addView(makeBtn("📐 Pilih Area Lacak di Layar", "#0369A1") {
+                    onPickRegionOnScreen(action.id)
+                }.apply { layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) } })
+                val reg = action.region ?: Region(0, 0, screenW, screenH)
+                val rL = addNumberRow(bodyContainer, "Area Kiri", reg.left.toString())
+                val rT = addNumberRow(bodyContainer, "Area Atas", reg.top.toString())
+                val rR = addNumberRow(bodyContainer, "Area Kanan", reg.right.toString())
+                val rB = addNumberRow(bodyContainer, "Area Bawah", reg.bottom.toString())
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Setelah Objek Ditangani (Then)"))
+                addBranchModePicker("Setelah cabang Selesai:", foundMode) { foundMode = it }
+                addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Objek Tidak Ditemukan (Else)"))
+                addBranchModePicker("Setelah cabang Tidak Ditemukan:", notFoundMode) { notFoundMode = it }
+                addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
+
+                addSaveActionBtn {
+                    val newRegion = if (regCheck.isChecked) {
+                        Region(
+                            rL.text.toString().toIntOrNull() ?: reg.left,
+                            rT.text.toString().toIntOrNull() ?: reg.top,
+                            rR.text.toString().toIntOrNull() ?: reg.right,
+                            rB.text.toString().toIntOrNull() ?: reg.bottom
+                        )
+                    } else null
+                    saveEdited { cur ->
+                        val tCur = (cur as? TrackObjectAction) ?: action
+                        tCur.copy(
+                            imageName = selectedImg,
+                            extraImageNames = extraImgs.filter { it != selectedImg }.distinct().take(3),
+                            interactionMode = interactionMode,
+                            threshold = threshold,
+                            timeoutMs = (timeoutF.text.toString().toLongOrNull() ?: tCur.timeoutMs).coerceAtLeast(0L),
+                            delayAfterMs = (delayF.text.toString().toLongOrNull() ?: tCur.delayAfterMs).coerceAtLeast(0L),
+                            tapDurationMs = (tapDurF.text.toString().toLongOrNull() ?: tCur.tapDurationMs).coerceIn(20L, 400L),
+                            dragDurationMs = (dragDurF.text.toString().toLongOrNull() ?: tCur.dragDurationMs).coerceIn(60L, 5000L),
+                            repeatIntervalMs = (repIntF.text.toString().toLongOrNull() ?: tCur.repeatIntervalMs).coerceIn(40L, 5000L),
+                            maxTrackDurationMs = (maxTrackF.text.toString().toLongOrNull() ?: tCur.maxTrackDurationMs).coerceIn(300L, 300_000L),
+                            targetX = targetXF.text.toString().toIntOrNull() ?: tCur.targetX,
+                            targetY = targetYF.text.toString().toIntOrNull() ?: tCur.targetY,
+                            dragOffsetX = ddxF.text.toString().toIntOrNull() ?: tCur.dragOffsetX,
+                            dragOffsetY = ddyF.text.toString().toIntOrNull() ?: tCur.dragOffsetY,
+                            offsetX = oxF.text.toString().toIntOrNull() ?: tCur.offsetX,
+                            offsetY = oyF.text.toString().toIntOrNull() ?: tCur.offsetY,
+                            leadPredictionMs = leadMs,
+                            trackRadiusPx = (radiusF.text.toString().toIntOrNull() ?: tCur.trackRadiusPx).coerceIn(60, 1200),
+                            matchMirrorX = mirrorChk.isChecked,
+                            ignoreBackgroundEdges = coreChk.isChecked,
+                            foundMode = foundMode,
+                            notFound = notFoundMode,
+                            region = newRegion
+                        )
+                    }
+                }
+            }
+
             is TextAction -> {
                 var compareMode = action.compareMode
                 var foundMode = action.foundMode
@@ -1508,7 +1795,9 @@ class OverlayMacroSettingsView(
 
             is ExitAppAction -> {
                 var chosenMode = action.mode
+                var chosenSwipeDir = action.recentsSwipeDirection
                 bodyContainer.addView(sectionLabel("Cara Keluar Aplikasi"))
+                val dirBox = LinearLayout(context).apply { orientation = VERTICAL }
                 val modeBtns = mutableListOf<Pair<ExitAppMode, TextView>>()
                 ExitAppMode.entries.forEach { mode ->
                     val b = makeBtn(mode.label, if (mode == chosenMode) "#EA580C" else "#1E293B", marginEndDp = 0) {
@@ -1516,6 +1805,7 @@ class OverlayMacroSettingsView(
                         modeBtns.forEach { (m, tv) ->
                             (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == chosenMode) "#EA580C" else "#1E293B"))
                         }
+                        dirBox.visibility = if (chosenMode == ExitAppMode.CLOSE_RECENT_AND_HOME) View.VISIBLE else View.GONE
                     }.apply {
                         layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                             bottomMargin = dp(4)
@@ -1524,8 +1814,35 @@ class OverlayMacroSettingsView(
                     modeBtns += mode to b
                     bodyContainer.addView(b)
                 }
+
+                dirBox.addView(sectionLabel("Arah Swipe Recent (Portrait & Lanskap)"))
+                val dirBtns = mutableListOf<Pair<RecentsSwipeDirection, TextView>>()
+                RecentsSwipeDirection.entries.forEach { dir ->
+                    val db = makeBtn(dir.label, if (dir == chosenSwipeDir) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                        chosenSwipeDir = dir
+                        dirBtns.forEach { (dItem, tv) ->
+                            (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (dItem == chosenSwipeDir) "#0284C7" else "#1E293B"))
+                        }
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                            bottomMargin = dp(4)
+                        }
+                    }
+                    dirBtns += dir to db
+                    dirBox.addView(db)
+                }
+                val forceStopChk = CheckBox(context).apply {
+                    text = "Paksa Berhenti di Latar Belakang (Info Aplikasi → OK)"
+                    isChecked = action.forceStopBackground
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                dirBox.addView(forceStopChk)
+                dirBox.visibility = if (chosenMode == ExitAppMode.CLOSE_RECENT_AND_HOME) View.VISIBLE else View.GONE
+                bodyContainer.addView(dirBox)
+
                 addPickTargetBtn(
-                    if (action.packageName.isBlank()) "📱 Pilih Aplikasi Target (Opsional)"
+                    if (action.packageName.isBlank()) "📱 Pilih Aplikasi Target (Opsional — otomatis deteksi app aktif)"
                     else "📱 Target: ${action.appLabel.ifBlank { action.packageName }}"
                 ) {
                     appPickerActionId = action.id
@@ -1538,6 +1855,8 @@ class OverlayMacroSettingsView(
                     saveEdited {
                         action.copy(
                             mode = chosenMode,
+                            recentsSwipeDirection = chosenSwipeDir,
+                            forceStopBackground = forceStopChk.isChecked,
                             packageName = pkg,
                             appLabel = if (pkg == action.packageName) action.appLabel else "",
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
@@ -1807,7 +2126,12 @@ class OverlayMacroSettingsView(
         })
     }
 
-    private fun buildQuickImageSwapView(action: ImageAction) {
+    private fun buildQuickImageSwapView(action: Action) {
+        val currentImageName = when (action) {
+            is ImageAction -> action.imageName
+            is TrackObjectAction -> action.imageName
+            else -> ""
+        }
         val nav = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1833,19 +2157,26 @@ class OverlayMacroSettingsView(
             quickImageSwapActionId = null
             onCropForImageAction(action.id)
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
-        if (action.imageName.isNotBlank() && store.imageFile(action.imageName).exists()) {
+        if (currentImageName.isNotBlank() && store.imageFile(currentImageName).exists()) {
             quickBtns.addView(makeBtn("✂ Potong Ulang", "#0284C7") {
                 quickImageSwapActionId = null
-                onRecropExistingImage(action.imageName)
+                onRecropExistingImage(currentImageName)
             }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         }
         bodyContainer.addView(quickBtns)
 
         addVisualImageSelector(
-            initialSelected = action.imageName,
+            initialSelected = currentImageName,
             onSelect = { chosen ->
                 onUpdateAction(action.id) { cur ->
-                    if (cur is ImageAction) cur.copy(imageName = chosen) else cur
+                    when (cur) {
+                        is ImageAction -> cur.copy(imageName = chosen)
+                        is TrackObjectAction -> cur.copy(
+                            imageName = chosen,
+                            extraImageNames = cur.extraImageNames.filter { it != chosen }
+                        )
+                        else -> cur
+                    }
                 }
                 quickImageSwapActionId = null
             }

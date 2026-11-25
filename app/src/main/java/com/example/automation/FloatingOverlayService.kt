@@ -58,6 +58,8 @@ import com.example.data.ResolutionScaler
 import com.example.data.Slot
 import com.example.data.SwipeAction
 import com.example.data.TextAction
+import com.example.data.TrackInteractionMode
+import com.example.data.TrackObjectAction
 import com.example.data.ZoomAction
 import com.example.data.isStuckAction
 import com.example.data.walkWithSlot
@@ -150,6 +152,18 @@ class FloatingOverlayService : Service() {
     }
 
     private fun refreshScreenSize() {
+        val dm = runCatching { getSystemService(android.hardware.display.DisplayManager::class.java) }.getOrNull()
+        val display = dm?.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        if (display != null) {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                screenWidth = metrics.widthPixels
+                screenHeight = metrics.heightPixels
+                return
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val bounds = windowManager.currentWindowMetrics.bounds
             screenWidth = bounds.width().coerceAtLeast(1)
@@ -704,6 +718,15 @@ class FloatingOverlayService : Service() {
                 dismissMacroSettingsPanel()
                 launchScreenshotCrop(addToMacro = false, targetActionId = actionId, reopenSettingsActionId = actionId)
             },
+            onCropExtraFrameForTrackAction = { actionId ->
+                dismissMacroSettingsPanel()
+                launchScreenshotCrop(
+                    addToMacro = false,
+                    targetActionId = actionId,
+                    reopenSettingsActionId = actionId,
+                    appendExtraFrame = true
+                )
+            },
             onRecropExistingImage = { imageName ->
                 dismissMacroSettingsPanel()
                 launchRecropExistingImage(imageName)
@@ -839,6 +862,29 @@ class FloatingOverlayService : Service() {
                 sampleColor = true; initHex = action.color
                 title = "🎯 Titik Warna$slotSuffix"
             }
+            is TrackObjectAction -> {
+                if (action.interactionMode == TrackInteractionMode.DRAG_BY_OFFSET) {
+                    val cx = screenWidth / 2
+                    val cy = screenHeight / 2
+                    val (sdx, sdy) = scaleTransform.scaleDelta(action.dragOffsetX, action.dragOffsetY)
+                    isDual = true
+                    x1 = cx
+                    y1 = cy
+                    x2 = (cx + sdx).coerceIn(24, (screenWidth - 24).coerceAtLeast(24))
+                    y2 = (cy + sdy).coerceIn(24, (screenHeight - 24).coerceAtLeast(24))
+                    sampleColor = false; initHex = null
+                    title = "🎯 Arah & Jarak Drag (A→B)$slotSuffix"
+                } else {
+                    val (sx, sy) = scaleTransform.scalePoint(action.targetX, action.targetY)
+                    isDual = false; x1 = sx; y1 = sy; x2 = sx; y2 = sy
+                    sampleColor = false; initHex = null
+                    title = if (action.interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT) {
+                        "🎯 Titik Awal Drag → Objek$slotSuffix"
+                    } else {
+                        "🎯 Titik Tujuan Drag Objek$slotSuffix"
+                    }
+                }
+            }
             else -> {
                 Toast.makeText(this, "Aksi ini tidak memerlukan posisi layar.", Toast.LENGTH_SHORT).show()
                 return
@@ -956,6 +1002,8 @@ class FloatingOverlayService : Service() {
         refreshScreenSize()
         val state = AutomationCoordinator.engineState.value
         if (state == EngineState.IDLE || state == EngineState.ERROR) {
+            dismissMacroSettingsPanel()
+            dismissMarkerEditor()
             if (AutomationCoordinator.activeMode.value == AutomationMode.MACRO) {
                 val active = AutomationCoordinator.activeMacro.value
                 MacroSecurity.checkDirectRun(active, store.effectiveNowMs())?.let { denial ->
@@ -1033,14 +1081,17 @@ class FloatingOverlayService : Service() {
         addToMacro: Boolean,
         targetActionId: String?,
         targetFolder: String = "",
-        reopenSettingsActionId: String? = null
+        reopenSettingsActionId: String? = null,
+        appendExtraFrame: Boolean = false
     ) {
         if (cropOverlayView != null) return
         if (isOverlayHidden) exitHideButtonsMode()
         if (!ScreenCaptureService.isCapturing.value) {
             Toast.makeText(this, "Izinkan tangkap layar untuk crop gambar target", Toast.LENGTH_SHORT).show()
             ScreenCapturePermissionActivity.request(this) {
-                mainHandler.post { launchScreenshotCrop(addToMacro, targetActionId, targetFolder, reopenSettingsActionId) }
+                mainHandler.post {
+                    launchScreenshotCrop(addToMacro, targetActionId, targetFolder, reopenSettingsActionId, appendExtraFrame)
+                }
             }
             return
         }
@@ -1065,7 +1116,8 @@ class FloatingOverlayService : Service() {
                 overwriteImageName = null,
                 targetFolder = targetFolder,
                 regionTargetActionId = null,
-                reopenSettingsActionId = reopenSettingsActionId
+                reopenSettingsActionId = reopenSettingsActionId,
+                appendExtraFrame = appendExtraFrame
             )
         }
     }
@@ -1136,7 +1188,8 @@ class FloatingOverlayService : Service() {
         overwriteImageName: String?,
         targetFolder: String,
         regionTargetActionId: String?,
-        reopenSettingsActionId: String?
+        reopenSettingsActionId: String?,
+        appendExtraFrame: Boolean = false
     ) {
         dismissCropOverlay()
         cropScreenshot = snapshot
@@ -1165,8 +1218,9 @@ class FloatingOverlayService : Service() {
                     !targetActionId.isNullOrBlank() -> {
                         val saved = store.saveImage("target", cropped, targetFolder)
                         cropped.recycle()
-                        AutomationCoordinator.bindImageToAction(targetActionId, saved.name)
-                        Toast.makeText(this, "Gambar dipasang: ${saved.displayName}", Toast.LENGTH_SHORT).show()
+                        AutomationCoordinator.bindImageToAction(targetActionId, saved.name, appendExtraFrame = appendExtraFrame)
+                        val msg = if (appendExtraFrame) "Pose tambahan ditambahkan: ${saved.displayName}" else "Gambar dipasang: ${saved.displayName}"
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                     }
                     addToMacro -> {
                         val saved = store.saveImage("target", cropped, targetFolder)
@@ -1596,6 +1650,10 @@ class FloatingOverlayService : Service() {
             out += a to enclosing
             when (a) {
                 is ImageAction -> {
+                    collectEnabledWithSlot(a.thenActions, Slot.THEN, out)
+                    collectEnabledWithSlot(a.elseActions, Slot.ELSE, out)
+                }
+                is TrackObjectAction -> {
                     collectEnabledWithSlot(a.thenActions, Slot.THEN, out)
                     collectEnabledWithSlot(a.elseActions, Slot.ELSE, out)
                 }

@@ -1,5 +1,6 @@
 package com.example.data
 
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.BufferedInputStream
@@ -9,6 +10,19 @@ import java.io.OutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+
+/** Thrown when importing a single-use (1× import) bundle that was already used or tampered with. */
+class SingleUseImportException(message: String) : IllegalStateException(message)
+
+/** Optional signed manifest stored as `bundle_meta.json` inside exported macro `.zip` files. */
+@Serializable
+data class ExportBundleMeta(
+    val singleUseImport: Boolean = false,
+    val importToken: String = "",
+    val exportedAtEpochMs: Long = 0L,
+    val macroOriginId: String = "",
+    val metaSeal: String = ""
+)
 
 /**
  * Pure-Kotlin portable ZIP bundle encoder/decoder for MacroGG macros, linked sub-macros,
@@ -24,14 +38,17 @@ object MacroBundleCodec {
 
     data class ExportResult(
         val macrosExported: Int,
-        val imagesExported: Int
+        val imagesExported: Int,
+        val singleUseImport: Boolean = false,
+        val importToken: String = ""
     )
 
     data class DecodedBundle(
         val macros: List<Macro>,
         val scripts: List<LuaScript>,
         val images: Map<String, ByteArray>,
-        val macroIcons: Map<String, ByteArray> = emptyMap()
+        val macroIcons: Map<String, ByteArray> = emptyMap(),
+        val bundleMeta: ExportBundleMeta? = null
     )
 
     /**
@@ -56,6 +73,7 @@ object MacroBundleCodec {
     /**
      * Writes a portable .zip containing:
      * - `macro.json` (root macro)
+     * - `bundle_meta.json` (when [singleUseImport] is enabled, carrying signed 1× import token)
      * - `linked_macros/<id>.json` (any linked sub-macros)
      * - `images/<filename>.png` (every referenced target image across root, nested branches, and linked macros)
      * - `macro_icons/<filename>.png` (any custom macro logo photos)
@@ -65,9 +83,20 @@ object MacroBundleCodec {
         lookupMacro: (String) -> Macro?,
         loadImage: (imageName: String) -> Pair<String, ByteArray>?,
         output: OutputStream,
-        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null }
+        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null },
+        singleUseImport: Boolean = false,
+        exportedAtEpochMs: Long = System.currentTimeMillis()
     ): ExportResult {
-        val bundle = collectMacroBundle(root, lookupMacro)
+        val stableOrigin = root.originId.ifBlank { root.id }
+        val baseRoot = root.copy(originId = stableOrigin)
+        val generatedToken = if (singleUseImport) MacroSecurity.generateSalt() else ""
+        val exportRoot = if (singleUseImport) {
+            MacroSecurity.attachOneTimeExportToken(baseRoot, generatedToken)
+        } else {
+            baseRoot
+        }
+
+        val bundle = collectMacroBundle(exportRoot, lookupMacro)
         val referencedImages = LinkedHashSet<String>()
         val referencedIcons = LinkedHashSet<String>()
         bundle.forEach { m ->
@@ -77,8 +106,21 @@ object MacroBundleCodec {
 
         var imagesWritten = 0
         ZipOutputStream(output).use { zip ->
+            if (singleUseImport) {
+                val meta = ExportBundleMeta(
+                    singleUseImport = true,
+                    importToken = generatedToken,
+                    exportedAtEpochMs = exportedAtEpochMs,
+                    macroOriginId = stableOrigin,
+                    metaSeal = MacroSecurity.computeOneTimeBundleSeal(generatedToken, exportedAtEpochMs, stableOrigin)
+                )
+                zip.putNextEntry(ZipEntry("bundle_meta.json"))
+                zip.write(json.encodeToString(meta).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+
             zip.putNextEntry(ZipEntry("macro.json"))
-            zip.write(json.encodeToString(root).toByteArray(Charsets.UTF_8))
+            zip.write(json.encodeToString(exportRoot).toByteArray(Charsets.UTF_8))
             zip.closeEntry()
 
             for (linked in bundle.drop(1)) {
@@ -110,7 +152,12 @@ object MacroBundleCodec {
                 }
             }
         }
-        return ExportResult(macrosExported = bundle.size, imagesExported = imagesWritten)
+        return ExportResult(
+            macrosExported = bundle.size,
+            imagesExported = imagesWritten,
+            singleUseImport = singleUseImport,
+            importToken = generatedToken
+        )
     }
 
     /**
@@ -141,6 +188,7 @@ object MacroBundleCodec {
         val scripts = ArrayList<LuaScript>()
         val images = LinkedHashMap<String, ByteArray>()
         val macroIcons = LinkedHashMap<String, ByteArray>()
+        var bundleMeta: ExportBundleMeta? = null
 
         ZipInputStream(buffered).use { zis ->
             while (true) {
@@ -152,6 +200,11 @@ object MacroBundleCodec {
                 val bytes = readZipEntryBytes(zis)
                 val name = entry.name
                 when {
+                    name == "bundle_meta.json" -> {
+                        bundleMeta = runCatching {
+                            json.decodeFromString<ExportBundleMeta>(bytes.toString(Charsets.UTF_8))
+                        }.getOrNull() ?: ExportBundleMeta(singleUseImport = true, importToken = "", metaSeal = "INVALID")
+                    }
                     name == "macro.json" ||
                         (name.startsWith("macros/") && name.endsWith(".json")) ||
                         (name.startsWith("linked_macros/") && name.endsWith(".json")) -> {
@@ -212,8 +265,56 @@ object MacroBundleCodec {
             macros = remappedMacros,
             scripts = scripts,
             images = images,
-            macroIcons = macroIcons
+            macroIcons = macroIcons,
+            bundleMeta = bundleMeta
         )
+    }
+
+    /**
+     * Validates all one-time import tokens inside [decoded] against manual tampering and against
+     * [alreadyConsumedTokens]. Returns the set of new tokens to mark as consumed upon commit, or
+     * throws [SingleUseImportException] if tampered or already imported before.
+     */
+    fun validateAndExtractOneTimeTokens(
+        decoded: DecodedBundle,
+        alreadyConsumedTokens: Set<String>
+    ): Set<String> {
+        val tokens = LinkedHashSet<String>()
+        val meta = decoded.bundleMeta
+        if (meta != null && meta.singleUseImport) {
+            if (!MacroSecurity.verifyOneTimeBundleMeta(
+                    token = meta.importToken,
+                    exportedAtEpochMs = meta.exportedAtEpochMs,
+                    originId = meta.macroOriginId,
+                    metaSeal = meta.metaSeal
+                )
+            ) {
+                throw SingleUseImportException("File ekspor 1× impor tidak valid atau telah dimodifikasi.")
+            }
+            tokens += meta.importToken.trim()
+        }
+
+        for (m in decoded.macros) {
+            val tok = m.oneTimeImportToken.trim()
+            val seal = m.oneTimeImportSeal.trim()
+            if (tok.isNotBlank() || seal.isNotBlank()) {
+                if (!MacroSecurity.verifyMacroOneTimeToken(m)) {
+                    throw SingleUseImportException("Token sekali-impor pada macro '${m.name}' tidak valid atau telah diubah.")
+                }
+                tokens += tok
+            }
+            // If bundle_meta declares single-use, ensure the root macro matches if it carries a token
+            if (meta != null && meta.singleUseImport && tok.isNotBlank() && tok != meta.importToken.trim()) {
+                throw SingleUseImportException("Token bundle 1× impor tidak cocok dengan isi macro '${m.name}'.")
+            }
+        }
+
+        if (tokens.any { it in alreadyConsumedTokens }) {
+            throw SingleUseImportException(
+                "File macro ini hanya dapat diimpor 1 kali dan sudah pernah digunakan di perangkat ini."
+            )
+        }
+        return tokens
     }
 
     private fun readZipEntryBytes(zis: ZipInputStream): ByteArray {

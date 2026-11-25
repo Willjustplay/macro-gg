@@ -84,16 +84,67 @@ object MacroSecurity {
             append("|exp=").append(macro.expiresAtEpochMs)
             append("|hash=").append(macro.lockPasswordHash)
             append("|salt=").append(macro.lockSalt)
+            if (macro.oneTimeImportToken.isNotBlank()) {
+                append("|oneTime=").append(macro.oneTimeImportToken)
+            }
         }
         val md = MessageDigest.getInstance("SHA-256")
         return md.digest(payload.toByteArray(Charsets.UTF_8)).toHex()
     }
 
+    fun computeOneTimeTokenSeal(token: String, originId: String): String {
+        val cleanToken = token.trim()
+        if (cleanToken.isBlank()) return ""
+        val payload = "$SEAL_PEPPER|oneTimeMacro|$cleanToken|origin=${originId.trim()}"
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(payload.toByteArray(Charsets.UTF_8)).toHex()
+    }
+
+    fun computeOneTimeBundleSeal(token: String, exportedAtEpochMs: Long, originId: String): String {
+        val cleanToken = token.trim()
+        if (cleanToken.isBlank()) return ""
+        val payload = "$SEAL_PEPPER|oneTimeBundle|$cleanToken|at=$exportedAtEpochMs|origin=${originId.trim()}"
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(payload.toByteArray(Charsets.UTF_8)).toHex()
+    }
+
+    /** Stamps a fresh one-time import token onto an exported copy of [macro] without mutating the creator's saved macro. */
+    fun attachOneTimeExportToken(macro: Macro, token: String = generateSalt()): Macro {
+        val stableOrigin = macro.originId.ifBlank { macro.id }
+        val cleanToken = token.trim()
+        val withToken = macro.copy(
+            originId = stableOrigin,
+            oneTimeImportToken = cleanToken,
+            oneTimeImportSeal = computeOneTimeTokenSeal(cleanToken, stableOrigin)
+        )
+        return if (hasAnyProtection(withToken) || hasPassword(withToken) || withToken.securitySeal.isNotBlank()) {
+            withToken.copy(securitySeal = computeSeal(withToken))
+        } else {
+            withToken
+        }
+    }
+
+    /** Verifies that a macro's one-time import token (if any) has not been manually forged or stripped. */
+    fun verifyMacroOneTimeToken(macro: Macro): Boolean {
+        val tok = macro.oneTimeImportToken.trim()
+        val seal = macro.oneTimeImportSeal.trim()
+        if (tok.isBlank() && seal.isBlank()) return true
+        if (tok.isBlank() || seal.isBlank()) return false
+        val origin = macro.originId.ifBlank { macro.id }
+        return constantTimeEquals(seal, computeOneTimeTokenSeal(tok, origin))
+    }
+
+    fun verifyOneTimeBundleMeta(token: String, exportedAtEpochMs: Long, originId: String, metaSeal: String): Boolean {
+        if (token.isBlank() || metaSeal.isBlank()) return false
+        return constantTimeEquals(metaSeal, computeOneTimeBundleSeal(token, exportedAtEpochMs, originId))
+    }
+
     fun isTampered(macro: Macro): Boolean {
+        if (!verifyMacroOneTimeToken(macro)) return true
         if (macro.securitySeal.isBlank()) return false
         if (constantTimeEquals(macro.securitySeal, computeSeal(macro))) return false
         // Backward compatibility with v2.7.0 exports (where passiveEnabled defaulted to true)
-        if (macro.passiveEnabled && constantTimeEquals(macro.securitySeal, computeLegacySealV27(macro))) return false
+        if (macro.oneTimeImportToken.isBlank() && macro.passiveEnabled && constantTimeEquals(macro.securitySeal, computeLegacySealV27(macro))) return false
         return true
     }
 

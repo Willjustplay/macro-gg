@@ -15,13 +15,14 @@ data class ContainerRef(val parentId: String? = null, val slot: Slot? = null) {
 }
 
 fun Action.slots(): List<Slot> = when (this) {
-    is ImageAction, is TextAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
+    is ImageAction, is TrackObjectAction, is TextAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
     is LoopAction -> listOf(Slot.BODY)
     else -> emptyList()
 }
 
 fun Action.childList(slot: Slot): List<Action> = when (this) {
     is ImageAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is TrackObjectAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is TextAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is ColorAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is LoopAction -> if (slot == Slot.BODY) actions else emptyList()
@@ -30,6 +31,11 @@ fun Action.childList(slot: Slot): List<Action> = when (this) {
 
 fun Action.withChildList(slot: Slot, list: List<Action>): Action = when (this) {
     is ImageAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is TrackObjectAction -> when (slot) {
         Slot.THEN -> copy(thenActions = list)
         Slot.ELSE -> copy(elseActions = list)
         else -> this
@@ -168,8 +174,15 @@ fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
     else -> this
 }
 
-fun Macro.imageNames(): Set<String> =
-    allActionsSequence().filterIsInstance<ImageAction>().map { it.imageName }.filter { it.isNotBlank() }.toSet()
+fun Macro.imageNames(): Set<String> = buildSet {
+    for (a in allActionsSequence()) {
+        when (a) {
+            is ImageAction -> if (a.imageName.isNotBlank()) add(a.imageName)
+            is TrackObjectAction -> a.allTemplateNames().forEach { add(it) }
+            else -> Unit
+        }
+    }
+}
 
 fun Macro.countActions(): Int = actions.walk().count()
 

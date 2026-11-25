@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -64,7 +65,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -120,10 +123,12 @@ fun MacroHomeScreen(
     onOpenAutoScale: (Macro) -> Unit,
     onTogglePassivePull: (Macro) -> Unit,
     onDuplicateMacro: (Macro) -> Unit,
-    onExportMacro: (Macro) -> Unit,
-    onExportMacroDirectToDownloads: (Macro) -> Unit = onExportMacro,
+    onExportMacro: (Macro, Boolean) -> Unit,
+    onExportMacroDirectToDownloads: (Macro, Boolean) -> Unit = onExportMacro,
     onDeleteMacro: (Macro) -> Unit
 ) {
+    var exportDialogMacro by remember { mutableStateOf<Macro?>(null) }
+    var exportDialogPreferDownloads by remember { mutableStateOf(false) }
     val activePermCount = remember(permissions) {
         listOf(
             permissions.accessibilityEnabled,
@@ -460,13 +465,143 @@ fun MacroHomeScreen(
                     onOpenAutoScale = { onOpenAutoScale(macro) },
                     onTogglePassivePull = { onTogglePassivePull(macro) },
                     onDuplicate = { onDuplicateMacro(macro) },
-                    onExport = { onExportMacro(macro) },
-                    onExportDirectToDownloads = { onExportMacroDirectToDownloads(macro) },
+                    onExport = {
+                        exportDialogPreferDownloads = false
+                        exportDialogMacro = macro
+                    },
+                    onExportDirectToDownloads = {
+                        exportDialogPreferDownloads = true
+                        exportDialogMacro = macro
+                    },
                     onDelete = { onDeleteMacro(macro) }
                 )
             }
         }
     }
+
+    exportDialogMacro?.let { targetMacro ->
+        ExportMacroOptionsDialog(
+            macro = targetMacro,
+            preferDownloads = exportDialogPreferDownloads,
+            onExportToPicker = { singleUse ->
+                exportDialogMacro = null
+                onExportMacro(targetMacro, singleUse)
+            },
+            onExportToDownloads = { singleUse ->
+                exportDialogMacro = null
+                onExportMacroDirectToDownloads(targetMacro, singleUse)
+            },
+            onDismiss = { exportDialogMacro = null }
+        )
+    }
+}
+
+@Composable
+private fun ExportMacroOptionsDialog(
+    macro: Macro,
+    preferDownloads: Boolean,
+    onExportToPicker: (singleUseImport: Boolean) -> Unit,
+    onExportToDownloads: (singleUseImport: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var singleUseImport by remember(macro.id) { mutableStateOf(false) }
+    val actionCount = remember(macro) { macro.countActions() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = if (singleUseImport) Icons.Filled.Lock else Icons.Filled.FileDownload,
+                contentDescription = null,
+                tint = if (singleUseImport) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                "Ekspor / Ekstrak Macro",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Macro: '${macro.name}' ($actionCount aksi + gambar terkait ke format .zip).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (singleUseImport) Color(0xFFF59E0B).copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = BorderStroke(
+                        1.dp,
+                        if (singleUseImport) Color(0xFFF59E0B).copy(alpha = 0.55f) else MaterialTheme.colorScheme.outlineVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { singleUseImport = !singleUseImport }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                "🔒 Hanya Bisa Impor Sekali (1× Pakai)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "File .zip diberi token unik bertanda tangan. Setelah 1× diimpor, file yang sama akan ditolak jika coba diimpor ulang.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = singleUseImport,
+                            onCheckedChange = { singleUseImport = it }
+                        )
+                    }
+                }
+                if (singleUseImport) {
+                    Text(
+                        "Nama file akan otomatis ditandai akhiran '_1x.zip'. Macro asli di HP Anda tidak berubah dan tetap bisa diekspor lagi dengan token baru.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFF59E0B)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (preferDownloads) {
+                Button(onClick = { onExportToDownloads(singleUseImport) }) {
+                    Text("Simpan Download")
+                }
+            } else {
+                Button(onClick = { onExportToPicker(singleUseImport) }) {
+                    Text("Pilih Lokasi")
+                }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onDismiss) {
+                    Text("Batal")
+                }
+                if (preferDownloads) {
+                    FilledTonalButton(onClick = { onExportToPicker(singleUseImport) }) {
+                        Text("Pilih Lokasi")
+                    }
+                } else {
+                    FilledTonalButton(onClick = { onExportToDownloads(singleUseImport) }) {
+                        Text("Ke Download")
+                    }
+                }
+            }
+        }
+    )
 }
 
 @Composable
@@ -530,7 +665,7 @@ private fun MacroListCard(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val allActions = remember(macro) { macro.actions.walk().toList() }
-    val hasImage = allActions.any { it is ImageAction }
+    val hasImage = allActions.any { it is ImageAction || it is com.example.data.TrackObjectAction }
     val hasText = allActions.any { it is TextAction }
     val hasColor = allActions.any { it is ColorAction }
     val hasRecord = allActions.any { it is RecordAction }

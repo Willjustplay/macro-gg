@@ -34,16 +34,59 @@ enum class StuckRecoveryMode(val label: String) {
 @Serializable
 enum class ExitAppMode(val label: String, val description: String) {
     CLOSE_RECENT_AND_HOME(
-        "Tutup dari Recent & ke Home (Rekomendasi)",
-        "Buka Recent Apps, geser ke atas untuk menutup aplikasi sepenuhnya, lalu kembali ke Home."
+        "Tutup Recent + Hapus Latar Belakang (Rekomendasi)",
+        "Tutup aplikasi dari Recent Apps lalu paksa berhenti prosesnya di latar belakang agar benar-benar bersih."
+    ),
+    FORCE_STOP_APP(
+        "Paksa Berhenti Langsung (Info Aplikasi)",
+        "Buka Info Aplikasi sistem lalu klik Paksa Berhenti → OK agar aplikasi 100% terhapus dari latar belakang."
     ),
     HOME_ONLY(
         "Keluar ke Layar Utama (Home)",
-        "Langsung keluar ke layar beranda (Home) tanpa menutup paksa dari Recent."
+        "Langsung keluar ke layar beranda (Home) tanpa menutup paksa di latar belakang."
     ),
     BACK_THEN_HOME(
         "Tekan Kembali lalu ke Home",
         "Tekan tombol Back beberapa kali lalu keluar ke layar beranda."
+    )
+}
+
+/** Swipe direction used when dismissing the active app card inside Recent Apps. */
+@Serializable
+enum class RecentsSwipeDirection(val label: String, val shortLabel: String) {
+    AUTO("Otomatis (Ikuti Rotasi Layar)", "Auto"),
+    SWIPE_UP("Geser Ke Atas (Vertikal)", "Atas"),
+    SWIPE_RIGHT("Geser Ke Kanan", "Kanan"),
+    SWIPE_LEFT("Geser Ke Kiri", "Kiri")
+}
+
+/** How [TrackObjectAction] interacts with a moving object once located. */
+@Serializable
+enum class TrackInteractionMode(val label: String, val shortLabel: String, val description: String) {
+    TAP_ONCE(
+        "Tap Sekali",
+        "Tap 1×",
+        "Kejar objek, tap 1× tepat ke posisi objek (dengan prediksi gerak), lalu lanjut."
+    ),
+    TAP_CONTINUOUS(
+        "Kejar & Tap Terus",
+        "Tap Terus",
+        "Terus melacak dan mengetuk objek selama masih terlihat hingga hilang atau batas waktu habis."
+    ),
+    DRAG_TO_POINT(
+        "Drag Objek → Titik Tujuan",
+        "Drag → Titik",
+        "Tangkap objek bergerak lalu seret ke koordinat tujuan yang ditentukan."
+    ),
+    DRAG_BY_OFFSET(
+        "Drag Objek Sejauh (dX, dY)",
+        "Drag dX/dY",
+        "Tangkap objek bergerak lalu geser sejauh jarak relatif X/Y dari posisi objek."
+    ),
+    DRAG_FROM_POINT_TO_OBJECT(
+        "Drag dari Titik → Objek",
+        "Titik → Objek",
+        "Seret dari titik awal (misal skill/kartu/joystick) langsung ke posisi objek bergerak."
     )
 }
 
@@ -102,7 +145,7 @@ data class ClickAction(
     override val chancePercent: Int = 100,
     val x: Int,
     val y: Int,
-    val durationMs: Long = 50,
+    val durationMs: Long = 80,
     /** Number of taps fired for this point (auto-clicker burst). */
     val repeat: Int = 1,
     /** Pause between taps of the same burst. */
@@ -206,6 +249,73 @@ data class ImageAction(
     val elseActions: List<Action> = emptyList(),
     val notFound: NotFoundMode = NotFoundMode.CONTINUE
 ) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
+    )
+}
+
+/**
+ * High-speed moving-object tracker configured with 1..4 captured template images.
+ * Supports dynamic local ROI tracking, velocity lead prediction, horizontal mirror matching,
+ * edge-ignoring center focus, and Tap or Drag interactions on the tracked moving object.
+ */
+@Serializable
+@SerialName("track_object")
+data class TrackObjectAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 150,
+    override val chancePercent: Int = 100,
+    /** Primary captured image of the moving object. */
+    val imageName: String = "",
+    /** Up to 3 optional extra pose/animation frames for the moving object. */
+    val extraImageNames: List<String> = emptyList(),
+    /** Similarity threshold 0.50..1.0. */
+    val threshold: Float = 0.74f,
+    /** Max time (ms) to search initially for the object before timing out. */
+    val timeoutMs: Long = 5000,
+    /** Optional restricted scan region (null = full screen). */
+    val region: Region? = null,
+    /** How to act upon the tracked moving object (Tap or Drag). */
+    val interactionMode: TrackInteractionMode = TrackInteractionMode.TAP_ONCE,
+    /** Relative offset from the tracked object's center (authoring px). */
+    val offsetX: Int = 0,
+    val offsetY: Int = 0,
+    /** Fixed destination (DRAG_TO_POINT) or origin (DRAG_FROM_POINT_TO_OBJECT) in authoring px. */
+    val targetX: Int = 540,
+    val targetY: Int = 960,
+    /** Relative drag vector for DRAG_BY_OFFSET in authoring px. */
+    val dragOffsetX: Int = 0,
+    val dragOffsetY: Int = -250,
+    /** Tap touch duration (ms) for TAP_ONCE / TAP_CONTINUOUS. */
+    val tapDurationMs: Long = 50,
+    /** Swipe/drag gesture duration (ms) for DRAG_* modes. */
+    val dragDurationMs: Long = 260,
+    /** Minimum interval (ms) between taps while chasing in TAP_CONTINUOUS mode. */
+    val repeatIntervalMs: Long = 160,
+    /** Max continuous tracking duration (ms) in TAP_CONTINUOUS mode. */
+    val maxTrackDurationMs: Long = 8000,
+    /** Also match horizontally flipped (left<->right) template automatically. */
+    val matchMirrorX: Boolean = true,
+    /** Focus on central core pixels so changing backgrounds around edges don't drop score. */
+    val ignoreBackgroundEdges: Boolean = true,
+    /** Velocity lead prediction (ms) to aim slightly ahead of moving objects (0 = off). */
+    val leadPredictionMs: Long = 110,
+    /** Local search half-radius (authoring px) around the last known position for fast tracking. */
+    val trackRadiusPx: Int = 220,
+    val thenActions: List<Action> = emptyList(),
+    val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val elseActions: List<Action> = emptyList(),
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+) : Action() {
+    /** All configured unique non-blank template image names (primary + extra animation frames). */
+    fun allTemplateNames(): List<String> =
+        (listOf(imageName) + extraImageNames).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(4)
+
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
     override fun withNewIds() = copy(
@@ -386,7 +496,11 @@ data class ExitAppAction(
     val mode: ExitAppMode = ExitAppMode.CLOSE_RECENT_AND_HOME,
     /** Optional package name to also request background process cleanup after leaving the app. */
     val packageName: String = "",
-    val appLabel: String = ""
+    val appLabel: String = "",
+    /** Swipe direction to close the app card in Recent Apps (AUTO adapts to Portrait & Landscape). */
+    val recentsSwipeDirection: RecentsSwipeDirection = RecentsSwipeDirection.AUTO,
+    /** Also Force Stop the app via Android App Info after leaving/closing Recents so it is completely removed from background. */
+    val forceStopBackground: Boolean = true
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
@@ -454,6 +568,10 @@ data class Macro(
     val originId: String = "",
     /** Integrity seal over protection fields to detect manual JSON tampering. */
     val securitySeal: String = "",
+    /** Non-blank when exported as a single-use (1× import) bundle; consumed permanently upon import. */
+    val oneTimeImportToken: String = "",
+    /** Integrity seal verifying [oneTimeImportToken] was issued legitimately during export. */
+    val oneTimeImportSeal: String = "",
     /** Real-pixel screen resolution where this macro's coordinates were created (0 = unspecified/legacy). */
     val sourceWidth: Int = 0,
     val sourceHeight: Int = 0,
@@ -482,6 +600,7 @@ enum class ActionKind(val label: String, val description: String) {
     ZOOM("Zoom In/Out", "Cubit / perbesar 2 jari di layar"),
     WAIT("Tunggu", "Jeda beberapa saat"),
     IMAGE("Deteksi Gambar", "Cari gambar di layar + aksi If/Else"),
+    TRACK_OBJECT("Kejar Objek Bergerak", "Lacak objek bergerak dari tangkapan gambar lalu Tap/Drag"),
     TEXT("Deteksi Teks & Nilai", "Baca teks / nilai (<, >, =) di layar + If/Else"),
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
@@ -501,6 +620,7 @@ val Action.kind: ActionKind
         is ZoomAction -> ActionKind.ZOOM
         is WaitAction -> ActionKind.WAIT
         is ImageAction -> ActionKind.IMAGE
+        is TrackObjectAction -> ActionKind.TRACK_OBJECT
         is TextAction -> ActionKind.TEXT
         is ColorAction -> ActionKind.COLOR
         is LoopAction -> ActionKind.LOOP
@@ -524,6 +644,12 @@ fun Action.summary(): String {
         is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
         is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
         is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+        is TrackObjectAction -> {
+            val frames = allTemplateNames()
+            val primary = frames.firstOrNull()?.substringAfterLast('/') ?: "(belum dipilih)"
+            val extraTag = if (frames.size > 1) " +${frames.size - 1}" else ""
+            "$primary$extraTag • ${interactionMode.shortLabel} • ${(threshold * 100).toInt()}%"
+        }
         is TextAction -> {
             val cond = if (compareMode.isNumeric) {
                 "Nilai ${compareMode.shortLabel} ${formatTargetNum(targetNumber)}"
@@ -539,7 +665,12 @@ fun Action.summary(): String {
         is ExitAppAction -> {
             val target = appLabel.ifBlank { packageName }.let { if (it.isNotBlank()) " ($it)" else "" }
             val modeShort = when (mode) {
-                ExitAppMode.CLOSE_RECENT_AND_HOME -> "Tutup Recent + Home"
+                ExitAppMode.CLOSE_RECENT_AND_HOME -> {
+                    val dirTag = if (recentsSwipeDirection == RecentsSwipeDirection.AUTO) "" else " [${recentsSwipeDirection.shortLabel}]"
+                    val fsTag = if (forceStopBackground) " + Paksa Berhenti" else ""
+                    "Tutup Recent$dirTag$fsTag"
+                }
+                ExitAppMode.FORCE_STOP_APP -> "Paksa Berhenti (Info App)"
                 ExitAppMode.HOME_ONLY -> "Ke Home"
                 ExitAppMode.BACK_THEN_HOME -> "Back + Home"
             }
@@ -567,6 +698,7 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.ZOOM -> ZoomAction(cx = cx, cy = cy, zoomIn = true)
         ActionKind.WAIT -> WaitAction()
         ActionKind.IMAGE -> ImageAction(imageName = imageName)
+        ActionKind.TRACK_OBJECT -> TrackObjectAction(imageName = imageName, targetX = cx, targetY = cy)
         ActionKind.TEXT -> TextAction(
             region = Region(
                 left = (screenW * 0.20f).toInt(),

@@ -149,6 +149,18 @@ class GrayImage(val width: Int, val height: Int, val data: FloatArray) {
         for (row in 0 until h) System.arraycopy(data, (top + row) * width + left, out, row * w, w)
         return GrayImage(w, h, out)
     }
+
+    /** Horizontally mirrored copy (left <-> right) for matching moving characters that turn around. */
+    fun flipHorizontal(): GrayImage {
+        val out = FloatArray(width * height)
+        for (y in 0 until height) {
+            val rowOff = y * width
+            for (x in 0 until width) {
+                out[rowOff + x] = data[rowOff + (width - 1 - x)]
+            }
+        }
+        return GrayImage(width, height, out)
+    }
 }
 
 data class MatchResult(
@@ -211,6 +223,8 @@ class PreparedTemplate private constructor(val name: String, val gray: GrayImage
 
     private val levels = HashMap<Int, TemplateLevel>()
     private val scaledVariants = HashMap<Long, PreparedTemplate>()
+    private var mirroredVariant: PreparedTemplate? = null
+    private var centerFocusedVariant: PreparedTemplate? = null
 
     @Synchronized
     fun level(factor: Int): TemplateLevel = levels.getOrPut(factor) { TemplateLevel(gray.downsample(factor)) }
@@ -225,6 +239,34 @@ class PreparedTemplate private constructor(val name: String, val gray: GrayImage
         return scaledVariants.getOrPut(key) {
             PreparedTemplate("$name@${nw}x$nh", gray.resizeBilinear(nw, nh))
         }
+    }
+
+    /** Returns a cached horizontally mirrored (left <-> right) template for moving characters. */
+    @Synchronized
+    fun mirroredX(): PreparedTemplate {
+        mirroredVariant?.let { return it }
+        val built = PreparedTemplate("$name#mirrorX", gray.flipHorizontal())
+        mirroredVariant = built
+        return built
+    }
+
+    /**
+     * Returns a cached central core crop (~60% inner width/height, trimming 20% off each edge)
+     * that discards outer background padding while keeping the exact center alignment.
+     * Significantly improves matching when a moving object crosses changing backgrounds.
+     */
+    @Synchronized
+    fun centerFocused(): PreparedTemplate {
+        centerFocusedVariant?.let { return it }
+        if (width < 20 || height < 20) return this
+        val mx = (width * 0.20f).roundToInt().coerceAtMost((width - 12) / 2).coerceAtLeast(0)
+        val my = (height * 0.20f).roundToInt().coerceAtMost((height - 12) / 2).coerceAtLeast(0)
+        if (mx == 0 && my == 0) return this
+        val cw = width - mx * 2
+        val ch = height - my * 2
+        val built = PreparedTemplate("$name#core", gray.crop(mx, my, cw, ch))
+        centerFocusedVariant = built
+        return built
     }
 }
 

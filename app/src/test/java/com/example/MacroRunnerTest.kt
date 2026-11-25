@@ -109,7 +109,7 @@ class MacroRunnerTest {
 
         MacroRunner(rt).run(macro)
 
-        assertEquals(listOf("click(72,92,50)", "click(10,20,50)"), rt.events)
+        assertEquals(listOf("click(72,92,50)", "click(10,20,80)"), rt.events)
     }
 
     @Test
@@ -137,7 +137,7 @@ class MacroRunnerTest {
 
         MacroRunner(rt).run(macro)
 
-        assertEquals(listOf("click(5,6,50)"), rt.events)
+        assertEquals(listOf("click(5,6,80)"), rt.events)
     }
 
     @Test
@@ -166,7 +166,7 @@ class MacroRunnerTest {
         MacroRunner(rt).run(mainMacro)
 
         assertEquals(
-            listOf("click(1,1,50)", "zoom(in,500,900,300)", "zoom(out,500,900,220)", "click(2,2,50)"),
+            listOf("click(1,1,80)", "zoom(in,500,900,300)", "zoom(out,500,900,220)", "click(2,2,80)"),
             rt.events
         )
     }
@@ -226,7 +226,7 @@ class MacroRunnerTest {
         MacroRunner(rt).run(macro)
 
         assertEquals(
-            listOf("click(1,2,50)", "click(1,2,50)", "click(1,2,50)", "click(1,2,50)", "click(50,60,50)", "rec(1,2.0x)"),
+            listOf("click(1,2,80)", "click(1,2,80)", "click(1,2,80)", "click(1,2,80)", "click(50,60,50)", "rec(1,2.0x)"),
             rt.events
         )
     }

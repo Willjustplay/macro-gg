@@ -322,7 +322,11 @@ class ScreenCaptureService : Service() {
 
             val now = SystemClock.uptimeMillis()
             val hasExisting = synchronized(frameLock) { latestBitmap != null && !latestBitmap!!.isRecycled }
-            val intervalMs = if (highFrequencyCapture) ACTIVE_FRAME_INTERVAL_MS else IDLE_FRAME_INTERVAL_MS
+            val intervalMs = when {
+                trackingCaptureMode -> TRACKING_FRAME_INTERVAL_MS
+                highFrequencyCapture -> ACTIVE_FRAME_INTERVAL_MS
+                else -> IDLE_FRAME_INTERVAL_MS
+            }
             val elapsed = now - lastFrameCopyMs
 
             if (!hasExisting || elapsed >= intervalMs) {
@@ -337,7 +341,7 @@ class ScreenCaptureService : Service() {
                 pendingImage = image
                 if (!pendingFlushScheduled) {
                     pendingFlushScheduled = true
-                    handler.postDelayed(flushPendingRunnable, (intervalMs - elapsed).coerceAtLeast(24L))
+                    handler.postDelayed(flushPendingRunnable, (intervalMs - elapsed).coerceAtLeast(16L))
                 }
             }
         }, handler)
@@ -445,9 +449,11 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val CHANNEL_ID = "macrogg_screen_capture"
         private const val NOTIFICATION_ID = 4102
+        private const val TRACKING_FRAME_INTERVAL_MS = 42L
         private const val ACTIVE_FRAME_INTERVAL_MS = 120L
         private const val IDLE_FRAME_INTERVAL_MS = 450L
         @Volatile var highFrequencyCapture: Boolean = false
+        @Volatile var trackingCaptureMode: Boolean = false
         const val ACTION_START = "com.example.action.START_CAPTURE"
         const val ACTION_STOP = "com.example.action.STOP_CAPTURE"
         const val EXTRA_RESULT_CODE = "result_code"

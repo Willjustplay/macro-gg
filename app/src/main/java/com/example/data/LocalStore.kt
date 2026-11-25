@@ -441,9 +441,17 @@ class LocalStore(context: Context) {
     private fun rewriteMacroImageReference(oldNormalized: String, newNormalized: String) {
         if (oldNormalized == newNormalized) return
         fun rewriteList(list: List<Action>) = list.mapAllActions { a ->
-            if (a is ImageAction && normalizeImageName(a.imageName) == oldNormalized) {
-                a.copy(imageName = newNormalized)
-            } else a
+            when (a) {
+                is ImageAction -> if (normalizeImageName(a.imageName) == oldNormalized) a.copy(imageName = newNormalized) else a
+                is TrackObjectAction -> {
+                    val primary = if (normalizeImageName(a.imageName) == oldNormalized) newNormalized else a.imageName
+                    val extras = a.extraImageNames.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it }
+                    if (primary != a.imageName || extras != a.extraImageNames) {
+                        a.copy(imageName = primary, extraImageNames = extras)
+                    } else a
+                }
+                else -> a
+            }
         }
         for (m in _macros.value) {
             if (m.imageNames().any { normalizeImageName(it) == oldNormalized }) {
@@ -580,9 +588,45 @@ class LocalStore(context: Context) {
 
     // ---- Export / Import ----
 
+    private val consumedTokensLock = Any()
+    private val consumedTokensFile = File(appContext.filesDir, "consumed_import_tokens.txt")
+
+    private fun loadConsumedImportTokens(): MutableSet<String> = synchronized(consumedTokensLock) {
+        val merged = LinkedHashSet<String>()
+        prefs.getStringSet(KEY_CONSUMED_IMPORT_TOKENS, emptySet())
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.let { merged.addAll(it) }
+        if (consumedTokensFile.exists()) {
+            runCatching {
+                consumedTokensFile.readLines(Charsets.UTF_8)
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .let { merged.addAll(it) }
+            }
+        }
+        merged
+    }
+
+    private fun markImportTokensConsumed(newTokens: Set<String>) = synchronized(consumedTokensLock) {
+        if (newTokens.isEmpty()) return@synchronized
+        val all = loadConsumedImportTokens()
+        all.addAll(newTokens.map { it.trim() }.filter { it.isNotBlank() })
+        prefs.edit().putStringSet(KEY_CONSUMED_IMPORT_TOKENS, HashSet(all)).commit()
+        runCatching {
+            val tmp = File(appContext.filesDir, "consumed_import_tokens.tmp")
+            tmp.writeText(all.joinToString("\n"), Charsets.UTF_8)
+            if (!tmp.renameTo(consumedTokensFile)) {
+                consumedTokensFile.writeText(all.joinToString("\n"), Charsets.UTF_8)
+                tmp.delete()
+            }
+        }
+    }
+
     data class ExportSummary(
         val macrosExported: Int,
-        val imagesExported: Int
+        val imagesExported: Int,
+        val singleUseImport: Boolean = false
     )
 
     private fun ensureExportSourceResolution(macro: Macro): Macro {
@@ -595,8 +639,13 @@ class LocalStore(context: Context) {
     /**
      * Exports a macro, all linked sub-macros, and all PNG target images they reference
      * into a portable .zip bundle (macro.json, linked_macros folder, and images folder).
+     * When [singleUseImport] is true, embeds a unique signed 1× import token into the exported ZIP.
      */
-    fun exportMacroZip(macro: Macro, output: OutputStream): ExportSummary {
+    fun exportMacroZip(
+        macro: Macro,
+        output: OutputStream,
+        singleUseImport: Boolean = false
+    ): ExportSummary {
         val latest = ensureExportSourceResolution(getMacroById(macro.id) ?: macro)
         val res = MacroBundleCodec.writeMacroZip(
             root = latest,
@@ -607,9 +656,15 @@ class LocalStore(context: Context) {
             output = output,
             loadMacroIcon = { iconName ->
                 macroIconFile(iconName)?.takeIf { it.exists() }?.let { f -> f.name to f.readBytes() }
-            }
+            },
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = effectiveNowMs()
         )
-        return ExportSummary(macrosExported = res.macrosExported, imagesExported = res.imagesExported)
+        return ExportSummary(
+            macrosExported = res.macrosExported,
+            imagesExported = res.imagesExported,
+            singleUseImport = res.singleUseImport
+        )
     }
 
     /** Exports every macro, Lua script, target image, and custom macro logo into a single backup .zip file. */
@@ -654,7 +709,8 @@ class LocalStore(context: Context) {
         val scriptsImported: Int,
         val imagesImported: Int,
         val macrosOverwritten: Int = 0,
-        val deadlinesExtended: Int = 0
+        val deadlinesExtended: Int = 0,
+        val singleUseImport: Boolean = false
     )
 
     private fun findMatchingMacroForOverwrite(incoming: Macro, candidates: List<Macro>): Macro? {
@@ -681,12 +737,19 @@ class LocalStore(context: Context) {
     /**
      * Imports either a single macro JSON, a single macro .zip bundle (with linked macros, logos & PNGs),
      * or a full backup .zip.
+     * - Rejects tampered or already-used single-use (1× import) bundles before writing anything.
      * - If an imported macro matches an existing macro (by origin ID or name), overwrites it in-place
      *   and ADDS the incoming expiry duration onto any remaining active deadline.
      * - Preserves [RunMacroAction] links across both new and overwritten macros.
      */
     fun importFromStream(input: InputStream): ImportSummary {
         val decoded = MacroBundleCodec.readBundle(input)
+        // Enforce single-use (1× import) token check BEFORE saving any image, script, or macro
+        val oneTimeTokens = MacroBundleCodec.validateAndExtractOneTimeTokens(
+            decoded = decoded,
+            alreadyConsumedTokens = loadConsumedImportTokens()
+        )
+
         var imagesCount = 0
         for ((fileName, bytes) in decoded.images) {
             runCatching {
@@ -740,12 +803,17 @@ class LocalStore(context: Context) {
             }
         }
 
+        if (oneTimeTokens.isNotEmpty()) {
+            markImportTokensConsumed(oneTimeTokens)
+        }
+
         return ImportSummary(
             macrosImported = decoded.macros.size,
             scriptsImported = decoded.scripts.size,
             imagesImported = imagesCount,
             macrosOverwritten = overwrittenCount,
-            deadlinesExtended = extendedCount
+            deadlinesExtended = extendedCount,
+            singleUseImport = oneTimeTokens.isNotEmpty()
         )
     }
 
@@ -781,6 +849,7 @@ class LocalStore(context: Context) {
         private const val KEY_SETTINGS = "app_settings_json"
         private const val KEY_SEEDED = "seeded_v2"
         private const val KEY_MAX_SEEN_EPOCH_MS = "max_seen_epoch_ms"
+        private const val KEY_CONSUMED_IMPORT_TOKENS = "consumed_one_time_import_tokens_v1"
         private const val MAX_CACHED_TEMPLATES = 32
         private const val WATERMARK_PERSIST_INTERVAL_MS = 30_000L
 

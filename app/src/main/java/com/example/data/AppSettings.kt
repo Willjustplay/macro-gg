@@ -13,7 +13,7 @@ enum class ThemeMode(val label: String) {
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.DARK,
     val dynamicColor: Boolean = false,
-    val defaultTapDurationMs: Long = 50L,
+    val defaultTapDurationMs: Long = 80L,
     val defaultJitterPx: Int = 3,
     val showDebugMatchBox: Boolean = true
 )

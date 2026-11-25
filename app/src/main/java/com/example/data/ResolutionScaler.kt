@@ -317,6 +317,9 @@ object ResolutionScaler {
             is ClickAction, is LongPressAction, is SwipeAction, is ZoomAction, is ColorAction -> true
             is RecordAction -> a.gestures.isNotEmpty()
             is ImageAction -> a.region != null || a.imageName.isNotBlank()
+            is TrackObjectAction -> a.region != null || a.allTemplateNames().isNotEmpty() ||
+                a.interactionMode == TrackInteractionMode.DRAG_TO_POINT ||
+                a.interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT
             is TextAction -> a.region != null
             else -> false
         }
@@ -358,6 +361,18 @@ object ResolutionScaler {
                 is ImageAction -> a.region?.let {
                     maxX = max(maxX, it.right)
                     maxY = max(maxY, it.bottom)
+                }
+                is TrackObjectAction -> {
+                    if (a.interactionMode == TrackInteractionMode.DRAG_TO_POINT ||
+                        a.interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT
+                    ) {
+                        maxX = max(maxX, a.targetX)
+                        maxY = max(maxY, a.targetY)
+                    }
+                    a.region?.let {
+                        maxX = max(maxX, it.right)
+                        maxY = max(maxY, it.bottom)
+                    }
                 }
                 is TextAction -> a.region?.let {
                     maxX = max(maxX, it.right)

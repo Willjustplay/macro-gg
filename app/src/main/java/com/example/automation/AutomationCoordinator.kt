@@ -3,6 +3,10 @@ package com.example.automation
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.hardware.display.DisplayManager
+import android.os.Build
+import android.util.DisplayMetrics
+import android.view.Display
 import com.example.data.Action
 import com.example.data.ClickAction
 import com.example.data.ColorAction
@@ -14,6 +18,7 @@ import com.example.data.LongPressAction
 import com.example.data.LuaScript
 import com.example.data.Macro
 import com.example.data.MacroSecurity
+import com.example.data.RecentsSwipeDirection
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.Region
@@ -23,6 +28,8 @@ import com.example.data.RunMacroAction
 import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
 import com.example.data.TextAction
+import com.example.data.TrackInteractionMode
+import com.example.data.TrackObjectAction
 import com.example.data.ZoomAction
 import com.example.data.allActionsSequence
 import com.example.data.insertInto
@@ -168,10 +175,44 @@ object AutomationCoordinator {
     }
 
     private fun liveScreenSize(fallbackW: Int, fallbackH: Int): Pair<Int, Int> {
+        val ctx = appCtx
+        if (ctx != null) {
+            val dm = runCatching { ctx.getSystemService(DisplayManager::class.java) }.getOrNull()
+            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+            if (display != null) {
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                display.getRealMetrics(metrics)
+                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                    return metrics.widthPixels to metrics.heightPixels
+                }
+            }
+        }
         if (ScreenCaptureService.isCapturing.value && ScreenCaptureService.captureWidth > 0 && ScreenCaptureService.captureHeight > 0) {
             return ScreenCaptureService.captureWidth to ScreenCaptureService.captureHeight
         }
         return store?.currentScreenSize() ?: (fallbackW.coerceAtLeast(1) to fallbackH.coerceAtLeast(1))
+    }
+
+    /** Reads exact live display rotation (Surface.ROTATION_*) and real dimensions directly from DisplayManager. */
+    private fun readLiveDisplayState(fallbackW: Int, fallbackH: Int): Triple<Int, Int, Int> {
+        val ctx = appCtx
+        if (ctx != null) {
+            val dm = runCatching { ctx.getSystemService(DisplayManager::class.java) }.getOrNull()
+            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+            if (display != null) {
+                val rot = display.rotation
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                display.getRealMetrics(metrics)
+                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                    return Triple(rot, metrics.widthPixels, metrics.heightPixels)
+                }
+            }
+        }
+        val (w, h) = liveScreenSize(fallbackW, fallbackH)
+        val rot = if (w > h) RecentsDismissGeometry.ROTATION_90 else RecentsDismissGeometry.ROTATION_0
+        return Triple(rot, w, h)
     }
 
     fun addQuickClickMarker(x: Int, y: Int, screenW: Int = 0, screenH: Int = 0): ClickAction? {
@@ -245,14 +286,35 @@ object AutomationCoordinator {
         ExecutionLogBus.image("Aksi Deteksi Gambar '$imageName' ditambahkan ke '${_activeMacro.value.name}'.")
     }
 
-    fun bindImageToAction(actionId: String, imageName: String) {
+    fun bindImageToAction(actionId: String, imageName: String, appendExtraFrame: Boolean = false) {
         _activeMode.value = AutomationMode.MACRO
         updateActiveMacro(persist = true) { macro ->
             macro.updateAnyAction(actionId) { a ->
-                if (a is ImageAction) a.copy(imageName = imageName) else a
+                when (a) {
+                    is ImageAction -> a.copy(imageName = imageName)
+                    is TrackObjectAction -> {
+                        if (appendExtraFrame && a.imageName.isNotBlank()) {
+                            val updatedExtras = (a.extraImageNames + imageName)
+                                .map { it.trim() }
+                                .filter { it.isNotBlank() && it != a.imageName }
+                                .distinct()
+                                .take(3)
+                            a.copy(extraImageNames = updatedExtras)
+                        } else {
+                            a.copy(
+                                imageName = imageName,
+                                extraImageNames = a.extraImageNames.filter { it != imageName }
+                            )
+                        }
+                    }
+                    else -> a
+                }
             }
         }
-        ExecutionLogBus.image("Gambar '$imageName' dipasang ke aksi Deteksi Gambar.")
+        ExecutionLogBus.image(
+            if (appendExtraFrame) "Frame pose tambahan '$imageName' ditambahkan ke aksi Kejar Objek."
+            else "Gambar '$imageName' dipasang ke aksi deteksi."
+        )
     }
 
     fun bindRegionToAction(actionId: String, region: Region, screenW: Int = 0, screenH: Int = 0) {
@@ -266,6 +328,7 @@ object AutomationCoordinator {
                 when (a) {
                     is TextAction -> a.copy(region = storedRegion)
                     is ImageAction -> a.copy(region = storedRegion)
+                    is TrackObjectAction -> a.copy(region = storedRegion)
                     else -> a
                 }
             }
@@ -404,6 +467,7 @@ object AutomationCoordinator {
                     is SwipeAction -> if (isEndNode) a.copy(x2 = ox, y2 = oy) else a.copy(x1 = ox, y1 = oy)
                     is ZoomAction -> a.copy(cx = ox, cy = oy)
                     is ColorAction -> a.copy(x = ox, y = oy)
+                    is TrackObjectAction -> a.copy(targetX = ox, targetY = oy)
                     else -> a
                 }
             }
@@ -434,6 +498,13 @@ object AutomationCoordinator {
                     is SwipeAction -> cur.copy(x1 = ox1, y1 = oy1, x2 = ox2, y2 = oy2)
                     is ZoomAction -> cur.copy(cx = ox1, cy = oy1)
                     is ColorAction -> cur.copy(x = ox1, y = oy1, color = hexColor ?: cur.color)
+                    is TrackObjectAction -> {
+                        if (cur.interactionMode == TrackInteractionMode.DRAG_BY_OFFSET) {
+                            cur.copy(dragOffsetX = ox2 - ox1, dragOffsetY = oy2 - oy1)
+                        } else {
+                            cur.copy(targetX = ox1, targetY = oy1)
+                        }
+                    }
                     else -> cur
                 }
             }
@@ -466,7 +537,7 @@ object AutomationCoordinator {
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
             for (a in m.allActionsSequence()) {
-                if (a is ImageAction || a is TextAction || a is ColorAction) return true
+                if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
                     if (linked != null && MacroSecurity.checkLinkedRun(linked, now) == null && check(linked)) {
@@ -557,8 +628,22 @@ object AutomationCoordinator {
                 override suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean =
                     MacroAccessibilityService.dispatchRecordedGesture(gesture, speed)
 
-                override suspend fun exitApp(mode: ExitAppMode, packageName: String): Boolean {
+                override suspend fun exitApp(
+                    mode: ExitAppMode,
+                    packageName: String,
+                    recentsSwipeDirection: RecentsSwipeDirection,
+                    forceStopBackground: Boolean
+                ): Boolean {
                     val cleanPkg = packageName.trim()
+                    val effectivePkg = cleanPkg.ifBlank { MacroAccessibilityService.lastForegroundPackage }
+                    val resolvedAppLabel = if (effectivePkg.isNotBlank()) {
+                        runCatching {
+                            val pm = appCtx?.packageManager
+                            val ai = pm?.getApplicationInfo(effectivePkg, 0)
+                            if (ai != null) pm.getApplicationLabel(ai).toString() else ""
+                        }.getOrDefault("")
+                    } else ""
+
                     val ok = when (mode) {
                         ExitAppMode.HOME_ONLY -> {
                             val h = MacroAccessibilityService.dispatchGlobalHome()
@@ -574,27 +659,62 @@ object AutomationCoordinator {
                             cooperativeDelay(350L)
                             h
                         }
+                        ExitAppMode.FORCE_STOP_APP -> {
+                            val stopped = if (effectivePkg.isNotBlank()) {
+                                MacroAccessibilityService.forceStopPackageViaSettings(effectivePkg)
+                            } else {
+                                ExecutionLogBus.warn("Paksa Berhenti: belum ada aplikasi target terdeteksi — kembali ke Home.")
+                                false
+                            }
+                            cooperativeDelay(250L)
+                            val h = MacroAccessibilityService.dispatchGlobalHome()
+                            cooperativeDelay(350L)
+                            stopped || h
+                        }
                         ExitAppMode.CLOSE_RECENT_AND_HOME -> {
+                            val (beforeRot, beforeW, beforeH) = readLiveDisplayState(screenWidth, screenHeight)
                             val openedRecents = MacroAccessibilityService.dispatchGlobalRecents()
                             if (openedRecents) {
-                                cooperativeDelay(700L)
-                                val (sw, sh) = liveScreenSize(screenWidth, screenHeight)
-                                val cx = sw * 0.50f
-                                val startY = sh * 0.58f
-                                val endY = sh * 0.10f
-                                MacroAccessibilityService.dispatchSwipe(cx, startY, cx, endY, 220L)
-                                cooperativeDelay(450L)
+                                cooperativeDelay(900L)
+                                val dismissedByNode = if (resolvedAppLabel.isNotBlank()) {
+                                    MacroAccessibilityService.tryDismissRecentCard(resolvedAppLabel)
+                                } else false
+                                if (dismissedByNode) {
+                                    ExecutionLogBus.action("Tutup Recent langsung via kartu '$resolvedAppLabel'.")
+                                } else {
+                                    val (afterRot, afterW, afterH) = readLiveDisplayState(screenWidth, screenHeight)
+                                    val swipe = RecentsDismissGeometry.computeSwipe(
+                                        beforeRotation = beforeRot,
+                                        beforeWidth = beforeW,
+                                        beforeHeight = beforeH,
+                                        afterRotation = afterRot,
+                                        afterWidth = afterW,
+                                        afterHeight = afterH,
+                                        sdkInt = Build.VERSION.SDK_INT,
+                                        direction = recentsSwipeDirection
+                                    )
+                                    ExecutionLogBus.action(
+                                        "Tutup Recent (${swipe.description}, rot ${RecentsDismissGeometry.rotationDegrees(beforeRot)}°→${RecentsDismissGeometry.rotationDegrees(afterRot)}°, ${afterW}×${afterH}) fling (${swipe.x1.toInt()},${swipe.y1.toInt()})→(${swipe.x2.toInt()},${swipe.y2.toInt()})"
+                                    )
+                                    // Fast 145ms fling across 66% of screen crosses Android's fling-to-dismiss velocity threshold
+                                    MacroAccessibilityService.dispatchSwipe(swipe.x1, swipe.y1, swipe.x2, swipe.y2, 145L)
+                                }
+                                cooperativeDelay(500L)
+                            }
+                            if (forceStopBackground && effectivePkg.isNotBlank()) {
+                                MacroAccessibilityService.forceStopPackageViaSettings(effectivePkg)
+                                cooperativeDelay(220L)
                             }
                             val h = MacroAccessibilityService.dispatchGlobalHome()
                             cooperativeDelay(350L)
                             openedRecents || h
                         }
                     }
-                    if (cleanPkg.isNotBlank()) {
+                    if (effectivePkg.isNotBlank()) {
                         runCatching {
                             val am = appCtx?.getSystemService(ActivityManager::class.java)
                             @Suppress("DEPRECATION")
-                            am?.killBackgroundProcesses(cleanPkg)
+                            am?.killBackgroundProcesses(effectivePkg)
                         }
                     }
                     return ok
@@ -625,6 +745,10 @@ object AutomationCoordinator {
                     }.getOrDefault(false)
                 }
 
+                override fun setTrackingBoost(enabled: Boolean) {
+                    ScreenCaptureService.trackingCaptureMode = enabled
+                }
+
                 override fun captureFrame(): Frame? = ScreenCaptureService.captureFrame()
                 override fun samplePixelArgb(x: Int, y: Int): Int? = ScreenCaptureService.samplePixelArgb(x, y)
                 override suspend fun recognizeText(region: Region?): List<OcrBlock> {
@@ -649,6 +773,8 @@ object AutomationCoordinator {
             }
 
             try {
+                // Brief settle delay so releasing the floating Play button never cancels action #1
+                cooperativeDelay(140L)
                 MacroRunner(runtime).run(macro)
             } catch (_: CancellationException) {
                 ExecutionLogBus.info("Macro dihentikan.")
@@ -657,6 +783,7 @@ object AutomationCoordinator {
                 ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
             } finally {
                 localStore?.flushClockWatermark()
+                ScreenCaptureService.trackingCaptureMode = false
                 ScreenCaptureService.highFrequencyCapture = false
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 if (_engineState.value != EngineState.ERROR) {

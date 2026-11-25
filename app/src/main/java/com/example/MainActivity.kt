@@ -140,6 +140,7 @@ private fun WjustMacroApp() {
     var passwordPromptMacroId by remember { mutableStateOf<String?>(null) }
     var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
+    var pendingExportSingleUse by remember { mutableStateOf(false) }
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingImportGalleryFolder by remember { mutableStateOf("") }
@@ -167,9 +168,11 @@ private fun WjustMacroApp() {
         contract = ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
         val macro = pendingExportMacro
+        val singleUse = pendingExportSingleUse
         pendingExportMacro = null
+        pendingExportSingleUse = false
         if (uri != null && macro != null) {
-            viewModel.exportMacroToUri(macro, uri)
+            viewModel.exportMacroToUri(macro, uri, singleUseImport = singleUse)
         }
     }
 
@@ -246,15 +249,17 @@ private fun WjustMacroApp() {
         }
     }
 
-    fun safeExportMacro(m: Macro) {
+    fun safeExportMacro(m: Macro, singleUseImport: Boolean = false) {
         val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-        val fileName = "$safeName.zip"
+        val fileName = if (singleUseImport) "${safeName}_1x.zip" else "$safeName.zip"
         pendingExportMacro = m
+        pendingExportSingleUse = singleUseImport
         runCatching {
             exportMacroLauncher.launch(fileName)
         }.onFailure {
             pendingExportMacro = null
-            viewModel.exportMacroToDownloads(m, fileName)
+            pendingExportSingleUse = false
+            viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport)
         }
     }
 
@@ -653,10 +658,11 @@ private fun WjustMacroApp() {
                             onOpenAutoScale = { m -> autoScaleSheetMacroId = m.id },
                             onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
-                            onExportMacro = ::safeExportMacro,
-                            onExportMacroDirectToDownloads = { m ->
+                            onExportMacro = { m, singleUse -> safeExportMacro(m, singleUseImport = singleUse) },
+                            onExportMacroDirectToDownloads = { m, singleUse ->
                                 val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-                                viewModel.exportMacroToDownloads(m, "$safeName.zip")
+                                val fileName = if (singleUse) "${safeName}_1x.zip" else "$safeName.zip"
+                                viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUse)
                             },
                             onDeleteMacro = { m -> viewModel.deleteMacro(m.id) }
                         )

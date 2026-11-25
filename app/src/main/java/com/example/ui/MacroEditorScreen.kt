@@ -122,6 +122,7 @@ import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ExitAppAction
 import com.example.data.ImageAction
+import com.example.data.TrackObjectAction
 import com.example.data.ImageAsset
 import com.example.data.LaunchAppAction
 import com.example.data.Macro
@@ -173,7 +174,7 @@ fun MacroEditorScreen(
 ) {
     var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi Utama, 1 = Anti-Macet (Watchdog)
     var editingAction by remember { mutableStateOf<Action?>(null) }
-    var quickSwapImageAction by remember { mutableStateOf<ImageAction?>(null) }
+    var quickSwapImageAction by remember { mutableStateOf<Action?>(null) }
     var addTargetRef by remember { mutableStateOf<ContainerRef?>(null) }
     var showMacroSettings by remember { mutableStateOf(false) }
 
@@ -731,14 +732,26 @@ fun MacroEditorScreen(
 
     // 1-Tap Quick Image Swap Sheet
     quickSwapImageAction?.let { imgAct ->
+        val currentName = when (imgAct) {
+            is ImageAction -> imgAct.imageName
+            is TrackObjectAction -> imgAct.imageName
+            else -> ""
+        }
         QuickImagePickerSheet(
-            currentImageName = imgAct.imageName,
+            currentImageName = currentName,
             images = images,
             imageFolders = imageFolders,
             onSelectImage = { chosenName ->
                 mutateActions { list ->
                     list.updateAction(imgAct.id) { cur ->
-                        if (cur is ImageAction) cur.copy(imageName = chosenName) else cur
+                        when (cur) {
+                            is ImageAction -> cur.copy(imageName = chosenName)
+                            is TrackObjectAction -> cur.copy(
+                                imageName = chosenName,
+                                extraImageNames = cur.extraImageNames.filter { it != chosenName }
+                            )
+                            else -> cur
+                        }
                     }
                 }
                 quickSwapImageAction = null
@@ -842,7 +855,7 @@ private fun ActionNodeCard(
     dragOffsetY: Float = 0f,
     dragHandleModifier: Modifier = Modifier,
     onEdit: (Action) -> Unit,
-    onQuickSwapImage: (ImageAction) -> Unit,
+    onQuickSwapImage: (Action) -> Unit,
     onPickTargetOnScreen: (String) -> Unit,
     onPickRegionOnScreen: (String) -> Unit,
     onAddBranchClickTarget: (String, Slot) -> Unit,
@@ -911,10 +924,11 @@ private fun ActionNodeCard(
                     Spacer(Modifier.width(4.dp))
                 }
 
-                // Leading visual: image thumbnail for ImageAction, color dot for ColorAction, icon otherwise
+                // Leading visual: image thumbnail for ImageAction / TrackObjectAction, color dot for ColorAction, icon otherwise
                 when (action) {
-                    is ImageAction -> {
-                        val asset = imageByName[action.imageName]
+                    is ImageAction, is TrackObjectAction -> {
+                        val imgName = if (action is ImageAction) action.imageName else (action as TrackObjectAction).imageName
+                        val asset = imageByName[imgName]
                         val bmp = rememberAssetThumbnail(asset?.path, asset?.updatedAt ?: 0L)
                         Box(
                             modifier = Modifier
@@ -982,7 +996,7 @@ private fun ActionNodeCard(
                 }
 
                 when {
-                    action is ImageAction -> {
+                    action is ImageAction || action is TrackObjectAction -> {
                         IconButton(onClick = { onQuickSwapImage(action) }, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.SwapHoriz,
@@ -1019,7 +1033,7 @@ private fun ActionNodeCard(
                         Icon(Icons.Filled.MoreVert, contentDescription = "Opsi", modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                        if (action is ImageAction) {
+                        if (action is ImageAction || action is TrackObjectAction) {
                             DropdownMenuItem(
                                 text = { Text("Ganti Gambar Target") },
                                 leadingIcon = { Icon(Icons.Filled.SwapHoriz, null) },
@@ -1389,7 +1403,7 @@ private fun AddActionPickerSheet(
     onDismiss: () -> Unit
 ) {
     val groups = listOf(
-        "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TEXT, ActionKind.COLOR),
+        "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
         "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
         "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.RUN_MACRO, ActionKind.RESTART, ActionKind.STOP)
