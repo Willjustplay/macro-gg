@@ -131,6 +131,7 @@ class DesktopCaptureAndInput(
         }
 
         val t0 = System.nanoTime()
+        val (scaleX, scaleY) = currentDisplayScale()
         val frame: Frame? = when (s.captureMode) {
             DesktopCaptureMode.ADB_BACKGROUND -> {
                 val serial = s.adbSerial.ifBlank {
@@ -143,12 +144,24 @@ class DesktopCaptureAndInput(
             DesktopCaptureMode.WINDOW_BOUND,
             DesktopCaptureMode.DESKTOP_FAST -> {
                 val bounds = resolveTargetBounds()
-                val nativeFrame = if (Win32Native.isWindows) win32Capturer.captureRect(bounds) else null
+                val physBounds = if (s.captureMode == DesktopCaptureMode.DESKTOP_FAST && (scaleX != 1.0 || scaleY != 1.0)) {
+                    Rectangle(
+                        (bounds.x * scaleX).roundToInt(),
+                        (bounds.y * scaleY).roundToInt(),
+                        (bounds.width * scaleX).roundToInt().coerceAtLeast(1),
+                        (bounds.height * scaleY).roundToInt().coerceAtLeast(1)
+                    )
+                } else bounds
+                val nativeFrame = if (Win32Native.isNativeReady) win32Capturer.captureRect(physBounds) else null
                 if (nativeFrame != null) {
                     lastEngineLabel = "Win32 GDI Fast"
+                    lastCaptureScaleX = if (s.captureMode == DesktopCaptureMode.DESKTOP_FAST) scaleX else 1.0
+                    lastCaptureScaleY = if (s.captureMode == DesktopCaptureMode.DESKTOP_FAST) scaleY else 1.0
                     nativeFrame
                 } else {
                     lastEngineLabel = "AWT Robot"
+                    lastCaptureScaleX = 1.0
+                    lastCaptureScaleY = 1.0
                     robot?.let { r ->
                         runCatching {
                             val img = r.createScreenCapture(bounds)
@@ -166,6 +179,8 @@ class DesktopCaptureAndInput(
             lastCaptureAtMs = System.currentTimeMillis()
             if (s.captureMode == DesktopCaptureMode.ADB_BACKGROUND) {
                 lastTargetBounds = Rectangle(0, 0, frame.width, frame.height)
+                lastCaptureScaleX = 1.0
+                lastCaptureScaleY = 1.0
             }
         }
         return frame
@@ -179,8 +194,8 @@ class DesktopCaptureAndInput(
             return frameToBufferedImage(f) to Rectangle(0, 0, f.width, f.height)
         }
         val bounds = resolveTargetBounds()
-        val img = robot?.let { runCatching { it.createScreenCapture(bounds) }.getOrNull() }
-            ?: captureFrame(forceFresh = true)?.let(::frameToBufferedImage)
+        val img = captureFrame(forceFresh = true)?.let(::frameToBufferedImage)
+            ?: robot?.let { runCatching { it.createScreenCapture(bounds) }.getOrNull() }
             ?: return null
         return img to bounds
     }
@@ -190,11 +205,28 @@ class DesktopCaptureAndInput(
         return f.argbAt(x, y)
     }
 
-    /** Maps a macro-space coordinate (relative to bound target) into absolute desktop coordinates. */
+    /** Maps a macro-space coordinate (relative to bound target) into logical AWT Robot desktop coordinates. */
     fun toAbsoluteScreen(x: Int, y: Int): Pair<Int, Int> {
         val b = lastTargetBounds
-        return (b.x + x) to (b.y + y)
+        val sx = lastCaptureScaleX.coerceAtLeast(0.5)
+        val sy = lastCaptureScaleY.coerceAtLeast(0.5)
+        val lx = (x / sx).roundToInt()
+        val ly = (y / sy).roundToInt()
+        return (b.x + lx) to (b.y + ly)
     }
+
+    @Volatile
+    private var lastCaptureScaleX: Double = 1.0
+
+    @Volatile
+    private var lastCaptureScaleY: Double = 1.0
+
+    private fun currentDisplayScale(): Pair<Double, Double> = runCatching {
+        if (GraphicsEnvironment.isHeadless()) return@runCatching 1.0 to 1.0
+        val tx = GraphicsEnvironment.getLocalGraphicsEnvironment()
+            .defaultScreenDevice.defaultConfiguration.defaultTransform
+        tx.scaleX.coerceIn(0.5, 4.0) to tx.scaleY.coerceIn(0.5, 4.0)
+    }.getOrElse { 1.0 to 1.0 }
 
     fun click(x: Int, y: Int, durationMs: Long): Boolean {
         val s = settings

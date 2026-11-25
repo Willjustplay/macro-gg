@@ -252,4 +252,19 @@ class DesktopPcEngineTest {
         // Dark background inside HUD (just inside padding) must become pure white background
         assertEquals(0xFFFFFFFF.toInt(), processed.getRGB(14, 14))
     }
+
+    @Test
+    fun allVectorIconsRenderCleanlyAndStartupProbesAreNonBlocking() {
+        val canvas = BufferedImage(48, 48, BufferedImage.TYPE_INT_ARGB)
+        val g = canvas.createGraphics()
+        for (kind in PcIconKind.entries) {
+            val icon = DesktopTheme.icon(kind, 20, DesktopTheme.CYAN)
+            icon.paintIcon(null, g, 4, 4)
+        }
+        g.dispose()
+
+        // Non-blocking startup probes must never throw or block
+        assertTrue(DesktopOcrEngine.activeEngineName(allowProbe = false).isNotBlank())
+        assertTrue(Win32Native.listVisibleWindows().isEmpty() || Win32Native.isWindows)
+    }
 }

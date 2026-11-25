@@ -27,10 +27,19 @@ object DesktopOcrEngine {
     private val tesseractBin: String? by lazy { detectTesseract() }
     private val winRtOcrAvailable: Boolean by lazy { Win32Native.isWindows }
 
-    fun activeEngineName(): String = when {
-        tesseractBin != null -> "Tesseract OCR + HUD Preprocessor"
-        winRtOcrAvailable -> "Windows Native WinRT OCR + HUD Fallback"
-        else -> "Built-in HUD Digit/Number OCR"
+    @Volatile
+    private var tesseractProbed: Boolean = false
+
+    fun activeEngineName(allowProbe: Boolean = false): String {
+        if (allowProbe || tesseractProbed) {
+            tesseractProbed = true
+            val t = tesseractBin
+            if (t != null) return "Tesseract OCR + HUD Preprocessor"
+        }
+        return when {
+            winRtOcrAvailable -> "Windows Native WinRT OCR + HUD Fallback"
+            else -> "Built-in HUD Digit/Number OCR"
+        }
     }
 
     fun recognizeText(frame: Frame, region: Region?, enhanced: Boolean = true): List<OcrBlock> {

@@ -20,7 +20,13 @@ class AdbBridge(
     private val pool: ReusableFramePool = ReusableFramePool(3)
 ) {
     @Volatile
-    var adbPath: String = resolveDefaultAdbExecutable()
+    private var customAdbPath: String = ""
+
+    private val detectedAdbPath: String by lazy { resolveDefaultAdbExecutable() }
+
+    var adbPath: String
+        get() = customAdbPath.ifBlank { detectedAdbPath }
+        set(value) { customAdbPath = value.trim() }
 
     fun resolveDefaultAdbExecutable(): String {
         val candidates = ArrayList<String>()

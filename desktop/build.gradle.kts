@@ -8,7 +8,7 @@ val appVersionName = (findProperty("appVersion") as? String)
     ?.trim()
     ?.removePrefix("v")
     ?.takeIf { it.matches(Regex("\\d+\\.\\d+(\\.\\d+)?")) }
-    ?: "2.14.0"
+    ?: "2.15.0"
 
 kotlin {
     jvmToolchain(21)
@@ -32,7 +32,9 @@ application {
         "-Xmx512m",
         "-Dfile.encoding=UTF-8",
         "-Dsun.java2d.d3d=false",
-        "-Dflatlaf.useWindowDecorations=true"
+        "-Dsun.java2d.noddraw=true",
+        "-Dsun.java2d.opengl=false",
+        "-Dflatlaf.useWindowDecorations=false"
     )
 }
 
@@ -119,7 +121,9 @@ tasks.register<Exec>("packagePortableWindows") {
         "--java-options", "-Xmx512m",
         "--java-options", "-Dfile.encoding=UTF-8",
         "--java-options", "-Dsun.java2d.d3d=false",
-        "--java-options", "-Dflatlaf.useWindowDecorations=true",
-        "--add-modules", "java.base,java.desktop,java.instrument,java.logging,java.prefs,java.scripting,java.xml,jdk.charsets,jdk.unsupported"
+        "--java-options", "-Dsun.java2d.noddraw=true",
+        "--java-options", "-Dsun.java2d.opengl=false",
+        "--java-options", "-Dflatlaf.useWindowDecorations=false",
+        "--add-modules", "java.base,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.prefs,java.scripting,java.xml,jdk.charsets,jdk.unsupported"
     )
 }

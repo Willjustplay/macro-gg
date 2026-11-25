@@ -277,14 +277,14 @@ object DesktopDialogs {
         val hasPass = MacroSecurity.hasPassword(macro)
         val hasActiveExp = macro.expiresAtEpochMs > 0L && !MacroSecurity.isExpired(macro, nowMs)
 
-        val lockChk = JCheckBox("🔒 Kunci Macro dengan Sandi (cegah edit/lihat aksi/duplikat)", macro.isLocked)
-        val passiveChk = JCheckBox("🔗 Mode Pasif (hanya bisa dipanggil macro aktif via Hubungkan Macro)", macro.isPassive)
+        val lockChk = JCheckBox("Kunci Macro dengan Sandi (cegah edit/lihat aksi/duplikat)", macro.isLocked)
+        val passiveChk = JCheckBox("Mode Pasif (hanya bisa dipanggil macro aktif via Hubungkan Macro)", macro.isPassive)
         val passiveOnChk = JCheckBox("Status Pasif ON (dapat ditarik macro aktif)", macro.passiveEnabled)
-        val expChk = JCheckBox("⏳ Aktifkan Tenggat Waktu Penggunaan", macro.expiresAtEpochMs > 0L)
+        val expChk = JCheckBox("Aktifkan Tenggat Waktu Penggunaan", macro.expiresAtEpochMs > 0L)
         val expModeBox = JComboBox(
             if (hasActiveExp) arrayOf("Pertahankan", "+ Tambah Waktu", "Atur Ulang") else arrayOf("Atur Ulang")
         )
-        val expAmountSpin = JSpinner(SpinnerNumberModel(macro.expiryDurationAmount.coerceAtLeast(7), 1, 3650, 1))
+        val expAmountSpin = JSpinner(SpinnerNumberModel(macro.expiryDurationAmount.takeIf { it > 0 }?.coerceIn(1, 3650) ?: 7, 1, 3650, 1))
         val expUnitBox = JComboBox(ExpiryUnit.entries.toTypedArray()).apply { selectedItem = macro.expiryDurationUnit }
         val passField = JPasswordField(18)
         val confirmField = JPasswordField(18)
@@ -320,7 +320,7 @@ object DesktopDialogs {
                 lockChk.isSelected = false; passiveChk.isSelected = false; expChk.isSelected = false
             })
         }
-        btnBar.add(DesktopTheme.subtleButton("Batal") { dlg.dispose() })
+        btnBar.add(DesktopTheme.outlinedButton("Batal") { dlg.dispose() })
         btnBar.add(DesktopTheme.primaryButton("Simpan Proteksi") {
             val anyProt = lockChk.isSelected || passiveChk.isSelected || expChk.isSelected
             val p1 = String(passField.password)
@@ -378,12 +378,12 @@ object DesktopDialogs {
         val hasPass = MacroSecurity.hasSetPassword(set)
         val hasActiveExp = set.expiresAtEpochMs > 0L && !MacroSecurity.isSetExpired(set, nowMs)
 
-        val lockChk = JCheckBox("🔒 Kunci Seluruh Macro Set ($memberCount macro ikut dikunci & disegel)", set.isLocked)
-        val expChk = JCheckBox("⏳ Aktifkan Tenggat Waktu Set", set.expiresAtEpochMs > 0L)
+        val lockChk = JCheckBox("Kunci Seluruh Macro Set ($memberCount macro ikut dikunci & disegel)", set.isLocked)
+        val expChk = JCheckBox("Aktifkan Tenggat Waktu Set", set.expiresAtEpochMs > 0L)
         val expModeBox = JComboBox(
             if (hasActiveExp) arrayOf("Pertahankan", "+ Tambah Waktu", "Atur Ulang") else arrayOf("Atur Ulang")
         )
-        val expAmountSpin = JSpinner(SpinnerNumberModel(set.expiryDurationAmount.coerceAtLeast(7), 1, 3650, 1))
+        val expAmountSpin = JSpinner(SpinnerNumberModel(set.expiryDurationAmount.takeIf { it > 0 }?.coerceIn(1, 3650) ?: 7, 1, 3650, 1))
         val expUnitBox = JComboBox(ExpiryUnit.entries.toTypedArray()).apply { selectedItem = set.expiryDurationUnit }
         val passField = JPasswordField(18)
         val confirmField = JPasswordField(18)
@@ -420,7 +420,7 @@ object DesktopDialogs {
                 lockChk.isSelected = false; expChk.isSelected = false
             })
         }
-        btnBar.add(DesktopTheme.subtleButton("Batal") { dlg.dispose() })
+        btnBar.add(DesktopTheme.outlinedButton("Batal") { dlg.dispose() })
         btnBar.add(DesktopTheme.primaryButton("Simpan Proteksi Set") {
             val anyProt = lockChk.isSelected || expChk.isSelected
             val p1 = String(passField.password)
@@ -472,12 +472,12 @@ object DesktopDialogs {
         curH: Int,
         onSave: (enabled: Boolean, srcW: Int, srcH: Int, mode: ResolutionScaleMode) -> Unit
     ) {
-        val enabledChk = JCheckBox("📐 Aktifkan Auto-Scale Resolusi Layar (Tanpa Sandi)", macro.autoScaleResolution)
+        val enabledChk = JCheckBox("Aktifkan Auto-Scale Resolusi Layar (Tanpa Sandi)", macro.autoScaleResolution)
         val wSpin = JSpinner(SpinnerNumberModel(macro.sourceWidth.coerceIn(0, 10000), 0, 10000, 10))
         val hSpin = JSpinner(SpinnerNumberModel(macro.sourceHeight.coerceIn(0, 10000), 0, 10000, 10))
         val modeBox = JComboBox(ResolutionScaleMode.entries.toTypedArray()).apply { selectedItem = macro.scaleMode }
-        val useNowBtn = DesktopTheme.subtleButton("Isi Layar Saat Ini (${curW}×${curH})") {
-            wSpin.value = curW; hSpin.value = curH
+        val useNowBtn = DesktopTheme.subtleButton("Isi Layar Saat Ini (${curW}x${curH})") {
+            wSpin.value = curW.coerceIn(0, 10000); hSpin.value = curH.coerceIn(0, 10000)
         }
         val panel = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -537,15 +537,15 @@ object DesktopDialogs {
         currentMacro: Macro,
         allMacros: List<Macro>,
         images: List<DesktopImageAsset>,
-        onPickPointOnScreen: (dual: Boolean, hint: String, callback: (x1: Int, y1: Int, x2: Int, y2: Int, hex: String) -> Unit) -> Unit,
-        onPickRegionOrCropOnScreen: (isCrop: Boolean, hint: String, callback: (region: Region, savedImageName: String?) -> Unit) -> Unit,
-        onRecordMouseOnScreen: (callback: (com.example.data.RecordedGesture) -> Unit) -> Unit,
+        onPickPointOnScreen: (dual: Boolean, hint: String, onClosed: () -> Unit, callback: (x1: Int, y1: Int, x2: Int, y2: Int, hex: String) -> Unit) -> Unit,
+        onPickRegionOrCropOnScreen: (isCrop: Boolean, hint: String, onClosed: () -> Unit, callback: (region: Region, savedImageName: String?) -> Unit) -> Unit,
+        onRecordMouseOnScreen: (onClosed: () -> Unit, callback: (com.example.data.RecordedGesture) -> Unit) -> Unit,
         onSave: (Action) -> Unit
     ) {
         val dlg = JDialog(owner, "Edit Aksi: ${action.kind.label}", true)
         val root = JPanel(BorderLayout(10, 10)).apply {
             background = DesktopTheme.BG_SURFACE
-            border = EmptyBorder(14, 16, 14, 16)
+            border = EmptyBorder(16, 18, 16, 18)
         }
 
         val form = JPanel().apply {
@@ -563,20 +563,28 @@ object DesktopDialogs {
             for (c in comps) add(c)
         }
 
+        fun restoreDialog() {
+            javax.swing.SwingUtilities.invokeLater {
+                if (dlg.isDisplayable) {
+                    dlg.isVisible = true
+                    dlg.toFront()
+                }
+            }
+        }
+
         val imgNames = (listOf("") + images.map { it.name }).toTypedArray()
         var buildUpdated: () -> Action = { action }
 
         when (action) {
             is ClickAction -> {
-                val xS = JSpinner(SpinnerNumberModel(action.x, 0, 10000, 1))
-                val yS = JSpinner(SpinnerNumberModel(action.y, 0, 10000, 1))
+                val xS = JSpinner(SpinnerNumberModel(action.x.coerceIn(0, 10000), 0, 10000, 1))
+                val yS = JSpinner(SpinnerNumberModel(action.y.coerceIn(0, 10000), 0, 10000, 1))
                 val durS = JSpinner(SpinnerNumberModel(action.durationMs.toInt().coerceIn(10, 10000), 10, 10000, 10))
                 val repS = JSpinner(SpinnerNumberModel(action.repeat.coerceIn(1, 50), 1, 50, 1))
-                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, DesktopTheme.subtleButton("🎯 Pilih di Layar") {
+                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, DesktopTheme.tonalButton("Pilih di Layar", iconKind = PcIconKind.TARGET) {
                     dlg.isVisible = false
-                    onPickPointOnScreen(false, "Pilih Titik Klik") { x1, y1, _, _, _ ->
-                        xS.value = x1; yS.value = y1
-                        dlg.isVisible = true
+                    onPickPointOnScreen(false, "Pilih Titik Klik", ::restoreDialog) { x1, y1, _, _, _ ->
+                        xS.value = x1.coerceIn(0, 10000); yS.value = y1.coerceIn(0, 10000)
                     }
                 }))
                 form.add(row(JLabel("Durasi (ms):"), durS, JLabel("Ulangi klik:"), repS))
@@ -594,13 +602,13 @@ object DesktopDialogs {
             }
 
             is LongPressAction -> {
-                val xS = JSpinner(SpinnerNumberModel(action.x, 0, 10000, 1))
-                val yS = JSpinner(SpinnerNumberModel(action.y, 0, 10000, 1))
+                val xS = JSpinner(SpinnerNumberModel(action.x.coerceIn(0, 10000), 0, 10000, 1))
+                val yS = JSpinner(SpinnerNumberModel(action.y.coerceIn(0, 10000), 0, 10000, 1))
                 val durS = JSpinner(SpinnerNumberModel(action.durationMs.toInt().coerceIn(100, 30000), 100, 30000, 100))
-                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, DesktopTheme.subtleButton("🎯 Pilih di Layar") {
+                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, DesktopTheme.tonalButton("Pilih di Layar", iconKind = PcIconKind.TARGET) {
                     dlg.isVisible = false
-                    onPickPointOnScreen(false, "Pilih Titik Tahan") { x1, y1, _, _, _ ->
-                        xS.value = x1; yS.value = y1; dlg.isVisible = true
+                    onPickPointOnScreen(false, "Pilih Titik Tahan", ::restoreDialog) { x1, y1, _, _, _ ->
+                        xS.value = x1.coerceIn(0, 10000); yS.value = y1.coerceIn(0, 10000)
                     }
                 }))
                 form.add(row(JLabel("Durasi Tahan (ms):"), durS))
@@ -615,16 +623,17 @@ object DesktopDialogs {
             }
 
             is SwipeAction -> {
-                val x1S = JSpinner(SpinnerNumberModel(action.x1, 0, 10000, 1))
-                val y1S = JSpinner(SpinnerNumberModel(action.y1, 0, 10000, 1))
-                val x2S = JSpinner(SpinnerNumberModel(action.x2, 0, 10000, 1))
-                val y2S = JSpinner(SpinnerNumberModel(action.y2, 0, 10000, 1))
+                val x1S = JSpinner(SpinnerNumberModel(action.x1.coerceIn(0, 10000), 0, 10000, 1))
+                val y1S = JSpinner(SpinnerNumberModel(action.y1.coerceIn(0, 10000), 0, 10000, 1))
+                val x2S = JSpinner(SpinnerNumberModel(action.x2.coerceIn(0, 10000), 0, 10000, 1))
+                val y2S = JSpinner(SpinnerNumberModel(action.y2.coerceIn(0, 10000), 0, 10000, 1))
                 val durS = JSpinner(SpinnerNumberModel(action.durationMs.toInt().coerceIn(40, 10000), 40, 10000, 20))
                 form.add(row(JLabel("Dari A:"), x1S, y1S, JLabel("Ke B:"), x2S, y2S))
-                form.add(row(JLabel("Durasi (ms):"), durS, DesktopTheme.subtleButton("🎯 Pilih A → B di Layar") {
+                form.add(row(JLabel("Durasi (ms):"), durS, DesktopTheme.tonalButton("Pilih A -> B di Layar", iconKind = PcIconKind.TARGET) {
                     dlg.isVisible = false
-                    onPickPointOnScreen(true, "Pilih Arah Swipe (A → B)") { ax, ay, bx, by, _ ->
-                        x1S.value = ax; y1S.value = ay; x2S.value = bx; y2S.value = by; dlg.isVisible = true
+                    onPickPointOnScreen(true, "Pilih Arah Swipe (A -> B)", ::restoreDialog) { ax, ay, bx, by, _ ->
+                        x1S.value = ax.coerceIn(0, 10000); y1S.value = ay.coerceIn(0, 10000)
+                        x2S.value = bx.coerceIn(0, 10000); y2S.value = by.coerceIn(0, 10000)
                     }
                 }))
                 buildUpdated = {
@@ -639,13 +648,13 @@ object DesktopDialogs {
             }
 
             is ZoomAction -> {
-                val cxS = JSpinner(SpinnerNumberModel(action.cx, 0, 10000, 1))
-                val cyS = JSpinner(SpinnerNumberModel(action.cy, 0, 10000, 1))
+                val cxS = JSpinner(SpinnerNumberModel(action.cx.coerceIn(0, 10000), 0, 10000, 1))
+                val cyS = JSpinner(SpinnerNumberModel(action.cy.coerceIn(0, 10000), 0, 10000, 1))
                 val inChk = JCheckBox("Perbesar (Zoom In; matikan = Perkecil/Zoom Out)", action.zoomIn).apply { isOpaque = false }
-                form.add(row(JLabel("Pusat X:"), cxS, JLabel("Y:"), cyS, DesktopTheme.subtleButton("🎯 Pilih Pusat") {
+                form.add(row(JLabel("Pusat X:"), cxS, JLabel("Y:"), cyS, DesktopTheme.tonalButton("Pilih Pusat", iconKind = PcIconKind.TARGET) {
                     dlg.isVisible = false
-                    onPickPointOnScreen(false, "Pilih Pusat Zoom") { x1, y1, _, _, _ ->
-                        cxS.value = x1; cyS.value = y1; dlg.isVisible = true
+                    onPickPointOnScreen(false, "Pilih Pusat Zoom", ::restoreDialog) { x1, y1, _, _, _ ->
+                        cxS.value = x1.coerceIn(0, 10000); cyS.value = y1.coerceIn(0, 10000)
                     }
                 }))
                 form.add(row(inChk))
@@ -682,19 +691,18 @@ object DesktopDialogs {
                 var curRegion = action.region
                 val regionLbl = JLabel(curRegion?.let { "(${it.left},${it.top})-(${it.right},${it.bottom})" } ?: "Seluruh Layar")
 
-                form.add(row(JLabel("Gambar Target:"), imgBox, DesktopTheme.subtleButton("✂ Potong Layar") {
+                form.add(row(JLabel("Gambar Target:"), imgBox, DesktopTheme.tonalButton("Potong Layar", iconKind = PcIconKind.CROP) {
                     dlg.isVisible = false
-                    onPickRegionOrCropOnScreen(true, "Potong Gambar Target") { _, savedName ->
+                    onPickRegionOrCropOnScreen(true, "Potong Gambar Target", ::restoreDialog) { _, savedName ->
                         if (!savedName.isNullOrBlank()) imgBox.selectedItem = savedName
-                        dlg.isVisible = true
                     }
                 }))
                 form.add(row(JLabel("Kemiripan (%):"), thrS, JLabel("Timeout (ms):"), timeoutS))
                 form.add(row(clickChk))
-                form.add(row(JLabel("Area:"), regionLbl, DesktopTheme.subtleButton("📐 Pilih Area") {
+                form.add(row(JLabel("Area:"), regionLbl, DesktopTheme.tonalButton("Pilih Area", iconKind = PcIconKind.SCALE) {
                     dlg.isVisible = false
-                    onPickRegionOrCropOnScreen(false, "Pilih Area Pencarian") { reg, _ ->
-                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"; dlg.isVisible = true
+                    onPickRegionOrCropOnScreen(false, "Pilih Area Pencarian", ::restoreDialog) { reg, _ ->
+                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"
                     }
                 }, DesktopTheme.subtleButton("Reset Area") { curRegion = null; regionLbl.text = "Seluruh Layar" }))
                 form.add(row(JLabel("Jika Ketemu:"), foundBox, JLabel("Jika Tidak:"), notFoundBox))
@@ -714,7 +722,7 @@ object DesktopDialogs {
             }
 
             is TrackObjectAction -> {
-                val anyMotionChk = JCheckBox("🎯 Lacak Semua Pasukan Bergerak (Bebas Warna / Tanpa Gambar)", action.trackAnyMotion).apply {
+                val anyMotionChk = JCheckBox("Lacak Semua Pasukan Bergerak (Bebas Warna / Tanpa Gambar)", action.trackAnyMotion).apply {
                     isOpaque = false
                     font = DesktopTheme.uiFont(12.5f, Font.BOLD)
                     foreground = DesktopTheme.CYAN
@@ -728,11 +736,10 @@ object DesktopDialogs {
                 val motionChk = JCheckBox("Prioritaskan Objek Bergerak (Abaikan Bangunan Statis)", action.prioritizeMotion).apply { isOpaque = false }
                 var curRegion = action.region
                 val regionLbl = JLabel(curRegion?.let { "(${it.left},${it.top})-(${it.right},${it.bottom})" } ?: "Seluruh Layar")
-                val tplRow = row(JLabel("Gambar Objek:"), imgBox, DesktopTheme.subtleButton("✂ Potong Objek") {
+                val tplRow = row(JLabel("Gambar Objek:"), imgBox, DesktopTheme.tonalButton("Potong Objek", iconKind = PcIconKind.CROP) {
                     dlg.isVisible = false
-                    onPickRegionOrCropOnScreen(true, "Potong Gambar Pasukan/Objek") { _, savedName ->
+                    onPickRegionOrCropOnScreen(true, "Potong Gambar Pasukan/Objek", ::restoreDialog) { _, savedName ->
                         if (!savedName.isNullOrBlank()) imgBox.selectedItem = savedName
-                        dlg.isVisible = true
                     }
                 })
                 val optRow = row(JLabel("Kemiripan (%):"), thrS, colorChk, motionChk)
@@ -749,10 +756,10 @@ object DesktopDialogs {
                 form.add(row(JLabel("Mode Interaksi:"), modeBox))
                 form.add(optRow)
                 form.add(row(JLabel("Prediksi Gerak/Lead (ms):"), leadS, JLabel("Durasi Kejar Maks (ms):"), maxDurS))
-                form.add(row(JLabel("Area Medan:"), regionLbl, DesktopTheme.subtleButton("📐 Pilih Area") {
+                form.add(row(JLabel("Area Medan:"), regionLbl, DesktopTheme.tonalButton("Pilih Area", iconKind = PcIconKind.SCALE) {
                     dlg.isVisible = false
-                    onPickRegionOrCropOnScreen(false, "Pilih Area Medan Perang") { reg, _ ->
-                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"; dlg.isVisible = true
+                    onPickRegionOrCropOnScreen(false, "Pilih Area Medan Perang", ::restoreDialog) { reg, _ ->
+                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"
                     }
                 }, DesktopTheme.subtleButton("Reset Area") { curRegion = null; regionLbl.text = "Seluruh Layar" }))
                 syncVis()
@@ -783,11 +790,11 @@ object DesktopDialogs {
                 val regionLbl = JLabel(curRegion?.let { "(${it.left},${it.top})-(${it.right},${it.bottom})" } ?: "Seluruh Layar")
                 form.add(row(JLabel("Mode Cek:"), modeBox))
                 form.add(row(JLabel("Teks dicari:"), textField, JLabel("Nilai Angka:"), numField))
-                form.add(row(clickChk, DesktopTheme.mutedLabel("(Auto 2×/3× HUD Game OCR aktif)", 11.5f)))
-                form.add(row(JLabel("Area OCR:"), regionLbl, DesktopTheme.subtleButton("📐 Pilih Area") {
+                form.add(row(clickChk, DesktopTheme.mutedLabel("(Auto 2x/3x HUD Game OCR aktif)", 11.5f)))
+                form.add(row(JLabel("Area OCR:"), regionLbl, DesktopTheme.tonalButton("Pilih Area", iconKind = PcIconKind.SCALE) {
                     dlg.isVisible = false
-                    onPickRegionOrCropOnScreen(false, "Pilih Area Teks / Angka") { reg, _ ->
-                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"; dlg.isVisible = true
+                    onPickRegionOrCropOnScreen(false, "Pilih Area Teks / Angka", ::restoreDialog) { reg, _ ->
+                        curRegion = reg; regionLbl.text = "(${reg.left},${reg.top})-(${reg.right},${reg.bottom})"
                     }
                 }, DesktopTheme.subtleButton("Reset Area") { curRegion = null; regionLbl.text = "Seluruh Layar" }))
                 buildUpdated = {
@@ -804,15 +811,15 @@ object DesktopDialogs {
             }
 
             is ColorAction -> {
-                val xS = JSpinner(SpinnerNumberModel(action.x, 0, 10000, 1))
-                val yS = JSpinner(SpinnerNumberModel(action.y, 0, 10000, 1))
+                val xS = JSpinner(SpinnerNumberModel(action.x.coerceIn(0, 10000), 0, 10000, 1))
+                val yS = JSpinner(SpinnerNumberModel(action.y.coerceIn(0, 10000), 0, 10000, 1))
                 val hexF = JTextField(action.color, 9)
                 val tolS = JSpinner(SpinnerNumberModel(action.tolerance.coerceIn(0, 120), 0, 120, 2))
                 val clickChk = JCheckBox("Klik saat warna cocok", action.clickOnFound).apply { isOpaque = false }
-                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, JLabel("Hex:"), hexF, DesktopTheme.subtleButton("🎯 Ambil Warna di Layar") {
+                form.add(row(JLabel("X:"), xS, JLabel("Y:"), yS, JLabel("Hex:"), hexF, DesktopTheme.tonalButton("Ambil Warna", iconKind = PcIconKind.TARGET) {
                     dlg.isVisible = false
-                    onPickPointOnScreen(false, "Ambil Titik & Warna Piksel") { x1, y1, _, _, hex ->
-                        xS.value = x1; yS.value = y1; hexF.text = hex; dlg.isVisible = true
+                    onPickPointOnScreen(false, "Ambil Titik & Warna Piksel", ::restoreDialog) { x1, y1, _, _, hex ->
+                        xS.value = x1.coerceIn(0, 10000); yS.value = y1.coerceIn(0, 10000); hexF.text = hex
                     }
                 }))
                 form.add(row(JLabel("Toleransi (0-120):"), tolS, clickChk))
@@ -891,7 +898,7 @@ object DesktopDialogs {
                 val stepS = JSpinner(SpinnerNumberModel(action.stepCount.coerceIn(1, 100), 1, 100, 1))
                 form.add(row(JLabel("Mode Loncat:"), modeBox))
                 form.add(row(JLabel("Aksi Tujuan:"), candBox))
-                form.add(row(JLabel("Jumlah Langkah N (jika ±N):"), stepS))
+                form.add(row(JLabel("Jumlah Langkah N (jika +/-N):"), stepS))
                 buildUpdated = {
                     val chosen = candidates.getOrNull(candBox.selectedIndex)
                     action.copy(
@@ -936,15 +943,14 @@ object DesktopDialogs {
                 var gestures = action.gestures
                 val spdS = JSpinner(SpinnerNumberModel(action.speed.toDouble().coerceIn(0.25, 4.0), 0.25, 4.0, 0.25))
                 val infoLbl = JLabel("${gestures.sumOf { it.strokes.size }} goresan terekam")
-                form.add(row(infoLbl, DesktopTheme.primaryButton("● Rekam Gerakan Mouse", DesktopTheme.ROSE) {
+                form.add(row(infoLbl, DesktopTheme.primaryButton("Rekam Gerakan Mouse", DesktopTheme.ROSE, Color.WHITE, PcIconKind.RECORD) {
                     dlg.isVisible = false
-                    onRecordMouseOnScreen { g ->
+                    onRecordMouseOnScreen(::restoreDialog) { g ->
                         gestures = listOf(g)
                         infoLbl.text = "${g.strokes.size} goresan baru terekam!"
-                        dlg.isVisible = true
                     }
                 }))
-                form.add(row(JLabel("Kecepatan Putar (×):"), spdS))
+                form.add(row(JLabel("Kecepatan Putar (x):"), spdS))
                 buildUpdated = {
                     action.copy(
                         gestures = gestures, speed = (spdS.value as Number).toFloat(),
@@ -977,7 +983,7 @@ object DesktopDialogs {
         form.add(row(enabledChk, JLabel("Jeda Sesudah (ms):"), delaySpin, JLabel("Peluang (%):"), chanceSpin))
 
         val btnBar = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
-        btnBar.add(DesktopTheme.subtleButton("Batal") { dlg.dispose() })
+        btnBar.add(DesktopTheme.outlinedButton("Batal") { dlg.dispose() })
         btnBar.add(DesktopTheme.primaryButton("Simpan Aksi") {
             val updated = buildUpdated()
             dlg.dispose()
