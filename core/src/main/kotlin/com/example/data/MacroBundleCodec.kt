@@ -302,6 +302,78 @@ object MacroBundleCodec {
     }
 
     /**
+     * Writes an AES-256-GCM encrypted `.wjm` single-macro bundle (including linked sub-macros,
+     * custom logos, and target PNGs) playable exclusively inside Wjust Player.
+     */
+    fun writeEncryptedMacroWjm(
+        root: Macro,
+        lookupMacro: (String) -> Macro?,
+        loadImage: (imageName: String) -> Pair<String, ByteArray>?,
+        output: OutputStream,
+        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null },
+        singleUseImport: Boolean = false,
+        exportedAtEpochMs: Long = System.currentTimeMillis()
+    ): ExportResult {
+        val zipBuffer = ByteArrayOutputStream()
+        val result = writeMacroZip(
+            root = root,
+            lookupMacro = lookupMacro,
+            loadImage = loadImage,
+            output = zipBuffer,
+            loadMacroIcon = loadMacroIcon,
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = exportedAtEpochMs
+        )
+        WjmCrypto.encryptZipToStream(zipBuffer.toByteArray(), output)
+        return result
+    }
+
+    /**
+     * Writes an AES-256-GCM encrypted `.wjm` Macro Set bundle (set metadata, all members,
+     * linked sub-macros, logos, and target PNGs) playable exclusively inside Wjust Player.
+     */
+    fun writeEncryptedMacroSetWjm(
+        set: MacroSet,
+        memberMacros: List<Macro>,
+        lookupMacro: (String) -> Macro?,
+        loadImage: (imageName: String) -> Pair<String, ByteArray>?,
+        output: OutputStream,
+        loadMacroIcon: (iconName: String) -> Pair<String, ByteArray>? = { null },
+        singleUseImport: Boolean = false,
+        exportedAtEpochMs: Long = System.currentTimeMillis()
+    ): ExportResult {
+        val zipBuffer = ByteArrayOutputStream()
+        val result = writeMacroSetZip(
+            set = set,
+            memberMacros = memberMacros,
+            lookupMacro = lookupMacro,
+            loadImage = loadImage,
+            output = zipBuffer,
+            loadMacroIcon = loadMacroIcon,
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = exportedAtEpochMs
+        )
+        WjmCrypto.encryptZipToStream(zipBuffer.toByteArray(), output)
+        return result
+    }
+
+    /**
+     * Strictly reads an AES-256-GCM encrypted `.wjm` bundle for Wjust Player.
+     * Rejects unencrypted `.zip`, plain `.json`, or tampered `.wjm` files with [WjmFormatException].
+     */
+    fun readEncryptedWjm(input: InputStream, idGenerator: () -> String = { newId() }): DecodedBundle {
+        val rawBytes = input.readBytes()
+        if (!WjmCrypto.isWjmHeader(rawBytes)) {
+            throw WjmFormatException("Hanya mendukung file terenkripsi .wjm yang diekspor dari Wjust macro.")
+        }
+        val zipBytes = WjmCrypto.decryptZipBytes(rawBytes)
+        if (zipBytes.size < 2 || zipBytes[0] != 0x50.toByte() || zipBytes[1] != 0x4B.toByte()) {
+            throw WjmFormatException("Isi file .wjm tidak valid.")
+        }
+        return readBundle(zipBytes.inputStream(), idGenerator)
+    }
+
+    /**
      * Reads either a raw single-macro JSON stream or a .zip bundle (macro export, macro set export,
      * or full backup), remapping macro & set IDs so [RunMacroAction] and [Macro.setId] links stay intact.
      */
@@ -311,6 +383,12 @@ object MacroBundleCodec {
         val header = ByteArray(4)
         val read = buffered.read(header)
         buffered.reset()
+
+        if (WjmCrypto.isWjmHeader(header, read)) {
+            throw WjmFormatException(
+                "File .wjm terenkripsi hanya dapat dijalankan di aplikasi Wjust Player (tidak dapat diedit di Wjust macro)."
+            )
+        }
 
         val isZip = read >= 2 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
         if (!isZip) {

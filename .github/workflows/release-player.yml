@@ -1,0 +1,102 @@
+name: Build & Publish Wjust Player (Android Only)
+
+on:
+  push:
+    tags:
+      - 'player-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. player-v1.0.0)'
+        required: true
+        default: 'player-v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-wjust-player:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore or generate debug keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > debug.keystore
+          else
+            keytool -genkeypair -v -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Test, R8 verify & build Wjust Player Android APK/AAB + Wjust macro Studio APK
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          PLAY_KEYSTORE_B64: ${{ secrets.PLAY_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.PLAY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.PLAY_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :player:testDebugUnitTest \
+            :player:assembleDebug :player:minifyReleaseWithR8 :app:assembleDebug \
+            --no-configuration-cache
+
+          mkdir -p release-assets
+          cp player/build/outputs/apk/debug/player-debug.apk "release-assets/Wjust-Player-${TAG_NAME}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "release-assets/Wjust-macro-Studio-WJM-${TAG_NAME}.apk"
+
+          if [ -n "$PLAY_KEYSTORE_B64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            printf '%s' "$PLAY_KEYSTORE_B64" | base64 -d > my-upload-key.jks
+            export KEYSTORE_PATH="$PWD/my-upload-key.jks"
+            ./gradlew :player:bundleRelease :player:assembleRelease --no-configuration-cache
+            cp player/build/outputs/bundle/release/player-release.aab "release-assets/Wjust-Player-PlayStore-${TAG_NAME}.aab"
+            cp player/build/outputs/apk/release/player-release.apk "release-assets/Wjust-Player-${TAG_NAME}-release.apk"
+          else
+            ./gradlew :player:bundleDebug --no-configuration-cache
+            cp player/build/outputs/bundle/debug/player-debug.aab "release-assets/Wjust-Player-PlayStore-${TAG_NAME}-debug.aab"
+          fi
+
+      - name: Upload Wjust Player artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wjust-player
+          path: release-assets/*
+
+  publish-player-release:
+    needs: [build-wjust-player]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          ls -lh dist/
+          if gh release view "$TAG_NAME" -R "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/* -R "$GH_REPO" --clobber
+          else
+            gh release create "$TAG_NAME" dist/* -R "$GH_REPO" \
+              --title "Wjust Player ${TAG_NAME} (Android Play-Only + .wjm Studio APK)" \
+              --generate-notes
+          fi

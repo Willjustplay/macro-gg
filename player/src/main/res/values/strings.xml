@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wjust Player</string>
+    <string name="accessibility_service_label">Wjust Player</string>
+    <string name="accessibility_service_description">Menjalankan sentuhan (Klik, Swipe, Gestur) otomatis dari file macro terenkripsi .wjm yang Anda impor sendiri. Tidak mengumpulkan atau mengirim data pribadi.</string>
+    <string name="notif_channel_capture">Wjust Player — Tangkap Layar</string>
+    <string name="notif_capture_title">Wjust Player • Tangkap Layar Aktif</string>
+    <string name="notif_capture_text">Menyediakan pemindaian layar lokal untuk macro .wjm yang sedang berjalan.</string>
+    <string name="notif_channel_overlay">Wjust Player — Kontrol Melayang</string>
+    <string name="notif_overlay_title">Wjust Player • Bar Kontrol Aktif</string>
+    <string name="notif_overlay_text">Ketuk Play/Stop di bar melayang untuk mengontrol macro Anda.</string>
+</resources>

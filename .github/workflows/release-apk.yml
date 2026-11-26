@@ -49,8 +49,8 @@ jobs:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           chmod +x gradlew
-          ./gradlew :core:test :desktop:test :app:testDebugUnitTest \
-            :app:assembleDebug :export-bridge:assembleDebug :desktop:fatJar \
+          ./gradlew :core:test :desktop:test :app:testDebugUnitTest :player:testDebugUnitTest \
+            :app:assembleDebug :player:assembleDebug :player:bundleDebug :export-bridge:assembleDebug :desktop:fatJar \
             -PappVersion="${TAG_NAME}" --no-configuration-cache
 
       - name: Stage release artifacts
@@ -59,6 +59,8 @@ jobs:
         run: |
           mkdir -p release-assets
           cp app/build/outputs/apk/debug/app-debug.apk "release-assets/Wjust-macro-${TAG_NAME}.apk"
+          cp player/build/outputs/apk/debug/player-debug.apk "release-assets/Wjust-Player-Android-${TAG_NAME}.apk"
+          cp player/build/outputs/bundle/debug/player-debug.aab "release-assets/Wjust-Player-PlayStore-${TAG_NAME}-debug.aab"
           cp export-bridge/build/outputs/apk/debug/export-bridge-debug.apk "release-assets/Wjust-Export-Bridge.apk"
           cp desktop/build/libs/Wjust-macro-PC-*-universal.jar "release-assets/Wjust-macro-PC-Universal-${TAG_NAME}.jar"
 

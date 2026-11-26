@@ -813,31 +813,33 @@ fun ExportMacroSetOptionsDialog(
     memberCount: Int,
     passiveCount: Int,
     preferDownloads: Boolean,
-    onExportToPicker: (singleUseImport: Boolean) -> Unit,
-    onExportToDownloads: (singleUseImport: Boolean) -> Unit,
+    onExportToPicker: (singleUseImport: Boolean, encryptedWjm: Boolean) -> Unit,
+    onExportToDownloads: (singleUseImport: Boolean, encryptedWjm: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     var singleUseImport by remember(set.id) { mutableStateOf(false) }
+    var encryptedWjm by remember(set.id) { mutableStateOf(true) }
     val activeCount = (memberCount - passiveCount).coerceAtLeast(0)
+    val ext = if (encryptedWjm) ".wjm" else ".zip"
 
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
             Icon(
-                imageVector = if (singleUseImport || set.isLocked) Icons.Filled.Lock else Icons.Filled.FileDownload,
+                imageVector = if (encryptedWjm || singleUseImport || set.isLocked) Icons.Filled.Lock else Icons.Filled.FileDownload,
                 contentDescription = null,
-                tint = if (singleUseImport) Color(0xFFF59E0B) else parseSetAccentColor(set.colorHex)
+                tint = if (encryptedWjm) Color(0xFF10B981) else if (singleUseImport) Color(0xFFF59E0B) else parseSetAccentColor(set.colorHex)
             )
         },
         title = {
             Text(
-                "Ekspor Macro Set (.zip)",
+                "Ekspor Macro Set ($ext)",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val breakdown = buildString {
                     append("Set '${set.name}': $memberCount macro")
                     if (memberCount > 0) append(" ($activeCount Aktif, $passiveCount Pasif)")
@@ -848,6 +850,46 @@ fun ExportMacroSetOptionsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // Format selector: .wjm (Encrypted for Wjust Player) vs .zip (Standard)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (encryptedWjm) Color(0xFF10B981).copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = BorderStroke(
+                        1.dp,
+                        if (encryptedWjm) Color(0xFF10B981).copy(alpha = 0.55f) else MaterialTheme.colorScheme.outlineVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { encryptedWjm = !encryptedWjm }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                "🔐 Format Terenkripsi .wjm (Wjust Player)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                if (encryptedWjm) {
+                                    "Terenkripsi AES-256 — hanya bisa dijalankan (Play) di Wjust Player, tidak bisa diekstrak atau diedit."
+                                } else {
+                                    "Format .zip standar — dapat dibuka & diedit ulang di Wjust macro Studio / PC."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = encryptedWjm,
+                            onCheckedChange = { encryptedWjm = it }
+                        )
+                    }
+                }
                 if (set.isLocked || set.expiresAtEpochMs > 0L) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
@@ -890,7 +932,7 @@ fun ExportMacroSetOptionsDialog(
                             )
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                "File .zip Set diberi token unik bertanda tangan. Setelah 1× diimpor, file yang sama tidak bisa diimpor ulang.",
+                                "File $ext Set diberi token unik bertanda tangan. Setelah 1× diimpor, file yang sama tidak bisa diimpor ulang.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -903,7 +945,7 @@ fun ExportMacroSetOptionsDialog(
                 }
                 if (singleUseImport) {
                     Text(
-                        "Nama file otomatis ditandai '_set_1x.zip'. Set asli di HP Anda tidak berubah dan tetap bisa diekspor lagi dengan token baru.",
+                        "Nama file otomatis ditandai '_set_1x$ext'. Set asli di HP Anda tidak berubah dan tetap bisa diekspor lagi dengan token baru.",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFFF59E0B)
                     )
@@ -912,11 +954,11 @@ fun ExportMacroSetOptionsDialog(
         },
         confirmButton = {
             if (preferDownloads) {
-                Button(onClick = { onExportToDownloads(singleUseImport) }) {
+                Button(onClick = { onExportToDownloads(singleUseImport, encryptedWjm) }) {
                     Text("Simpan Download")
                 }
             } else {
-                Button(onClick = { onExportToPicker(singleUseImport) }) {
+                Button(onClick = { onExportToPicker(singleUseImport, encryptedWjm) }) {
                     Text("Pilih Lokasi")
                 }
             }
@@ -925,11 +967,11 @@ fun ExportMacroSetOptionsDialog(
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onDismiss) { Text("Batal") }
                 if (preferDownloads) {
-                    FilledTonalButton(onClick = { onExportToPicker(singleUseImport) }) {
+                    FilledTonalButton(onClick = { onExportToPicker(singleUseImport, encryptedWjm) }) {
                         Text("Pilih Lokasi")
                     }
                 } else {
-                    FilledTonalButton(onClick = { onExportToDownloads(singleUseImport) }) {
+                    FilledTonalButton(onClick = { onExportToDownloads(singleUseImport, encryptedWjm) }) {
                         Text("Ke Download")
                     }
                 }

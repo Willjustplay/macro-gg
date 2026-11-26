@@ -26,5 +26,6 @@ rootProject.name = "TapLua"
 
 include(":core")
 include(":app")
+include(":player")
 include(":desktop")
 include(":export-bridge")

@@ -289,12 +289,21 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
 
     // ---- Export / Import ----
 
-    fun exportMacroToUri(macro: Macro, uri: Uri, singleUseImport: Boolean = false) {
+    fun exportMacroToUri(
+        macro: Macro,
+        uri: Uri,
+        singleUseImport: Boolean = false,
+        encryptedWjm: Boolean = false
+    ) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     appContext.contentResolver.openOutputStream(uri)?.use { out ->
-                        store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
+                        if (encryptedWjm) {
+                            store.exportMacroWjm(macro, out, singleUseImport = singleUseImport)
+                        } else {
+                            store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
+                        }
                     } ?: error("Tidak dapat membuka file tujuan.")
                 }
             }
@@ -310,42 +319,62 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                     "1 macro"
                 }
                 val singleTag = if (summary.singleUseImport) " • 🔒 1× Impor" else ""
-                _messages.emit("Diekspor '${macro.name}': $macroNote & $imgNote$singleTag (.zip).")
+                val extTag = if (encryptedWjm) "(.wjm Terenkripsi • Wjust Player)" else "(.zip)"
+                _messages.emit("Diekspor '${macro.name}': $macroNote & $imgNote$singleTag $extTag.")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor: ${err.message}")
             }
         }
     }
 
-    fun exportMacroToDownloads(macro: Macro, fileName: String, singleUseImport: Boolean = false) {
+    fun exportMacroToDownloads(
+        macro: Macro,
+        fileName: String,
+        singleUseImport: Boolean = false,
+        encryptedWjm: Boolean = false
+    ) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     com.example.data.CloudSafeStorage.writeToDownloads(
                         context = appContext,
                         desiredFileName = fileName,
-                        mimeType = "application/zip"
+                        mimeType = if (encryptedWjm) "application/octet-stream" else "application/zip"
                     ) { out ->
-                        store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
+                        if (encryptedWjm) {
+                            store.exportMacroWjm(macro, out, singleUseImport = singleUseImport)
+                        } else {
+                            store.exportMacroZip(macro, out, singleUseImport = singleUseImport)
+                        }
                     }
                 }
             }
             result.onSuccess { (saved, summary) ->
                 val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
                 val singleTag = if (summary.singleUseImport) " • 🔒 1× Impor" else ""
-                _messages.emit("Tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$singleTag).")
+                val encTag = if (encryptedWjm) " • 🔐 Terenkripsi" else ""
+                _messages.emit("Tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$encTag$singleTag).")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor ke Download: ${err.message}")
             }
         }
     }
 
-    fun exportMacroSetToUri(set: MacroSet, uri: Uri, singleUseImport: Boolean = false) {
+    fun exportMacroSetToUri(
+        set: MacroSet,
+        uri: Uri,
+        singleUseImport: Boolean = false,
+        encryptedWjm: Boolean = false
+    ) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     appContext.contentResolver.openOutputStream(uri)?.use { out ->
-                        store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                        if (encryptedWjm) {
+                            store.exportMacroSetWjm(set, out, singleUseImport = singleUseImport)
+                        } else {
+                            store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                        }
                     } ?: error("Tidak dapat membuka file tujuan.")
                 }
             }
@@ -353,23 +382,33 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
                 val lockTag = if (set.isLocked) " • 🔒 Terkunci" else ""
                 val singleTag = if (summary.singleUseImport) " • 1× Impor" else ""
-                _messages.emit("Set '${set.name}' diekspor: ${summary.macrosExported} macro & $imgNote$lockTag$singleTag (.zip).")
+                val extTag = if (encryptedWjm) "(.wjm Terenkripsi • Wjust Player)" else "(.zip)"
+                _messages.emit("Set '${set.name}' diekspor: ${summary.macrosExported} macro & $imgNote$lockTag$singleTag $extTag.")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor set: ${err.message}")
             }
         }
     }
 
-    fun exportMacroSetToDownloads(set: MacroSet, fileName: String, singleUseImport: Boolean = false) {
+    fun exportMacroSetToDownloads(
+        set: MacroSet,
+        fileName: String,
+        singleUseImport: Boolean = false,
+        encryptedWjm: Boolean = false
+    ) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     com.example.data.CloudSafeStorage.writeToDownloads(
                         context = appContext,
                         desiredFileName = fileName,
-                        mimeType = "application/zip"
+                        mimeType = if (encryptedWjm) "application/octet-stream" else "application/zip"
                     ) { out ->
-                        store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                        if (encryptedWjm) {
+                            store.exportMacroSetWjm(set, out, singleUseImport = singleUseImport)
+                        } else {
+                            store.exportMacroSetZip(set, out, singleUseImport = singleUseImport)
+                        }
                     }
                 }
             }
@@ -377,7 +416,8 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
                 val imgNote = if (summary.imagesExported > 0) "${summary.imagesExported} gambar" else "tanpa gambar"
                 val lockTag = if (set.isLocked) " • 🔒 Terkunci" else ""
                 val singleTag = if (summary.singleUseImport) " • 1× Impor" else ""
-                _messages.emit("Set '${set.name}' tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$lockTag$singleTag).")
+                val encTag = if (encryptedWjm) " • 🔐 Terenkripsi" else ""
+                _messages.emit("Set '${set.name}' tersimpan di ${saved.displayPath} (${summary.macrosExported} macro, $imgNote$lockTag$encTag$singleTag).")
             }.onFailure { err ->
                 _messages.emit("Gagal ekspor set ke Download: ${err.message}")
             }

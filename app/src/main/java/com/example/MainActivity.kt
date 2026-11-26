@@ -148,6 +148,7 @@ private fun WjustMacroApp() {
     var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportSingleUse by remember { mutableStateOf(false) }
+    var pendingExportEncryptedWjm by remember { mutableStateOf(false) }
 
     // Macro Set modals & password-guard state
     var showCreateSetDialog by remember { mutableStateOf(false) }
@@ -163,6 +164,7 @@ private fun WjustMacroApp() {
     var pendingMoveTargetSetId by remember { mutableStateOf<String?>(null) }
     var pendingExportSet by remember { mutableStateOf<MacroSet?>(null) }
     var pendingExportSetSingleUse by remember { mutableStateOf(false) }
+    var pendingExportSetEncryptedWjm by remember { mutableStateOf(false) }
 
     var pendingExportImageName by remember { mutableStateOf<String?>(null) }
     var pendingExportImagesZip by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -192,10 +194,25 @@ private fun WjustMacroApp() {
     ) { uri ->
         val macro = pendingExportMacro
         val singleUse = pendingExportSingleUse
+        val wjm = pendingExportEncryptedWjm
         pendingExportMacro = null
         pendingExportSingleUse = false
+        pendingExportEncryptedWjm = false
         if (uri != null && macro != null) {
-            viewModel.exportMacroToUri(macro, uri, singleUseImport = singleUse)
+            viewModel.exportMacroToUri(macro, uri, singleUseImport = singleUse, encryptedWjm = wjm)
+        }
+    }
+
+    val exportMacroWjmLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val macro = pendingExportMacro
+        val singleUse = pendingExportSingleUse
+        pendingExportMacro = null
+        pendingExportSingleUse = false
+        pendingExportEncryptedWjm = false
+        if (uri != null && macro != null) {
+            viewModel.exportMacroToUri(macro, uri, singleUseImport = singleUse, encryptedWjm = true)
         }
     }
 
@@ -204,10 +221,25 @@ private fun WjustMacroApp() {
     ) { uri ->
         val set = pendingExportSet
         val singleUse = pendingExportSetSingleUse
+        val wjm = pendingExportSetEncryptedWjm
         pendingExportSet = null
         pendingExportSetSingleUse = false
+        pendingExportSetEncryptedWjm = false
         if (uri != null && set != null) {
-            viewModel.exportMacroSetToUri(set, uri, singleUseImport = singleUse)
+            viewModel.exportMacroSetToUri(set, uri, singleUseImport = singleUse, encryptedWjm = wjm)
+        }
+    }
+
+    val exportMacroSetWjmLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val set = pendingExportSet
+        val singleUse = pendingExportSetSingleUse
+        pendingExportSet = null
+        pendingExportSetSingleUse = false
+        pendingExportSetEncryptedWjm = false
+        if (uri != null && set != null) {
+            viewModel.exportMacroSetToUri(set, uri, singleUseImport = singleUse, encryptedWjm = true)
         }
     }
 
@@ -284,31 +316,45 @@ private fun WjustMacroApp() {
         }
     }
 
-    fun safeExportMacro(m: Macro, singleUseImport: Boolean = false) {
+    fun safeExportMacro(m: Macro, singleUseImport: Boolean = false, encryptedWjm: Boolean = false) {
         val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-        val fileName = if (singleUseImport) "${safeName}_1x.zip" else "$safeName.zip"
+        val ext = if (encryptedWjm) ".wjm" else ".zip"
+        val fileName = if (singleUseImport) "${safeName}_1x$ext" else "$safeName$ext"
         pendingExportMacro = m
         pendingExportSingleUse = singleUseImport
+        pendingExportEncryptedWjm = encryptedWjm
         runCatching {
-            exportMacroLauncher.launch(fileName)
+            if (encryptedWjm) {
+                exportMacroWjmLauncher.launch(fileName)
+            } else {
+                exportMacroLauncher.launch(fileName)
+            }
         }.onFailure {
             pendingExportMacro = null
             pendingExportSingleUse = false
-            viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport)
+            pendingExportEncryptedWjm = false
+            viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport, encryptedWjm = encryptedWjm)
         }
     }
 
-    fun safeExportMacroSet(set: MacroSet, singleUseImport: Boolean = false) {
+    fun safeExportMacroSet(set: MacroSet, singleUseImport: Boolean = false, encryptedWjm: Boolean = false) {
         val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
-        val fileName = if (singleUseImport) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
+        val ext = if (encryptedWjm) ".wjm" else ".zip"
+        val fileName = if (singleUseImport) "${safeName}_set_1x$ext" else "${safeName}_set$ext"
         pendingExportSet = set
         pendingExportSetSingleUse = singleUseImport
+        pendingExportSetEncryptedWjm = encryptedWjm
         runCatching {
-            exportMacroSetLauncher.launch(fileName)
+            if (encryptedWjm) {
+                exportMacroSetWjmLauncher.launch(fileName)
+            } else {
+                exportMacroSetLauncher.launch(fileName)
+            }
         }.onFailure {
             pendingExportSet = null
             pendingExportSetSingleUse = false
-            viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUseImport)
+            pendingExportSetEncryptedWjm = false
+            viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUseImport, encryptedWjm = encryptedWjm)
         }
     }
 
@@ -772,11 +818,14 @@ private fun WjustMacroApp() {
                             onManageMacroSetMembers = ::requestManageMacroSetMembers,
                             onOpenMacroSetSecurity = ::requestOpenMacroSetSecurity,
                             onDuplicateMacroSet = ::requestDuplicateMacroSet,
-                            onExportMacroSet = { set, singleUse -> safeExportMacroSet(set, singleUseImport = singleUse) },
-                            onExportMacroSetDirectToDownloads = { set, singleUse ->
+                            onExportMacroSet = { set, singleUse, encryptedWjm ->
+                                safeExportMacroSet(set, singleUseImport = singleUse, encryptedWjm = encryptedWjm)
+                            },
+                            onExportMacroSetDirectToDownloads = { set, singleUse, encryptedWjm ->
                                 val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
-                                val fileName = if (singleUse) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
-                                viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUse)
+                                val ext = if (encryptedWjm) ".wjm" else ".zip"
+                                val fileName = if (singleUse) "${safeName}_set_1x$ext" else "${safeName}_set$ext"
+                                viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUse, encryptedWjm = encryptedWjm)
                             },
                             onDeleteMacroSet = { set -> deletingSetId = set.id },
                             onMoveMacroToSet = ::requestMoveMacroToSet,
@@ -787,11 +836,14 @@ private fun WjustMacroApp() {
                             onOpenAutoScale = { m -> autoScaleSheetMacroId = m.id },
                             onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
-                            onExportMacro = { m, singleUse -> safeExportMacro(m, singleUseImport = singleUse) },
-                            onExportMacroDirectToDownloads = { m, singleUse ->
+                            onExportMacro = { m, singleUse, encryptedWjm ->
+                                safeExportMacro(m, singleUseImport = singleUse, encryptedWjm = encryptedWjm)
+                            },
+                            onExportMacroDirectToDownloads = { m, singleUse, encryptedWjm ->
                                 val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-                                val fileName = if (singleUse) "${safeName}_1x.zip" else "$safeName.zip"
-                                viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUse)
+                                val ext = if (encryptedWjm) ".wjm" else ".zip"
+                                val fileName = if (singleUse) "${safeName}_1x$ext" else "$safeName$ext"
+                                viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUse, encryptedWjm = encryptedWjm)
                             },
                             onDeleteMacro = { m -> viewModel.deleteMacro(m.id) }
                         )

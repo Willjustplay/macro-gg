@@ -852,6 +852,36 @@ class LocalStore(context: Context) {
     }
 
     /**
+     * Exports a macro, all linked sub-macros, logos, and referenced target PNGs
+     * into an AES-256-GCM encrypted `.wjm` file playable exclusively inside Wjust Player.
+     */
+    fun exportMacroWjm(
+        macro: Macro,
+        output: OutputStream,
+        singleUseImport: Boolean = false
+    ): ExportSummary {
+        val latest = ensureExportSourceResolution(getMacroById(macro.id) ?: macro)
+        val res = MacroBundleCodec.writeEncryptedMacroWjm(
+            root = latest,
+            lookupMacro = { id -> getMacroById(id)?.let(::ensureExportSourceResolution) },
+            loadImage = { imgName ->
+                resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
+            },
+            output = output,
+            loadMacroIcon = { iconName ->
+                macroIconFile(iconName)?.takeIf { it.exists() }?.let { f -> f.name to f.readBytes() }
+            },
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = effectiveNowMs()
+        )
+        return ExportSummary(
+            macrosExported = res.macrosExported,
+            imagesExported = res.imagesExported,
+            singleUseImport = res.singleUseImport
+        )
+    }
+
+    /**
      * Exports a [MacroSet], all of its member macros, any externally linked sub-macros,
      * custom logos, and all referenced PNG target images into a single portable `.zip` bundle.
      */
@@ -865,6 +895,40 @@ class LocalStore(context: Context) {
             .filter { it.setId == latestSet.id }
             .map(::ensureExportSourceResolution)
         val res = MacroBundleCodec.writeMacroSetZip(
+            set = latestSet,
+            memberMacros = members,
+            lookupMacro = { id -> getMacroById(id)?.let(::ensureExportSourceResolution) },
+            loadImage = { imgName ->
+                resolveExistingImageFile(imgName)?.let { f -> relativeImageName(f) to f.readBytes() }
+            },
+            output = output,
+            loadMacroIcon = { iconName ->
+                macroIconFile(iconName)?.takeIf { it.exists() }?.let { f -> f.name to f.readBytes() }
+            },
+            singleUseImport = singleUseImport,
+            exportedAtEpochMs = effectiveNowMs()
+        )
+        return ExportSummary(
+            macrosExported = res.macrosExported,
+            imagesExported = res.imagesExported,
+            singleUseImport = res.singleUseImport,
+            setsExported = res.setsExported
+        )
+    }
+
+    /**
+     * Exports a [MacroSet] into an AES-256-GCM encrypted `.wjm` bundle playable exclusively in Wjust Player.
+     */
+    fun exportMacroSetWjm(
+        set: MacroSet,
+        output: OutputStream,
+        singleUseImport: Boolean = false
+    ): ExportSummary {
+        val latestSet = getMacroSetById(set.id) ?: set
+        val members = _macros.value
+            .filter { it.setId == latestSet.id }
+            .map(::ensureExportSourceResolution)
+        val res = MacroBundleCodec.writeEncryptedMacroSetWjm(
             set = latestSet,
             memberMacros = members,
             lookupMacro = { id -> getMacroById(id)?.let(::ensureExportSourceResolution) },
