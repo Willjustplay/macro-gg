@@ -540,7 +540,7 @@ object AutomationCoordinator {
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
             for (a in m.allActionsSequence()) {
-                if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction) return true
+                if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
                     val linkedSet = if (linked != null) localStore.getMacroSetById(linked.setId) else null

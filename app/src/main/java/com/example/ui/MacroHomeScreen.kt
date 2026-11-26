@@ -102,6 +102,7 @@ import com.example.data.MacroSet
 import com.example.data.RecordAction
 import com.example.data.ResolutionScaler
 import com.example.data.TextAction
+import com.example.data.allActionsSequence
 import com.example.data.countActions
 import com.example.data.countStuckActions
 import com.example.data.walk
@@ -1564,10 +1565,23 @@ private fun MacroListCard(
     onDelete: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    val allActions = remember(macro) { macro.actions.walk().toList() }
-    val hasImage = allActions.any { it is ImageAction || it is com.example.data.TrackObjectAction }
-    val hasText = allActions.any { it is TextAction }
-    val hasColor = allActions.any { it is ColorAction }
+    val allActions = remember(macro) { macro.allActionsSequence().toList() }
+    val hasImage = allActions.any {
+        it is ImageAction ||
+            it is com.example.data.TrackObjectAction ||
+            (it is com.example.data.BranchRouterAction && it.rules.any { r -> r.conditionType == com.example.data.BranchConditionType.IMAGE })
+    }
+    val hasText = allActions.any {
+        it is TextAction ||
+            (it is com.example.data.BranchRouterAction && it.rules.any { r -> r.conditionType == com.example.data.BranchConditionType.TEXT })
+    }
+    val hasColor = allActions.any {
+        it is ColorAction ||
+            (it is com.example.data.BranchRouterAction && it.rules.any { r -> r.conditionType == com.example.data.BranchConditionType.COLOR })
+    }
+    val hasBranch = macro.branches.isNotEmpty() || allActions.any {
+        it is com.example.data.BranchRouterAction || it is com.example.data.GoToBranchAction
+    }
     val hasRecord = allActions.any { it is RecordAction }
     val hasRandom = allActions.any { it.chancePercent < 100 }
     val stuckActionCount = remember(macro) { macro.countStuckActions() }
@@ -1791,12 +1805,13 @@ private fun MacroListCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (hasBranch) FeatureTag("Cabang", Color(0xFF06B6D4))
                     if (hasImage) FeatureTag("Gambar", Color(0xFF10B981))
                     if (hasText) FeatureTag("Teks", Color(0xFF22D3EE))
                     if (hasColor) FeatureTag("Warna", Color(0xFFA78BFA))
                     if (hasRecord) FeatureTag("Rekaman", Color(0xFFEF4444))
                     if (hasRandom) FeatureTag("🎲 Acak", Color(0xFFF59E0B))
-                    if (!hasImage && !hasText && !hasColor && !hasRecord && !hasRandom) FeatureTag("Clicker", Color(0xFF22D3EE))
+                    if (!hasBranch && !hasImage && !hasText && !hasColor && !hasRecord && !hasRandom) FeatureTag("Clicker", Color(0xFF22D3EE))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(

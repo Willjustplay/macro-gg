@@ -3,6 +3,7 @@ package com.willjustplay.wjustplayer.data
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import com.example.data.Action
 import com.example.data.FinishMacroAction
 import com.example.data.Macro
 import com.example.data.MacroBundleCodec
@@ -329,26 +330,20 @@ class PlayerStore private constructor(context: Context) {
         for (incoming in decoded.macros) {
             val existing = matchedExisting[incoming.id]
             val finalSetId = if (incoming.setId.isNotBlank()) setFinalIdMap[incoming.setId] ?: incoming.setId else ""
+            fun relinkList(list: List<Action>) = list.mapAllActions { a ->
+                when {
+                    a is RunMacroAction && a.targetMacroId in finalIdMap ->
+                        a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
+                    a is FinishMacroAction && a.targetMacroId in finalIdMap ->
+                        a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
+                    else -> a
+                }
+            }
             val relinked = incoming.copy(
                 setId = finalSetId,
-                actions = incoming.actions.mapAllActions { a ->
-                    when {
-                        a is RunMacroAction && a.targetMacroId in finalIdMap ->
-                            a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
-                        a is FinishMacroAction && a.targetMacroId in finalIdMap ->
-                            a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
-                        else -> a
-                    }
-                },
-                stuckActions = incoming.stuckActions.mapAllActions { a ->
-                    when {
-                        a is RunMacroAction && a.targetMacroId in finalIdMap ->
-                            a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
-                        a is FinishMacroAction && a.targetMacroId in finalIdMap ->
-                            a.copy(targetMacroId = finalIdMap[a.targetMacroId]!!)
-                        else -> a
-                    }
-                }
+                actions = relinkList(incoming.actions),
+                branches = incoming.branches.map { b -> b.copy(actions = relinkList(b.actions)) },
+                stuckActions = relinkList(incoming.stuckActions)
             )
             if (existing != null) {
                 val res = MacroSecurity.mergeOverwrittenMacro(existing, relinked, now)

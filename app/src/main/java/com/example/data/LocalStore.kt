@@ -202,6 +202,7 @@ class LocalStore(context: Context) {
             name = "${macro.name} (Salinan)",
             logoImage = copiedLogo,
             actions = macro.actions.cloneWithRemappedIds(),
+            branches = macro.branches.map { b -> b.copy(actions = b.actions.cloneWithRemappedIds()) },
             stuckActions = macro.stuckActions.cloneWithRemappedIds(),
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
@@ -432,6 +433,7 @@ class LocalStore(context: Context) {
                     oneTimeImportToken = "",
                     oneTimeImportSeal = "",
                     actions = remapList(m.actions),
+                    branches = m.branches.map { b -> b.copy(actions = remapList(b.actions)) },
                     stuckActions = remapList(m.stuckActions),
                     createdAt = now,
                     updatedAt = now
@@ -625,13 +627,29 @@ class LocalStore(context: Context) {
         if (oldNormalized == newNormalized) return
         fun rewriteList(list: List<Action>) = list.mapAllActions { a ->
             when (a) {
-                is ImageAction -> if (normalizeImageName(a.imageName) == oldNormalized) a.copy(imageName = newNormalized) else a
+                is ImageAction -> {
+                    val primary = if (normalizeImageName(a.imageName) == oldNormalized) newNormalized else a.imageName
+                    val banned = a.bannedImages.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it }
+                    if (primary != a.imageName || banned != a.bannedImages) {
+                        a.copy(imageName = primary, bannedImages = banned)
+                    } else a
+                }
                 is TrackObjectAction -> {
                     val primary = if (normalizeImageName(a.imageName) == oldNormalized) newNormalized else a.imageName
                     val extras = a.extraImageNames.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it }
                     if (primary != a.imageName || extras != a.extraImageNames) {
                         a.copy(imageName = primary, extraImageNames = extras)
                     } else a
+                }
+                is BranchRouterAction -> {
+                    var changed = false
+                    val nextRules = a.rules.map { r ->
+                        if (r.conditionType == BranchConditionType.IMAGE && normalizeImageName(r.imageName) == oldNormalized) {
+                            changed = true
+                            r.copy(imageName = newNormalized)
+                        } else r
+                    }
+                    if (changed) a.copy(rules = nextRules) else a
                 }
                 else -> a
             }
@@ -640,6 +658,7 @@ class LocalStore(context: Context) {
             if (m.imageNames().any { normalizeImageName(it) == oldNormalized }) {
                 val updated = m.copy(
                     actions = rewriteList(m.actions),
+                    branches = m.branches.map { b -> b.copy(actions = rewriteList(b.actions)) },
                     stuckActions = rewriteList(m.stuckActions)
                 )
                 saveMacro(updated)
@@ -1141,6 +1160,7 @@ class LocalStore(context: Context) {
             val relinked = incoming.copy(
                 setId = resolvedSetId,
                 actions = relinkList(incoming.actions),
+                branches = incoming.branches.map { b -> b.copy(actions = relinkList(b.actions)) },
                 stuckActions = relinkList(incoming.stuckActions)
             )
             if (existing != null) {

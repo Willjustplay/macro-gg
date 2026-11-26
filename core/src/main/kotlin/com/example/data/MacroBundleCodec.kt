@@ -399,6 +399,7 @@ object MacroBundleCodec {
                 originId = macro.originId.ifBlank { macro.id },
                 setId = "",
                 actions = macro.actions.cloneWithRemappedIds(),
+                branches = macro.branches.map { b -> b.copy(actions = b.actions.cloneWithRemappedIds()) },
                 stuckActions = macro.stuckActions.cloneWithRemappedIds()
             )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
@@ -498,6 +499,7 @@ object MacroBundleCodec {
                 originId = m.originId.ifBlank { m.id },
                 setId = if (m.setId.isNotBlank()) setIdRemap[m.setId].orEmpty() else "",
                 actions = remapList(m.actions),
+                branches = m.branches.map { b -> b.copy(actions = remapList(b.actions)) },
                 stuckActions = remapList(m.stuckActions)
             )
         }

@@ -20,6 +20,10 @@ import android.widget.TextView
 import android.widget.Toast
 import com.example.data.Action
 import com.example.data.ActionKind
+import com.example.data.BannedImageMode
+import com.example.data.BranchNavigationMode
+import com.example.data.BranchOutcomeAction
+import com.example.data.BranchRouterAction
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
@@ -27,6 +31,7 @@ import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
 import com.example.data.FinishMacroAction
 import com.example.data.FinishMacroMode
+import com.example.data.GoToBranchAction
 import com.example.data.ImageAction
 import com.example.data.JumpAction
 import com.example.data.JumpMode
@@ -54,6 +59,7 @@ import com.example.data.TrackInteractionMode
 import com.example.data.TrackObjectAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
+import com.example.data.branchDisplayName
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.findAction
@@ -1004,6 +1010,7 @@ class OverlayMacroSettingsView(
 
         val kinds = listOf(
             ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
+            ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
             ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
             ActionKind.CLICK, ActionKind.LONG_PRESS,
             ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
@@ -1193,6 +1200,7 @@ class OverlayMacroSettingsView(
                 var threshold = action.threshold
                 var foundMode = action.foundMode
                 var notFoundMode = action.notFound
+                var bannedMode = action.bannedMode
 
                 // Crop new & Re-crop existing buttons
                 val cropRow = LinearLayout(context).apply {
@@ -1250,8 +1258,37 @@ class OverlayMacroSettingsView(
                     textSize = 11.5f
                 }
                 bodyContainer.addView(clickCheck)
+                val clickCountF = addNumberRow(bodyContainer, "Jumlah klik berulang (1-50)", action.clickCount.toString())
+                val clickIntF = addNumberRow(bodyContainer, "Jeda antar klik berulang (ms)", action.clickIntervalMs.toString())
+                val clickDurF = addNumberRow(bodyContainer, "Durasi tekan klik (ms)", action.clickDurationMs.toString())
                 val oxF = addSignedNumberRow(bodyContainer, "Offset X (px)", action.offsetX.toString())
                 val oyF = addSignedNumberRow(bodyContainer, "Offset Y (px)", action.offsetY.toString())
+                if (action.bannedImages.isNotEmpty()) {
+                    bodyContainer.addView(TextView(context).apply {
+                        text = "⛔ ${action.bannedImages.size} gambar terlarang aktif (${bannedMode.shortLabel}) — atur daftar lengkap di editor aplikasi."
+                        setTextColor(Color.parseColor("#FCA5A5"))
+                        textSize = 10.5f
+                        setPadding(0, dp(2), 0, dp(4))
+                    })
+                    val bmBtns = mutableListOf<Pair<BannedImageMode, TextView>>()
+                    val bmRow = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    BannedImageMode.entries.forEachIndexed { idx, bm ->
+                        val tv = makeBtn(bm.shortLabel, if (bm == bannedMode) "#DC2626" else "#1E293B", marginEndDp = 0) {
+                            bannedMode = bm
+                            bmBtns.forEach { (m, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == bannedMode) "#DC2626" else "#1E293B"))
+                            }
+                        }
+                        bmBtns += bm to tv
+                        bmRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < BannedImageMode.entries.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(bmRow)
+                }
                 addBranchModePicker("Setelah cabang Ditemukan:", foundMode) { foundMode = it }
                 addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
 
@@ -1295,8 +1332,12 @@ class OverlayMacroSettingsView(
                             timeoutMs = (timeoutF.text.toString().toLongOrNull() ?: imgCur.timeoutMs).coerceAtLeast(0L),
                             delayAfterMs = (delayF.text.toString().toLongOrNull() ?: imgCur.delayAfterMs).coerceAtLeast(0L),
                             clickOnFound = clickCheck.isChecked,
+                            clickCount = (clickCountF.text.toString().toIntOrNull() ?: imgCur.clickCount).coerceIn(1, 50),
+                            clickIntervalMs = (clickIntF.text.toString().toLongOrNull() ?: imgCur.clickIntervalMs).coerceIn(10L, 10_000L),
+                            clickDurationMs = (clickDurF.text.toString().toLongOrNull() ?: imgCur.clickDurationMs).coerceIn(10L, 5000L),
                             offsetX = oxF.text.toString().toIntOrNull() ?: imgCur.offsetX,
                             offsetY = oyF.text.toString().toIntOrNull() ?: imgCur.offsetY,
+                            bannedMode = bannedMode,
                             foundMode = foundMode,
                             notFound = notFoundMode,
                             region = newRegion
@@ -2246,6 +2287,97 @@ class OverlayMacroSettingsView(
                 }
             }
 
+            is GoToBranchAction -> {
+                var targetId = action.targetBranchId
+                var targetName = action.targetBranchName
+                var navMode = action.mode
+
+                bodyContainer.addView(sectionLabel("Cabang Tujuan"))
+                val branchChoices = listOf("" to "Jalur Utama") + macro.branches.map { it.id to it.name }
+                val branchBtns = mutableListOf<Pair<String, TextView>>()
+                branchChoices.chunked(2).forEach { pair ->
+                    val r = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    pair.forEachIndexed { idx, (bid, bname) ->
+                        val tv = makeBtn(bname, if (bid == targetId) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                            targetId = bid
+                            targetName = bname
+                            branchBtns.forEach { (id, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (id == targetId) "#0284C7" else "#1E293B"))
+                            }
+                        }
+                        branchBtns += bid to tv
+                        r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(r)
+                }
+
+                bodyContainer.addView(sectionLabel("Mode Perpindahan"))
+                val navBtns = mutableListOf<Pair<BranchNavigationMode, TextView>>()
+                val navRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                BranchNavigationMode.entries.forEachIndexed { idx, m ->
+                    val tv = makeBtn(m.shortLabel, if (m == navMode) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                        navMode = m
+                        navBtns.forEach { (modeItem, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (modeItem == navMode) "#0284C7" else "#1E293B"))
+                        }
+                    }
+                    navBtns += m to tv
+                    navRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < BranchNavigationMode.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(navRow)
+
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    saveEdited {
+                        action.copy(
+                            targetBranchId = targetId,
+                            targetBranchName = targetName,
+                            mode = navMode,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is BranchRouterAction -> {
+                val timeoutF = addNumberRow(bodyContainer, "Batas waktu cek (ms)", action.timeoutMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Terpasang ${action.rules.size} kondisi rute • Fallback: ${action.fallbackOutcome.shortLabel}" +
+                        if (action.fallbackOutcome == BranchOutcomeAction.SWITCH_BRANCH || action.fallbackOutcome == BranchOutcomeAction.CALL_BRANCH_RETURN) {
+                            " → ${macro.branchDisplayName(action.fallbackBranchId)}"
+                        } else ""
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11f
+                    setPadding(0, dp(4), 0, dp(4))
+                })
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Untuk menambah/mengubah daftar kondisi gambar/teks/warna secara lengkap, buka editor macro di aplikasi utama."
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 10.5f
+                    setPadding(0, 0, 0, dp(6))
+                })
+                addSaveActionBtn {
+                    saveEdited { cur ->
+                        val br = (cur as? BranchRouterAction) ?: action
+                        br.copy(
+                            timeoutMs = (timeoutF.text.toString().toLongOrNull() ?: br.timeoutMs).coerceAtLeast(0L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: br.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
             is RestartAction, is StopAction -> {
                 bodyContainer.addView(TextView(context).apply {
                     text = "Aksi kontrol alur (dapat diatur peluang Random Event di atas)."
@@ -2443,30 +2575,34 @@ class OverlayMacroSettingsView(
         })
         var current = initial
         val btns = mutableListOf<Pair<NotFoundMode, TextView>>()
-        val row = LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
-        }
         val shortLabels = mapOf(
             NotFoundMode.CONTINUE to "Lanjut",
+            NotFoundMode.SWITCH_BRANCH to "Pindah Cbg",
+            NotFoundMode.CALL_BRANCH_RETURN to "Singgah",
             NotFoundMode.RESTART to "Ulangi",
             NotFoundMode.FINISH to "Selesai",
             NotFoundMode.STOP to "Stop"
         )
-        NotFoundMode.entries.forEachIndexed { idx, mode ->
-            val b = makeBtn(shortLabels[mode] ?: mode.label, if (mode == current) "#0284C7" else "#1E293B", marginEndDp = 0) {
-                current = mode
-                onSelect(mode)
-                btns.forEach { (m, tv) ->
-                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == current) "#0284C7" else "#1E293B"))
-                }
+        NotFoundMode.entries.chunked(3).forEach { chunk ->
+            val row = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
             }
-            btns += mode to b
-            row.addView(b, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = if (idx < NotFoundMode.entries.lastIndex) dp(4) else 0
-            })
+            chunk.forEachIndexed { idx, mode ->
+                val b = makeBtn(shortLabels[mode] ?: mode.label, if (mode == current) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                    current = mode
+                    onSelect(mode)
+                    btns.forEach { (m, tv) ->
+                        (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (m == current) "#0284C7" else "#1E293B"))
+                    }
+                }
+                btns += mode to b
+                row.addView(b, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = if (idx < chunk.lastIndex) dp(4) else 0
+                })
+            }
+            bodyContainer.addView(row)
         }
-        bodyContainer.addView(row)
     }
 
     private fun addSaveActionBtn(onClick: () -> Unit) {

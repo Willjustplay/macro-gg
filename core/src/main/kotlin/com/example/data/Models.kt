@@ -17,9 +17,59 @@ data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) 
 @Serializable
 enum class NotFoundMode(val label: String) {
     CONTINUE("Lanjut ke aksi berikutnya"),
+    SWITCH_BRANCH("Pindah ke jalur cabang (permanen)"),
+    CALL_BRANCH_RETURN("Singgah ke jalur cabang lalu kembali"),
     RESTART("Ulangi macro dari awal"),
     FINISH("Selesaikan macro (ke macro aktif)"),
     STOP("Hentikan macro")
+}
+
+/** How [ImageAction] handles banned/forbidden images that must NOT be clicked. */
+@Serializable
+enum class BannedImageMode(val label: String, val shortLabel: String, val description: String) {
+    AVOID_MATCH_AREA(
+        "Hindari Area Gambar Terlarang",
+        "Hindari Area",
+        "Jangan klik target yang dekat/tumpang tindih dengan gambar terlarang — otomatis cari target lain yang aman."
+    ),
+    BLOCK_IF_PRESENT(
+        "Batalkan Jika Muncul di Layar",
+        "Blokir Layar",
+        "Jika gambar terlarang terdeteksi di mana saja pada area pencarian, batalkan klik dan langsung ke cabang Tidak Ditemukan."
+    )
+}
+
+/** How [GoToBranchAction] routes execution to a named sequence branch. */
+@Serializable
+enum class BranchNavigationMode(val label: String, val shortLabel: String, val description: String) {
+    SWITCH(
+        "Pindah Permanen ke Jalur Tujuan",
+        "Pindah",
+        "Mengubah arah langsung ke jalur tujuan sampai selesai."
+    ),
+    CALL_AND_RETURN(
+        "Singgah ke Jalur Tujuan lalu Kembali",
+        "Singgah & Kembali",
+        "Jalankan seluruh langkah di jalur tujuan lalu otomatis kembali melanjutkan aksi berikutnya."
+    )
+}
+
+/** Condition type evaluated inside a [BranchRouteRule]. */
+@Serializable
+enum class BranchConditionType(val label: String) {
+    IMAGE("Gambar"),
+    TEXT("Teks / Nilai"),
+    COLOR("Warna Piksel")
+}
+
+/** Action taken when a [BranchRouteRule] matches (or when no rule matches as fallback). */
+@Serializable
+enum class BranchOutcomeAction(val label: String, val shortLabel: String) {
+    CONTINUE("Lanjut langkah berikutnya", "Lanjut"),
+    SWITCH_BRANCH("Pindah jalur (permanen)", "Pindah Jalur"),
+    CALL_BRANCH_RETURN("Singgah jalur lalu kembali", "Singgah"),
+    RESTART_MACRO("Ulangi macro dari awal", "Ulangi"),
+    STOP_MACRO("Hentikan macro", "Stop")
 }
 
 /** How [FinishMacroAction] hands control back to an active macro without stopping the running engine. */
@@ -288,12 +338,30 @@ data class ImageAction(
     val region: Region? = null,
     /** Tap the center of the found image automatically. */
     val clickOnFound: Boolean = true,
+    /** Number of repeated clicks when [clickOnFound] is true (1..50). */
+    val clickCount: Int = 1,
+    /** Interval delay in ms between repeated clicks when [clickCount] > 1. */
+    val clickIntervalMs: Long = 100L,
+    /** Press hold duration in ms for each click on the matched image. */
+    val clickDurationMs: Long = 50L,
     val offsetX: Int = 0,
     val offsetY: Int = 0,
+    /** Optional list of forbidden/banned image template names to avoid clicking. */
+    val bannedImages: List<String> = emptyList(),
+    /** Similarity threshold 0.5..1.0 for detecting [bannedImages]. */
+    val bannedThreshold: Float = 0.80f,
+    /** Strategy when any image in [bannedImages] is detected on screen. */
+    val bannedMode: BannedImageMode = BannedImageMode.AVOID_MATCH_AREA,
+    /** Safety avoidance radius (authoring px) around each detected banned image in AVOID_MATCH_AREA mode. */
+    val bannedAvoidRadiusPx: Int = 60,
     val thenActions: List<Action> = emptyList(),
     val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    /** Target branch ID when [foundMode] is SWITCH_BRANCH or CALL_BRANCH_RETURN (empty = Jalur Utama). */
+    val foundBranchId: String = "",
     val elseActions: List<Action> = emptyList(),
-    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    /** Target branch ID when [notFound] is SWITCH_BRANCH or CALL_BRANCH_RETURN (empty = Jalur Utama). */
+    val notFoundBranchId: String = ""
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
@@ -361,8 +429,10 @@ data class TrackObjectAction(
     val trackRadiusPx: Int = 240,
     val thenActions: List<Action> = emptyList(),
     val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val foundBranchId: String = "",
     val elseActions: List<Action> = emptyList(),
-    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    val notFoundBranchId: String = ""
 ) : Action() {
     /** All configured unique non-blank template image names (primary + extra animation frames). */
     fun allTemplateNames(): List<String> =
@@ -393,8 +463,10 @@ data class ColorAction(
     val clickOnFound: Boolean = true,
     val thenActions: List<Action> = emptyList(),
     val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val foundBranchId: String = "",
     val elseActions: List<Action> = emptyList(),
-    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    val notFoundBranchId: String = ""
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
@@ -435,8 +507,10 @@ data class TextAction(
     val clickOnFound: Boolean = false,
     val thenActions: List<Action> = emptyList(),
     val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val foundBranchId: String = "",
     val elseActions: List<Action> = emptyList(),
-    val notFound: NotFoundMode = NotFoundMode.CONTINUE
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    val notFoundBranchId: String = ""
 ) : Action() {
     override fun withEnabled(value: Boolean) = copy(enabled = value)
     override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
@@ -622,11 +696,98 @@ data class LaunchAppAction(
     override fun withNewIds() = copy(id = newId())
 }
 
+/**
+ * Directly routes execution to another named [MacroBranch] (or back to Jalur Utama when [targetBranchId] is blank).
+ */
+@Serializable
+@SerialName("goto_branch")
+data class GoToBranchAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 0,
+    override val chancePercent: Int = 100,
+    /** Target [MacroBranch.id], or empty string for Jalur Utama. */
+    val targetBranchId: String = "",
+    /** Cached human-readable branch name for summary display. */
+    val targetBranchName: String = "",
+    val mode: BranchNavigationMode = BranchNavigationMode.SWITCH
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/** Single multi-condition routing rule evaluated inside [BranchRouterAction]. */
+@Serializable
+data class BranchRouteRule(
+    val id: String = newId(),
+    val label: String = "",
+    val conditionType: BranchConditionType = BranchConditionType.IMAGE,
+    /** Template filename when [conditionType] == IMAGE. */
+    val imageName: String = "",
+    val threshold: Float = 0.80f,
+    /** Tap matched target automatically when this rule matches. */
+    val clickOnFound: Boolean = false,
+    /** Expected text when [conditionType] == TEXT and text compare mode. */
+    val textQuery: String = "",
+    /** Numeric threshold when [conditionType] == TEXT and numeric compare mode. */
+    val targetNumber: Double = 0.0,
+    val compareMode: TextCompareMode = TextCompareMode.CONTAINS,
+    /** Pixel coordinates & hex color when [conditionType] == COLOR. */
+    val x: Int = 540,
+    val y: Int = 960,
+    val color: String = "#FFFFFF",
+    val tolerance: Int = 15,
+    /** Optional restricted scan region (null = full screen). */
+    val region: Region? = null,
+    val outcome: BranchOutcomeAction = BranchOutcomeAction.SWITCH_BRANCH,
+    /** Target [MacroBranch.id] (empty = Jalur Utama) when [outcome] is SWITCH_BRANCH or CALL_BRANCH_RETURN. */
+    val targetBranchId: String = "",
+    val targetBranchName: String = ""
+) {
+    fun withNewId(): BranchRouteRule = copy(id = newId())
+}
+
+/**
+ * Multi-condition sequence router: evaluates all [rules] against the same screenshot frame and
+ * immediately steers execution to the matching branch — or triggers [fallbackOutcome]/[fallbackBranchId]
+ * when the screen result does not match any rule within [timeoutMs].
+ */
+@Serializable
+@SerialName("branch_router")
+data class BranchRouterAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 200,
+    override val chancePercent: Int = 100,
+    val rules: List<BranchRouteRule> = emptyList(),
+    val timeoutMs: Long = 3000L,
+    val fallbackOutcome: BranchOutcomeAction = BranchOutcomeAction.SWITCH_BRANCH,
+    /** Target [MacroBranch.id] (empty = Jalur Utama) when none of [rules] match. */
+    val fallbackBranchId: String = "",
+    val fallbackBranchName: String = ""
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId(), rules = rules.map { it.withNewId() })
+}
+
+/** Named sequence branch stored inside a [Macro] alongside its main [Macro.actions] list. */
+@Serializable
+data class MacroBranch(
+    val id: String = newId(),
+    val name: String = "Cabang Baru",
+    val colorHex: String = "#F59E0B",
+    val actions: List<Action> = emptyList()
+)
+
 @Serializable
 data class Macro(
     val id: String = newId(),
     val name: String = "Macro Baru",
     val actions: List<Action> = emptyList(),
+    /** Optional named sequence branches inside this macro for clean multi-way flow routing. */
+    val branches: List<MacroBranch> = emptyList(),
     /** 0 = repeat forever. */
     val loopCount: Int = 1,
     val loopDelayMs: Long = 500,
@@ -735,10 +896,12 @@ enum class ActionKind(val label: String, val description: String) {
     SWIPE("Swipe", "Geser dari A ke B"),
     ZOOM("Zoom In/Out", "Cubit / perbesar 2 jari di layar"),
     WAIT("Tunggu", "Jeda beberapa saat"),
-    IMAGE("Deteksi Gambar", "Cari gambar di layar + aksi If/Else"),
+    IMAGE("Deteksi Gambar", "Cari gambar + klik berulang + hindari gambar terlarang"),
     TRACK_OBJECT("Kejar Objek Bergerak", "Lacak objek bergerak dari tangkapan gambar lalu Tap/Drag"),
     TEXT("Deteksi Teks & Nilai", "Baca teks / nilai (<, >, =) di layar + If/Else"),
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
+    BRANCH_ROUTER("Cek Hasil & Pilih Arah", "Cek banyak kondisi sekaligus lalu ubah arah jalur jika hasil tidak sesuai"),
+    GOTO_BRANCH("Pindah Jalur Cabang", "Pindah permanen atau singgah ke jalur cabang lalu kembali"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
     FINISH_MACRO("Selesaikan Macro", "Selesaikan macro pasif/sub-macro lalu switch ke macro aktif tanpa berhenti"),
@@ -761,6 +924,8 @@ val Action.kind: ActionKind
         is TrackObjectAction -> ActionKind.TRACK_OBJECT
         is TextAction -> ActionKind.TEXT
         is ColorAction -> ActionKind.COLOR
+        is BranchRouterAction -> ActionKind.BRANCH_ROUTER
+        is GoToBranchAction -> ActionKind.GOTO_BRANCH
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
         is FinishMacroAction -> ActionKind.FINISH_MACRO
@@ -787,7 +952,15 @@ fun Action.summary(): String {
         is SwipeAction -> "($x1,$y1) → ($x2,$y2)"
         is ZoomAction -> (if (zoomIn) "Zoom In" else "Zoom Out") + " ($cx,$cy) ${distancePx}px"
         is WaitAction -> "${durationMs}ms" + if (randomMs > 0) " +acak ${randomMs}ms" else ""
-        is ImageAction -> "${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%" + if (clickOnFound) " • klik" else ""
+        is ImageAction -> buildString {
+            append("${imageName.substringAfterLast('/').ifBlank { "(belum dipilih)" }} • ${(threshold * 100).toInt()}%")
+            if (clickOnFound) {
+                append(if (clickCount > 1) " • klik ${clickCount}×" else " • klik")
+            }
+            if (bannedImages.isNotEmpty()) {
+                append(" • ⛔${bannedImages.size} dilarang")
+            }
+        }
         is TrackObjectAction -> {
             if (trackAnyMotion) {
                 val area = if (region != null) " • area" else ""
@@ -809,6 +982,19 @@ fun Action.summary(): String {
             "$cond$area" + if (clickOnFound) " • klik" else ""
         }
         is ColorAction -> "$color di ($x, $y)" + if (clickOnFound) " • klik" else ""
+        is BranchRouterAction -> {
+            val fbTarget = fallbackBranchName.ifBlank { if (fallbackBranchId.isBlank()) "Utama" else "Cabang" }
+            val fbText = when (fallbackOutcome) {
+                BranchOutcomeAction.SWITCH_BRANCH -> "gagal→$fbTarget"
+                BranchOutcomeAction.CALL_BRANCH_RETURN -> "gagal→singgah $fbTarget"
+                else -> "gagal→${fallbackOutcome.shortLabel}"
+            }
+            "${rules.size} kondisi • $fbText"
+        }
+        is GoToBranchAction -> {
+            val dest = targetBranchName.ifBlank { if (targetBranchId.isBlank()) "Jalur Utama" else "Cabang" }
+            "${mode.shortLabel} → $dest"
+        }
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
         is FinishMacroAction -> when (mode) {
@@ -861,6 +1047,19 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.TRACK_OBJECT -> TrackObjectAction(imageName = imageName, targetX = cx, targetY = cy)
         ActionKind.TEXT -> TextAction(region = null)
         ActionKind.COLOR -> ColorAction(x = cx, y = cy, color = "#FFFFFF")
+        ActionKind.BRANCH_ROUTER -> BranchRouterAction(
+            rules = listOf(
+                BranchRouteRule(
+                    label = "Kondisi 1",
+                    conditionType = BranchConditionType.IMAGE,
+                    imageName = imageName,
+                    x = cx,
+                    y = cy,
+                    outcome = BranchOutcomeAction.CONTINUE
+                )
+            )
+        )
+        ActionKind.GOTO_BRANCH -> GoToBranchAction()
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
         ActionKind.FINISH_MACRO -> FinishMacroAction()
@@ -902,6 +1101,11 @@ internal fun Action.withMappedIds(idMap: Map<String, String>): Action {
             thenActions = thenActions.map { it.withMappedIds(idMap) },
             elseActions = elseActions.map { it.withMappedIds(idMap) }
         )
+        is BranchRouterAction -> copy(
+            id = mappedId,
+            rules = rules.map { it.withNewId() }
+        )
+        is GoToBranchAction -> copy(id = mappedId)
         is LoopAction -> copy(
             id = mappedId,
             actions = actions.map { it.withMappedIds(idMap) }
