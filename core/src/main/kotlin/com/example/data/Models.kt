@@ -804,6 +804,16 @@ data class Macro(
     val stuckActions: List<Action> = emptyList(),
     /** After [stuckActions] finish: true = restart main macro from step 1, false = continue where left off. */
     val stuckRestartAfter: Boolean = true,
+    /** Always-active Banned Image Guard (like Watchdog): blocks clicking onto any image in [bannedImages] across all actions. */
+    val bannedGuardEnabled: Boolean = false,
+    /** Global list of forbidden/banned image template names blocked from being clicked anywhere in this macro. */
+    val bannedImages: List<String> = emptyList(),
+    /** Similarity threshold 0.5..1.0 for detecting global [bannedImages]. */
+    val bannedThreshold: Float = 0.80f,
+    /** Strategy for global [bannedImages]: AVOID_MATCH_AREA blocks clicks near/on banned image, BLOCK_IF_PRESENT blocks all clicks while visible. */
+    val bannedMode: BannedImageMode = BannedImageMode.AVOID_MATCH_AREA,
+    /** Safety blocked radius (authoring px) around each global banned image in AVOID_MATCH_AREA mode. */
+    val bannedAvoidRadiusPx: Int = 60,
     /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
     val logoImage: String = "",
     /** Optional [MacroSet.id] grouping this macro into a Macro Set (empty = ungrouped). */

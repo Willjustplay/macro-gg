@@ -15,6 +15,7 @@ import com.example.data.BranchRouterAction
 import com.example.data.ClickAction
 import com.example.data.GoToBranchAction
 import com.example.data.ImageAction
+import com.example.data.LongPressAction
 import com.example.data.Macro
 import com.example.data.MacroBranch
 import com.example.data.MacroBundleCodec
@@ -22,7 +23,9 @@ import com.example.data.NotFoundMode
 import com.example.data.RecordedGesture
 import com.example.data.Region
 import com.example.data.TextCompareMode
+import com.example.data.branchIdOfAction
 import com.example.data.imageNames
+import com.example.data.moveActionToBranch
 import com.example.vision.Frame
 import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
@@ -465,5 +468,164 @@ class BranchAndBannedImageTest {
         assertEquals(listOf("icon_bom.png"), restoredImg.bannedImages)
         assertArrayEquals(fakePngs["icon_bom.png"], decoded.images["icon_bom.png"])
         assertArrayEquals(fakePngs["bonus.png"], decoded.images["bonus.png"])
+    }
+
+    @Test
+    fun globalBannedGuard_avoidMatchAreaBlocksClickOnBannedImageAndIsFreeOnPlayStore() = runTest {
+        val screen = blankScreen(200, 200)
+        val bannedPatch = makePatternFrame(24, 24, seed = 2)
+        stamp(screen, bannedPatch, 40, 40)
+
+        val rt = FakeRuntime(
+            frameProvider = { screen },
+            templates = mapOf("banned.png" to PreparedTemplate("banned.png", bannedPatch))
+        )
+        val macro = Macro(
+            loopCount = 1,
+            sourceWidth = 200,
+            sourceHeight = 200,
+            bannedGuardEnabled = true,
+            bannedImages = listOf("banned.png"),
+            bannedThreshold = 0.80f,
+            bannedMode = BannedImageMode.AVOID_MATCH_AREA,
+            bannedAvoidRadiusPx = 25,
+            actions = listOf(
+                ClickAction(x = 52, y = 52, delayAfterMs = 0),
+                ClickAction(x = 170, y = 170, delayAfterMs = 0)
+            )
+        )
+
+        // Always-active Global Banned Guard must remain 100% FREE on Play Store!
+        assertNull(PremiumFeatureGate.checkMacroRun(macro, isPremium = false))
+
+        MacroRunner(rt).run(macro)
+
+        assertEquals(listOf(170 to 170), rt.clicks.map { it.first to it.second })
+        assertTrue(rt.logs.any { it.contains("DIBLOKIR") })
+    }
+
+    @Test
+    fun globalBannedGuard_blockIfPresentBlocksClickAndLongPressAnywhereOnScreen() = runTest {
+        val screen = blankScreen(200, 200)
+        val bannedPatch = makePatternFrame(24, 24, seed = 2)
+        stamp(screen, bannedPatch, 140, 140)
+
+        val rt = FakeRuntime(
+            frameProvider = { screen },
+            templates = mapOf("banned.png" to PreparedTemplate("banned.png", bannedPatch))
+        )
+        val macro = Macro(
+            loopCount = 1,
+            sourceWidth = 200,
+            sourceHeight = 200,
+            bannedGuardEnabled = true,
+            bannedImages = listOf("banned.png"),
+            bannedThreshold = 0.80f,
+            bannedMode = BannedImageMode.BLOCK_IF_PRESENT,
+            actions = listOf(
+                ClickAction(x = 15, y = 15, delayAfterMs = 0),
+                LongPressAction(x = 30, y = 30, durationMs = 400L, delayAfterMs = 0)
+            )
+        )
+
+        MacroRunner(rt).run(macro)
+
+        assertTrue("All clicks must be blocked when global BLOCK_IF_PRESENT image is visible", rt.clicks.isEmpty())
+    }
+
+    @Test
+    fun globalBannedGuard_integratesWithImageActionToAvoidBannedCopy() = runTest {
+        val screen = blankScreen(240, 160)
+        val targetPatch = makePatternFrame(24, 24, seed = 1)
+        val bannedPatch = makePatternFrame(24, 24, seed = 2)
+
+        stamp(screen, targetPatch, 30, 40)
+        stamp(screen, bannedPatch, 56, 40)
+        stamp(screen, targetPatch, 170, 90)
+
+        val rt = FakeRuntime(
+            frameProvider = { screen },
+            templates = mapOf(
+                "target.png" to PreparedTemplate("target.png", targetPatch),
+                "banned.png" to PreparedTemplate("banned.png", bannedPatch)
+            ),
+            screenWidth = 240,
+            screenHeight = 160
+        )
+        val macro = Macro(
+            loopCount = 1,
+            sourceWidth = 240,
+            sourceHeight = 160,
+            bannedGuardEnabled = true,
+            bannedImages = listOf("banned.png"),
+            bannedThreshold = 0.80f,
+            bannedMode = BannedImageMode.AVOID_MATCH_AREA,
+            bannedAvoidRadiusPx = 45,
+            actions = listOf(
+                ImageAction(
+                    imageName = "target.png",
+                    threshold = 0.80f,
+                    timeoutMs = 0,
+                    delayAfterMs = 0,
+                    clickOnFound = true
+                )
+            )
+        )
+
+        assertNull(PremiumFeatureGate.checkMacroRun(macro, isPremium = false))
+
+        MacroRunner(rt).run(macro)
+
+        assertEquals(1, rt.clicks.size)
+        val (cx, cy, _) = rt.clicks.single()
+        assertTrue("Expected safe click X near 182, got $cx", kotlin.math.abs(cx - 182) <= 3)
+        assertTrue("Expected safe click Y near 102, got $cy", kotlin.math.abs(cy - 102) <= 3)
+    }
+
+    @Test
+    fun moveActionToBranch_movesBetweenMainAndNamedBranchesAndZipBundlesGlobalBannedImages() {
+        val click1 = ClickAction(id = "a_move", x = 10, y = 20)
+        val click2 = ClickAction(id = "a_stay", x = 30, y = 40)
+        val initial = Macro(
+            id = "m_move_test",
+            name = "Move & Global Ban",
+            bannedGuardEnabled = true,
+            bannedImages = listOf("global_ban.png"),
+            bannedThreshold = 0.85f,
+            bannedMode = BannedImageMode.AVOID_MATCH_AREA,
+            bannedAvoidRadiusPx = 75,
+            actions = listOf(click1, click2),
+            branches = listOf(MacroBranch(id = "b_alt", name = "Alternatif"))
+        )
+
+        assertEquals("", initial.branchIdOfAction("a_move"))
+        val movedToAlt = initial.moveActionToBranch("a_move", "b_alt")
+        assertEquals(listOf("a_stay"), movedToAlt.actions.map { it.id })
+        assertEquals(listOf("a_move"), movedToAlt.branches.single().actions.map { it.id })
+        assertEquals("b_alt", movedToAlt.branchIdOfAction("a_move"))
+
+        val movedBack = movedToAlt.moveActionToBranch("a_move", "")
+        assertEquals(listOf("a_stay", "a_move"), movedBack.actions.map { it.id })
+        assertTrue(movedBack.branches.single().actions.isEmpty())
+        assertEquals("", movedBack.branchIdOfAction("a_move"))
+
+        assertEquals(setOf("global_ban.png"), movedBack.imageNames())
+        val fakePngs = mapOf("global_ban.png" to byteArrayOf(7, 8, 9, 10))
+        val out = ByteArrayOutputStream()
+        val exportRes = MacroBundleCodec.writeMacroZip(
+            root = movedBack,
+            lookupMacro = { null },
+            loadImage = { n -> fakePngs[n]?.let { n to it } },
+            output = out
+        )
+        assertEquals(1, exportRes.imagesExported)
+
+        val decoded = MacroBundleCodec.readBundle(out.toByteArray().inputStream())
+        val restored = decoded.macros.single()
+        assertTrue(restored.bannedGuardEnabled)
+        assertEquals(listOf("global_ban.png"), restored.bannedImages)
+        assertEquals(0.85f, restored.bannedThreshold)
+        assertEquals(75, restored.bannedAvoidRadiusPx)
+        assertArrayEquals(fakePngs["global_ban.png"], decoded.images["global_ban.png"])
     }
 }

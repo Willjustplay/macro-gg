@@ -231,7 +231,29 @@ fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
     else -> this
 }
 
+/** Returns "" if [actionId] belongs to Jalur Utama, the [MacroBranch.id] if in a branch, or null if in stuckActions / not found. */
+fun Macro.branchIdOfAction(actionId: String): String? = when {
+    actions.findAction(actionId) != null -> ""
+    else -> branches.firstOrNull { it.actions.findAction(actionId) != null }?.id
+}
+
+/** Moves [actionId] out of its current branch (or Jalur Utama) into [targetBranchId] (empty string = Jalur Utama). */
+fun Macro.moveActionToBranch(actionId: String, targetBranchId: String): Macro {
+    val found = findAnyAction(actionId) ?: return this
+    val cleanTarget = targetBranchId.trim()
+    if (cleanTarget.isNotBlank() && branches.none { it.id == cleanTarget }) return this
+    val currentBranch = branchIdOfAction(actionId)
+    if (currentBranch != null && currentBranch == cleanTarget &&
+        actionsForBranch(cleanTarget).any { it.id == actionId }
+    ) {
+        return this
+    }
+    val removed = removeAnyAction(actionId)
+    return removed.updateBranchActions(cleanTarget) { it + found }
+}
+
 fun Macro.imageNames(): Set<String> = buildSet {
+    bannedImages.filter { it.isNotBlank() }.forEach { add(it) }
     for (a in allActionsSequence()) {
         when (a) {
             is ImageAction -> {

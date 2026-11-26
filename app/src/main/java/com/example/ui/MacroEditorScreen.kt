@@ -118,6 +118,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.example.automation.FloatingOverlayService
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
@@ -147,6 +148,7 @@ import com.example.data.insertInto
 import com.example.data.isStuckAction
 import com.example.data.kind
 import com.example.data.moveAction
+import com.example.data.moveActionToBranch
 import com.example.data.newId
 import com.example.data.ownerListForAction
 import com.example.data.removeAction
@@ -185,11 +187,12 @@ fun MacroEditorScreen(
     isPremium: Boolean = false,
     onRequirePremium: (com.example.billing.PremiumFeature, String?) -> Unit = { _, _ -> }
 ) {
-    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi & Cabang Urutan, 1 = Anti-Macet (Watchdog)
+    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Alur/Aksi, 1 = Anti-Macet (PRO), 2 = Banned Guard (Gratis)
     var selectedBranchId by remember(macro.id) { mutableStateOf("") } // "" = Jalur Utama
     var showCreateBranchDialog by remember { mutableStateOf(false) }
     var editingBranch by remember { mutableStateOf<MacroBranch?>(null) }
     var pendingDeleteBranch by remember { mutableStateOf<MacroBranch?>(null) }
+    var movingBranchAction by remember { mutableStateOf<Action?>(null) }
     var editingAction by remember { mutableStateOf<Action?>(null) }
     var quickSwapImageAction by remember { mutableStateOf<Action?>(null) }
     var addTargetRef by remember { mutableStateOf<ContainerRef?>(null) }
@@ -210,7 +213,11 @@ fun MacroEditorScreen(
     val latestEditorTab by rememberUpdatedState(editorTab)
     val latestSelectedBranchId by rememberUpdatedState(selectedBranchId)
     var dragPreviewActions by remember(macro.id, editorTab, selectedBranchId) { mutableStateOf<List<Action>?>(null) }
-    val activeSourceList = if (editorTab == 0) macro.actionsForBranch(selectedBranchId) else macro.stuckActions
+    val activeSourceList = when (editorTab) {
+        0 -> macro.actionsForBranch(selectedBranchId)
+        1 -> macro.stuckActions
+        else -> emptyList()
+    }
     val displayedActions = dragPreviewActions ?: activeSourceList
 
     val listState = rememberLazyListState()
@@ -231,7 +238,7 @@ fun MacroEditorScreen(
         val cur = latestMacro
         if (latestEditorTab == 0) {
             latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId, block))
-        } else {
+        } else if (latestEditorTab == 1) {
             val wasEmpty = cur.stuckActions.isEmpty()
             val nextStuck = block(cur.stuckActions)
             latestOnUpdateMacro(
@@ -245,9 +252,11 @@ fun MacroEditorScreen(
     }
 
     fun previewReorder(ref: ContainerRef, fromIndex: Int, toIndex: Int) {
-        val current = dragPreviewActions ?: (
-            if (latestEditorTab == 0) latestMacro.actionsForBranch(latestSelectedBranchId) else latestMacro.stuckActions
-        )
+        val current = dragPreviewActions ?: when (latestEditorTab) {
+            0 -> latestMacro.actionsForBranch(latestSelectedBranchId)
+            1 -> latestMacro.stuckActions
+            else -> emptyList()
+        }
         val reordered = current.reorderInContainer(ref, fromIndex, toIndex)
         if (reordered !== current) {
             dragPreviewActions = reordered
@@ -263,7 +272,7 @@ fun MacroEditorScreen(
             if (pending != null && pending != curList) {
                 latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId) { pending })
             }
-        } else {
+        } else if (latestEditorTab == 1) {
             if (pending != null && pending != cur.stuckActions) {
                 latestOnUpdateMacro(cur.copy(stuckActions = pending))
             }
@@ -271,9 +280,11 @@ fun MacroEditorScreen(
     }
 
     fun checkRootSwap(actionId: String) {
-        val actionsList = dragPreviewActions ?: (
-            if (latestEditorTab == 0) latestMacro.actionsForBranch(latestSelectedBranchId) else latestMacro.stuckActions
-        )
+        val actionsList = dragPreviewActions ?: when (latestEditorTab) {
+            0 -> latestMacro.actionsForBranch(latestSelectedBranchId)
+            1 -> latestMacro.stuckActions
+            else -> emptyList()
+        }
         val fromIdx = actionsList.indexOfFirst { it.id == actionId }
         if (fromIdx < 0) return
 
@@ -402,23 +413,41 @@ fun MacroEditorScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { addTargetRef = ContainerRef.ROOT },
-                shape = RoundedCornerShape(16.dp),
-                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = {
-                    Text(
-                        when {
-                            editorTab != 0 -> "Tambah Aksi Anti-Macet"
-                            selectedBranch != null -> "Tambah ke ${selectedBranch.name}"
-                            else -> "Tambah Aksi"
-                        },
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            )
+            if (editorTab == 2) {
+                ExtendedFloatingActionButton(
+                    onClick = { onLaunchCropOverlay(macro, FloatingOverlayService.TARGET_ADD_BANNED_IMAGE) },
+                    shape = RoundedCornerShape(16.dp),
+                    containerColor = Color(0xFFDC2626),
+                    contentColor = Color.White,
+                    icon = { Icon(Icons.Filled.Crop, contentDescription = null) },
+                    text = {
+                        Text(
+                            "Crop Banned",
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                )
+            } else {
+                ExtendedFloatingActionButton(
+                    onClick = { addTargetRef = ContainerRef.ROOT },
+                    shape = RoundedCornerShape(16.dp),
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = {
+                        Text(
+                            when {
+                                editorTab == 1 -> "Tambah Aksi Anti-Macet"
+                                selectedBranch != null -> "Tambah ke ${selectedBranch.name}"
+                                else -> "Tambah Aksi"
+                            },
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                )
+            }
         }
     ) { padding ->
         LazyColumn(
@@ -429,16 +458,17 @@ fun MacroEditorScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Mode Switcher: Aksi Utama vs Aksi Anti-Macet (Watchdog di luar aksi utama)
+            // Mode Switcher: Aksi/Alur vs Anti-Macet (PRO) vs Banned Guard (Gratis & Selalu Aktif)
             item(key = "editor_tab_switcher") {
                 val mainTabLabel = if (macro.branches.isEmpty()) {
-                    "Aksi Utama (${macro.actions.size})"
+                    "Aksi (${macro.actions.size})"
                 } else {
-                    "Alur (${macro.actions.size} + ${macro.branches.size} cbg)"
+                    "Alur (${macro.actions.size}+${macro.branches.size})"
                 }
                 val tabLabels = listOf(
                     mainTabLabel,
-                    if (isPremium) "Anti-Macet (${macro.stuckActions.size})" else "🔒 Anti-Macet (PRO)"
+                    if (isPremium) "Macet (${macro.stuckActions.size})" else "🔒 Macet",
+                    "⛔ Ban (${macro.bannedImages.size})"
                 )
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     tabLabels.forEachIndexed { idx, label ->
@@ -454,7 +484,7 @@ fun MacroEditorScreen(
                             },
                             shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabLabels.size)
                         ) {
-                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
@@ -658,7 +688,7 @@ fun MacroEditorScreen(
                         }
                     }
                 }
-            } else {
+            } else if (editorTab == 1) {
                 // Watchdog Anti-Macet Configuration Card (out-of-band recovery actions)
                 item(key = "watchdog_config") {
                     val watchdogActive = macro.autoRecoverStuckSec > 0 && macro.stuckRecoveryMode == StuckRecoveryMode.RUN_WATCHDOG_ACTIONS
@@ -808,9 +838,22 @@ fun MacroEditorScreen(
                         }
                     }
                 }
+            } else {
+                // Always-Active Banned Image Guard (Watchdog-style click blocker, 100% FREE on Play Store)
+                item(key = "banned_guard_tab") {
+                    MacroBannedGuardCard(
+                        macro = macro,
+                        images = images,
+                        imageFolders = imageFolders,
+                        onUpdateMacro = onUpdateMacro,
+                        onCropNewBannedImage = {
+                            onLaunchCropOverlay(macro, FloatingOverlayService.TARGET_ADD_BANNED_IMAGE)
+                        }
+                    )
+                }
             }
 
-            if (displayedActions.size >= 2) {
+            if (editorTab != 2 && displayedActions.size >= 2) {
                 item(key = "drag_hint") {
                     Row(
                         modifier = Modifier
@@ -834,7 +877,7 @@ fun MacroEditorScreen(
                 }
             }
 
-            if (displayedActions.isEmpty()) {
+            if (editorTab != 2 && displayedActions.isEmpty()) {
                 item(key = "empty") {
                     Card(
                         modifier = Modifier
@@ -852,15 +895,19 @@ fun MacroEditorScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                if (editorTab == 0) "Belum ada aksi utama" else "Belum ada aksi Anti-Macet",
+                                when {
+                                    editorTab != 0 -> "Belum ada aksi Anti-Macet"
+                                    selectedBranch != null -> "Belum ada aksi di cabang '${selectedBranch.name}'"
+                                    else -> "Belum ada aksi utama"
+                                },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                if (editorTab == 0) {
-                                    "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Deteksi Teks/Nilai, Deteksi Warna, Keluar/Masuk Aplikasi, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan'."
-                                } else {
-                                    "Aksi di sini terpisah dari aksi utama dan otomatis aktif saat aksi utama macet. Ketuk 'Tambah Template' di atas atau '+ Tambah Aksi Anti-Macet' di bawah."
+                                when {
+                                    editorTab != 0 -> "Aksi di sini terpisah dari aksi utama dan otomatis aktif saat aksi utama macet. Ketuk 'Tambah Template' di atas atau '+ Tambah Aksi Anti-Macet' di bawah."
+                                    selectedBranch != null -> "Tambahkan langkah alternatif yang ingin dijalankan ketika macro berbelok ke cabang ini. Setelah selesai, Anda bisa menambahkan 'Pindah Cabang' kembali ke Jalur Utama."
+                                    else -> "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Swipe, Deteksi Gambar, atau fitur PRO (Cek Hasil & Pilih Arah, Pindah Cabang, Deteksi Teks/Warna, dll)."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -868,7 +915,7 @@ fun MacroEditorScreen(
                         }
                     }
                 }
-            } else {
+            } else if (editorTab != 2) {
                 itemsIndexed(displayedActions, key = { _, a -> a.id }) { index, action ->
                     val isDragging = draggingRootId == action.id
                     val dragHandleMod = if (displayedActions.size > 1) {
@@ -937,6 +984,14 @@ fun MacroEditorScreen(
                             mutateActions { it.updateAction(id) { a -> a.withEnabled(enabled) } }
                         },
                         onMove = { id, delta -> mutateActions { it.moveAction(id, delta) } },
+                        onMoveToBranch = if (editorTab == 0) { act ->
+                            if (!isPremium) {
+                                onRequirePremium(com.example.billing.PremiumFeature.BRANCH_ROUTING, null)
+                            } else {
+                                movingBranchAction = act
+                            }
+                        } else null,
+                        moveToBranchLabel = if (isPremium) "Pindah ke Cabang..." else "Pindah ke Cabang (PRO)",
                         onPreviewReorder = ::previewReorder,
                         onCommitReorder = ::commitDragPreview,
                         onDuplicate = { id -> mutateActions { it.duplicateAction(id) } },
@@ -1113,6 +1168,31 @@ fun MacroEditorScreen(
         )
     }
 
+    // Move Action to Branch Dialog (PRO)
+    movingBranchAction?.let { act ->
+        MoveActionToBranchDialog(
+            action = act,
+            macro = macro,
+            onMoveToBranch = { targetBranchId ->
+                onUpdateMacro(macro.moveActionToBranch(act.id, targetBranchId))
+                selectedBranchId = targetBranchId
+                movingBranchAction = null
+            },
+            onCreateBranchAndMove = { newName, newColorHex ->
+                val created = MacroBranch(
+                    id = newId(),
+                    name = newName,
+                    colorHex = newColorHex
+                )
+                val withBranch = macro.copy(branches = macro.branches + created)
+                onUpdateMacro(withBranch.moveActionToBranch(act.id, created.id))
+                selectedBranchId = created.id
+                movingBranchAction = null
+            },
+            onDismiss = { movingBranchAction = null }
+        )
+    }
+
     // Macro Settings Sheet (logo, security, name, loopCount, loopDelay, jitter, randomDelay, maxDuration, watchdog)
     if (showMacroSettings) {
         MacroSettingsSheet(
@@ -1161,6 +1241,8 @@ private fun ActionNodeCard(
     onAddBranchClickTarget: (String, Slot) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
     onMove: (String, Int) -> Unit,
+    onMoveToBranch: ((Action) -> Unit)? = null,
+    moveToBranchLabel: String = "Pindah ke Cabang...",
     onPreviewReorder: (ContainerRef, Int, Int) -> Unit,
     onCommitReorder: () -> Unit,
     onDuplicate: (String) -> Unit,
@@ -1366,6 +1448,19 @@ private fun ActionNodeCard(
                                 text = { Text("Geser ke Bawah") },
                                 leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
                                 onClick = { menuExpanded = false; onMove(action.id, 1) }
+                            )
+                        }
+                        if (onMoveToBranch != null && depth == 0) {
+                            DropdownMenuItem(
+                                text = { Text(moveToBranchLabel) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.AltRoute,
+                                        contentDescription = null,
+                                        tint = Color(0xFFF59E0B)
+                                    )
+                                },
+                                onClick = { menuExpanded = false; onMoveToBranch(action) }
                             )
                         }
                         DropdownMenuItem(
