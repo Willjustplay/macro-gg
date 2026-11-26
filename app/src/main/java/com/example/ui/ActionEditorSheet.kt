@@ -30,7 +30,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -75,12 +79,19 @@ import com.example.automation.InstalledAppsHelper
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
+import com.example.data.BannedImageMode
+import com.example.data.BranchConditionType
+import com.example.data.BranchNavigationMode
+import com.example.data.BranchOutcomeAction
+import com.example.data.BranchRouteRule
+import com.example.data.BranchRouterAction
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
 import com.example.data.FinishMacroAction
 import com.example.data.FinishMacroMode
+import com.example.data.GoToBranchAction
 import com.example.data.ImageAction
 import com.example.data.ImageAsset
 import com.example.data.JumpAction
@@ -89,6 +100,7 @@ import com.example.data.LaunchAppAction
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.MacroBranch
 import com.example.data.NotFoundMode
 import com.example.data.RecentsSwipeDirection
 import com.example.data.RecordAction
@@ -106,6 +118,7 @@ import com.example.data.ZoomAction
 import com.example.data.create
 import com.example.data.findAction
 import com.example.data.kind
+import com.example.data.newId
 import com.example.data.summary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -117,6 +130,7 @@ fun ActionEditorSheet(
     action: Action,
     currentMacroId: String,
     macroActions: List<Action> = emptyList(),
+    branches: List<MacroBranch> = emptyList(),
     allMacros: List<Macro>,
     images: List<ImageAsset>,
     imageFolders: List<String>,
@@ -405,6 +419,14 @@ fun ActionEditorSheet(
                         }
                     }
 
+                    // ---- BANNED IMAGES (HINDARI KLIK) ----
+                    HorizontalDivider()
+                    BannedImagesEditorSection(
+                        action = a,
+                        images = images,
+                        onUpdate = { draft = it }
+                    )
+
                     // ---- FULL "IF FOUND" SETTINGS ----
                     HorizontalDivider()
                     BranchSectionEditor(
@@ -413,6 +435,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah aksi Jika Ditemukan:",
                         mode = a.foundMode,
                         onModeChange = { draft = a.copy(foundMode = it) },
+                        branches = branches,
+                        targetBranchId = a.foundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(foundBranchId = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
                         onAddClickTargetOnScreen = {
@@ -439,6 +464,28 @@ fun ActionEditorSheet(
                             }
                             if (a.clickOnFound) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    NumberField("Jumlah klik (1-50)", a.clickCount.toString(), Modifier.weight(1f)) {
+                                        draft = a.copy(clickCount = (it.toIntOrNull() ?: a.clickCount).coerceIn(1, 50))
+                                    }
+                                    NumberField("Durasi tekan (ms)", a.clickDurationMs.toString(), Modifier.weight(1f)) {
+                                        draft = a.copy(clickDurationMs = (it.toLongOrNull() ?: a.clickDurationMs).coerceIn(10L, 5000L))
+                                    }
+                                }
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    listOf(1, 2, 3, 5, 10).forEach { cnt ->
+                                        FilterChip(
+                                            selected = a.clickCount == cnt,
+                                            onClick = { draft = a.copy(clickCount = cnt) },
+                                            label = { Text("${cnt}× klik", style = MaterialTheme.typography.labelSmall) }
+                                        )
+                                    }
+                                }
+                                if (a.clickCount > 1) {
+                                    NumberField("Jeda antar klik berulang (ms)", a.clickIntervalMs.toString()) {
+                                        draft = a.copy(clickIntervalMs = (it.toLongOrNull() ?: a.clickIntervalMs).coerceIn(10L, 10_000L))
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                     SignedNumberField("Offset X (px)", a.offsetX.toString(), Modifier.weight(1f)) {
                                         draft = a.copy(offsetX = it.toIntOrNull() ?: a.offsetX)
                                     }
@@ -457,6 +504,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah aksi Jika Tidak Ditemukan:",
                         mode = a.notFound,
                         onModeChange = { draft = a.copy(notFound = it) },
+                        branches = branches,
+                        targetBranchId = a.notFoundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(notFoundBranchId = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
                         onAddClickTargetOnScreen = {
@@ -987,6 +1037,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah aksi selesai:",
                         mode = a.foundMode,
                         onModeChange = { draft = a.copy(foundMode = it) },
+                        branches = branches,
+                        targetBranchId = a.foundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(foundBranchId = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1008,6 +1061,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah aksi Jika Tidak Ditemukan:",
                         mode = a.notFound,
                         onModeChange = { draft = a.copy(notFound = it) },
+                        branches = branches,
+                        targetBranchId = a.notFoundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(notFoundBranchId = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1114,6 +1170,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah cabang Jika Cocok:",
                         mode = a.foundMode,
                         onModeChange = { draft = a.copy(foundMode = it) },
+                        branches = branches,
+                        targetBranchId = a.foundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(foundBranchId = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1147,6 +1206,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah cabang Tidak Cocok:",
                         mode = a.notFound,
                         onModeChange = { draft = a.copy(notFound = it) },
+                        branches = branches,
+                        targetBranchId = a.notFoundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(notFoundBranchId = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1262,6 +1324,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah cabang Jika Cocok:",
                         mode = a.foundMode,
                         onModeChange = { draft = a.copy(foundMode = it) },
+                        branches = branches,
+                        targetBranchId = a.foundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(foundBranchId = it) },
                         branchActions = a.thenActions,
                         onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1294,6 +1359,9 @@ fun ActionEditorSheet(
                         modeLabel = "Setelah cabang Tidak Cocok:",
                         mode = a.notFound,
                         onModeChange = { draft = a.copy(notFound = it) },
+                        branches = branches,
+                        targetBranchId = a.notFoundBranchId,
+                        onTargetBranchIdChange = { draft = a.copy(notFoundBranchId = it) },
                         branchActions = a.elseActions,
                         onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
                         onAddClickTargetOnScreen = {
@@ -1852,6 +1920,24 @@ fun ActionEditorSheet(
                     }
                 }
 
+                is GoToBranchAction -> {
+                    GoToBranchActionEditor(
+                        action = a,
+                        branches = branches,
+                        onUpdate = { draft = it }
+                    )
+                }
+
+                is BranchRouterAction -> {
+                    BranchRouterActionEditor(
+                        action = a,
+                        branches = branches,
+                        images = images,
+                        lastPickedPixel = lastPickedPixel,
+                        onUpdate = { draft = it }
+                    )
+                }
+
                 is RestartAction, is StopAction -> {
                     Text(
                         "Aksi kontrol alur (dapat diatur peluang Random Event di bawah jika ingin acak).",
@@ -2058,6 +2144,9 @@ private fun BranchSectionEditor(
     modeLabel: String,
     mode: NotFoundMode,
     onModeChange: (NotFoundMode) -> Unit,
+    branches: List<MacroBranch> = emptyList(),
+    targetBranchId: String = "",
+    onTargetBranchIdChange: (String) -> Unit = {},
     branchActions: List<Action>,
     onAddChild: (Action) -> Unit,
     onAddClickTargetOnScreen: () -> Unit,
@@ -2119,6 +2208,7 @@ private fun BranchSectionEditor(
                 val quickKinds = listOf(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
                     ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT,
+                    ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
                     ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
                     ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
                 )
@@ -2187,6 +2277,15 @@ private fun BranchSectionEditor(
                         label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
+            }
+
+            if (mode == NotFoundMode.SWITCH_BRANCH || mode == NotFoundMode.CALL_BRANCH_RETURN) {
+                TargetBranchPickerRow(
+                    title = if (mode == NotFoundMode.CALL_BRANCH_RETURN) "Cabang Tujuan (Singgah & Kembali):" else "Cabang Tujuan (Pindah Arah):",
+                    branches = branches,
+                    selectedBranchId = targetBranchId,
+                    onSelect = { id, _ -> onTargetBranchIdChange(id) }
+                )
             }
         }
     }

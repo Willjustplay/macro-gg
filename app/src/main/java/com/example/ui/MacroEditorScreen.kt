@@ -42,6 +42,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DragIndicator
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Lock
@@ -61,6 +63,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -70,6 +73,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -121,11 +125,13 @@ import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ExitAppAction
+import com.example.data.GoToBranchAction
 import com.example.data.ImageAction
 import com.example.data.TrackObjectAction
 import com.example.data.ImageAsset
 import com.example.data.LaunchAppAction
 import com.example.data.Macro
+import com.example.data.MacroBranch
 import com.example.data.MacroSecurity
 import com.example.data.ResolutionScaleMode
 import com.example.data.ResolutionScaler
@@ -133,6 +139,7 @@ import com.example.data.Slot
 import com.example.data.StuckRecoveryMode
 import com.example.data.TextAction
 import com.example.data.WaitAction
+import com.example.data.actionsForBranch
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.duplicateAction
@@ -140,12 +147,15 @@ import com.example.data.insertInto
 import com.example.data.isStuckAction
 import com.example.data.kind
 import com.example.data.moveAction
+import com.example.data.newId
+import com.example.data.ownerListForAction
 import com.example.data.removeAction
 import com.example.data.reorderInContainer
 import com.example.data.slots
 import com.example.data.summary
 import com.example.data.updateAction
 import com.example.data.updateAnyAction
+import com.example.data.updateBranchActions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -175,24 +185,38 @@ fun MacroEditorScreen(
     isPremium: Boolean = false,
     onRequirePremium: (com.example.billing.PremiumFeature, String?) -> Unit = { _, _ -> }
 ) {
-    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi Utama, 1 = Anti-Macet (Watchdog)
+    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi & Cabang Urutan, 1 = Anti-Macet (Watchdog)
+    var selectedBranchId by remember(macro.id) { mutableStateOf("") } // "" = Jalur Utama
+    var showCreateBranchDialog by remember { mutableStateOf(false) }
+    var editingBranch by remember { mutableStateOf<MacroBranch?>(null) }
+    var pendingDeleteBranch by remember { mutableStateOf<MacroBranch?>(null) }
     var editingAction by remember { mutableStateOf<Action?>(null) }
     var quickSwapImageAction by remember { mutableStateOf<Action?>(null) }
     var addTargetRef by remember { mutableStateOf<ContainerRef?>(null) }
     var showMacroSettings by remember { mutableStateOf(false) }
 
+    LaunchedEffect(macro.branches, selectedBranchId) {
+        if (selectedBranchId.isNotBlank() && macro.branches.none { it.id == selectedBranchId }) {
+            selectedBranchId = ""
+        }
+    }
+    val selectedBranch = remember(macro.branches, selectedBranchId) {
+        if (selectedBranchId.isBlank()) null else macro.branches.firstOrNull { it.id == selectedBranchId }
+    }
+
     // Smooth in-memory drag preview so drag-and-drop runs at full frame rate without disk I/O jitter.
     val latestMacro by rememberUpdatedState(macro)
     val latestOnUpdateMacro by rememberUpdatedState(onUpdateMacro)
     val latestEditorTab by rememberUpdatedState(editorTab)
-    var dragPreviewActions by remember(macro.id, editorTab) { mutableStateOf<List<Action>?>(null) }
-    val activeSourceList = if (editorTab == 0) macro.actions else macro.stuckActions
+    val latestSelectedBranchId by rememberUpdatedState(selectedBranchId)
+    var dragPreviewActions by remember(macro.id, editorTab, selectedBranchId) { mutableStateOf<List<Action>?>(null) }
+    val activeSourceList = if (editorTab == 0) macro.actionsForBranch(selectedBranchId) else macro.stuckActions
     val displayedActions = dragPreviewActions ?: activeSourceList
 
     val listState = rememberLazyListState()
-    var draggingRootId by remember(macro.id, editorTab) { mutableStateOf<String?>(null) }
-    var draggingRootOffsetY by remember(macro.id, editorTab) { mutableFloatStateOf(0f) }
-    var overscrollSpeed by remember(macro.id, editorTab) { mutableFloatStateOf(0f) }
+    var draggingRootId by remember(macro.id, editorTab, selectedBranchId) { mutableStateOf<String?>(null) }
+    var draggingRootOffsetY by remember(macro.id, editorTab, selectedBranchId) { mutableFloatStateOf(0f) }
+    var overscrollSpeed by remember(macro.id, editorTab, selectedBranchId) { mutableFloatStateOf(0f) }
 
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
@@ -206,7 +230,7 @@ fun MacroEditorScreen(
         dragPreviewActions = null
         val cur = latestMacro
         if (latestEditorTab == 0) {
-            latestOnUpdateMacro(cur.copy(actions = block(cur.actions)))
+            latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId, block))
         } else {
             val wasEmpty = cur.stuckActions.isEmpty()
             val nextStuck = block(cur.stuckActions)
@@ -221,7 +245,9 @@ fun MacroEditorScreen(
     }
 
     fun previewReorder(ref: ContainerRef, fromIndex: Int, toIndex: Int) {
-        val current = dragPreviewActions ?: (if (latestEditorTab == 0) latestMacro.actions else latestMacro.stuckActions)
+        val current = dragPreviewActions ?: (
+            if (latestEditorTab == 0) latestMacro.actionsForBranch(latestSelectedBranchId) else latestMacro.stuckActions
+        )
         val reordered = current.reorderInContainer(ref, fromIndex, toIndex)
         if (reordered !== current) {
             dragPreviewActions = reordered
@@ -233,8 +259,9 @@ fun MacroEditorScreen(
         dragPreviewActions = null
         val cur = latestMacro
         if (latestEditorTab == 0) {
-            if (pending != null && pending != cur.actions) {
-                latestOnUpdateMacro(cur.copy(actions = pending))
+            val curList = cur.actionsForBranch(latestSelectedBranchId)
+            if (pending != null && pending != curList) {
+                latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId) { pending })
             }
         } else {
             if (pending != null && pending != cur.stuckActions) {
@@ -244,7 +271,9 @@ fun MacroEditorScreen(
     }
 
     fun checkRootSwap(actionId: String) {
-        val actionsList = dragPreviewActions ?: (if (latestEditorTab == 0) latestMacro.actions else latestMacro.stuckActions)
+        val actionsList = dragPreviewActions ?: (
+            if (latestEditorTab == 0) latestMacro.actionsForBranch(latestSelectedBranchId) else latestMacro.stuckActions
+        )
         val fromIdx = actionsList.indexOfFirst { it.id == actionId }
         if (fromIdx < 0) return
 
@@ -379,8 +408,14 @@ fun MacroEditorScreen(
                 icon = { Icon(Icons.Filled.Add, contentDescription = null) },
                 text = {
                     Text(
-                        if (editorTab == 0) "Tambah Aksi" else "Tambah Aksi Anti-Macet",
-                        fontWeight = FontWeight.SemiBold
+                        when {
+                            editorTab != 0 -> "Tambah Aksi Anti-Macet"
+                            selectedBranch != null -> "Tambah ke ${selectedBranch.name}"
+                            else -> "Tambah Aksi"
+                        },
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             )
@@ -396,8 +431,13 @@ fun MacroEditorScreen(
         ) {
             // Mode Switcher: Aksi Utama vs Aksi Anti-Macet (Watchdog di luar aksi utama)
             item(key = "editor_tab_switcher") {
+                val mainTabLabel = if (macro.branches.isEmpty()) {
+                    "Aksi Utama (${macro.actions.size})"
+                } else {
+                    "Alur (${macro.actions.size} + ${macro.branches.size} cbg)"
+                }
                 val tabLabels = listOf(
-                    "Aksi Utama (${macro.actions.size})",
+                    mainTabLabel,
                     if (isPremium) "Anti-Macet (${macro.stuckActions.size})" else "🔒 Anti-Macet (PRO)"
                 )
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
@@ -421,6 +461,169 @@ fun MacroEditorScreen(
             }
 
             if (editorTab == 0) {
+                // Sequence Branch Selector Bar: Jalur Utama + Named Branches + [+ Cabang] (PRO)
+                item(key = "branch_chip_bar") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            item(key = "branch_main") {
+                                val isMainSelected = selectedBranchId.isBlank()
+                                FilterChip(
+                                    selected = isMainSelected,
+                                    onClick = {
+                                        selectedBranchId = ""
+                                        dragPreviewActions = null
+                                    },
+                                    leadingIcon = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(0xFF10B981))
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            "Jalur Utama (${macro.actions.size})",
+                                            fontWeight = if (isMainSelected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                )
+                            }
+                            items(macro.branches, key = { it.id }) { branch ->
+                                val isSel = selectedBranchId == branch.id
+                                val dotColor = parseHexColorOrNull(branch.colorHex) ?: Color(0xFFF59E0B)
+                                FilterChip(
+                                    selected = isSel,
+                                    onClick = {
+                                        if (!isPremium) {
+                                            onRequirePremium(com.example.billing.PremiumFeature.BRANCH_ROUTING, null)
+                                        } else {
+                                            selectedBranchId = branch.id
+                                            dragPreviewActions = null
+                                        }
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = dotColor.copy(alpha = 0.20f),
+                                        selectedLabelColor = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    border = FilterChipDefaults.filterChipBorder(
+                                        enabled = true,
+                                        selected = isSel,
+                                        selectedBorderColor = dotColor.copy(alpha = 0.75f)
+                                    ),
+                                    leadingIcon = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(dotColor)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            "${branch.name} (${branch.actions.size})",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                )
+                            }
+                            item(key = "branch_add") {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!isPremium) {
+                                            onRequirePremium(com.example.billing.PremiumFeature.BRANCH_ROUTING, null)
+                                        } else {
+                                            showCreateBranchDialog = true
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(
+                                        if (isPremium) Icons.Filled.Add else Icons.Filled.Lock,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        if (isPremium) "Cabang" else "Cabang (PRO)",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+                        }
+
+                        if (selectedBranch != null) {
+                            val bColor = parseHexColorOrNull(selectedBranch.colorHex) ?: Color(0xFFF59E0B)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = bColor.copy(alpha = 0.10f),
+                                border = BorderStroke(1.dp, bColor.copy(alpha = 0.40f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.AltRoute,
+                                            contentDescription = null,
+                                            tint = bColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                "Cabang: ${selectedBranch.name}",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = bColor
+                                            )
+                                            Text(
+                                                "Jalur alternatif — panggil via 'Cek Hasil & Pilih Arah', 'Pindah Cabang', atau cabang Deteksi.",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        IconButton(
+                                            onClick = { editingBranch = selectedBranch },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(Icons.Filled.Edit, contentDescription = "Ubah Cabang", modifier = Modifier.size(16.dp))
+                                        }
+                                        IconButton(
+                                            onClick = { pendingDeleteBranch = selectedBranch },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.DeleteOutline,
+                                                contentDescription = "Hapus Cabang",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Quick capture shortcuts for Main Actions
                 item(key = "quick_tools") {
                     Row(
@@ -721,7 +924,9 @@ fun MacroEditorScreen(
                         onAddBranchClickTarget = { parentId, slot ->
                             val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
                             val updatedMacro = if (editorTab == 0) {
-                                macro.copy(actions = macro.actions.insertInto(ContainerRef(parentId, slot), newClick))
+                                macro.updateBranchActions(selectedBranchId) { list ->
+                                    list.insertInto(ContainerRef(parentId, slot), newClick)
+                                }
                             } else {
                                 macro.copy(stuckActions = macro.stuckActions.insertInto(ContainerRef(parentId, slot), newClick))
                             }
@@ -793,7 +998,12 @@ fun MacroEditorScreen(
                     return@AddActionPickerSheet
                 }
                 val defaultImg = images.firstOrNull()?.name.orEmpty()
-                val created = kind.create(screenW, screenH, imageName = defaultImg)
+                val rawCreated = kind.create(screenW, screenH, imageName = defaultImg)
+                val created = if (rawCreated is GoToBranchAction) {
+                    val suggested = macro.branches.firstOrNull { it.id != selectedBranchId } ?: macro.branches.firstOrNull()
+                    if (suggested != null) rawCreated.copy(targetBranchId = suggested.id, targetBranchName = suggested.name)
+                    else rawCreated
+                } else rawCreated
                 mutateActions { it.insertInto(targetRef, created) }
                 addTargetRef = null
                 if (kind != ActionKind.STOP && kind != ActionKind.RESTART) {
@@ -806,11 +1016,12 @@ fun MacroEditorScreen(
 
     // Edit Action Sheet
     editingAction?.let { act ->
-        val ownerActions = if (macro.isStuckAction(act.id)) macro.stuckActions else macro.actions
+        val ownerActions = macro.ownerListForAction(act.id)
         ActionEditorSheet(
             action = act,
             currentMacroId = macro.id,
             macroActions = ownerActions,
+            branches = macro.branches,
             allMacros = allMacros,
             images = images,
             imageFolders = imageFolders,
@@ -839,6 +1050,66 @@ fun MacroEditorScreen(
                 editingAction = null
             },
             onDismiss = { editingAction = null }
+        )
+    }
+
+    // Create / Edit Sequence Branch Dialog (PRO)
+    if (showCreateBranchDialog || editingBranch != null) {
+        val target = editingBranch
+        MacroBranchDialog(
+            initialName = target?.name ?: "Cabang ${macro.branches.size + 1}",
+            initialColorHex = target?.colorHex ?: BRANCH_PRESET_COLORS[macro.branches.size % BRANCH_PRESET_COLORS.size],
+            isEdit = target != null,
+            onConfirm = { newName, newColorHex ->
+                if (target == null) {
+                    val createdBranch = MacroBranch(
+                        id = newId(),
+                        name = newName,
+                        colorHex = newColorHex
+                    )
+                    onUpdateMacro(macro.copy(branches = macro.branches + createdBranch))
+                    selectedBranchId = createdBranch.id
+                } else {
+                    onUpdateMacro(
+                        macro.copy(
+                            branches = macro.branches.map { b ->
+                                if (b.id == target.id) b.copy(name = newName, colorHex = newColorHex) else b
+                            }
+                        )
+                    )
+                }
+                showCreateBranchDialog = false
+                editingBranch = null
+            },
+            onDismiss = {
+                showCreateBranchDialog = false
+                editingBranch = null
+            }
+        )
+    }
+
+    // Delete Sequence Branch Confirmation Dialog
+    pendingDeleteBranch?.let { branch ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteBranch = null },
+            title = { Text("Hapus Cabang '${branch.name}'?") },
+            text = {
+                Text(
+                    "Cabang ini memiliki ${branch.actions.size} aksi. Menghapus cabang akan menghapus semua aksi di dalamnya secara permanen."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUpdateMacro(macro.copy(branches = macro.branches.filterNot { it.id == branch.id }))
+                        if (selectedBranchId == branch.id) selectedBranchId = ""
+                        pendingDeleteBranch = null
+                    }
+                ) { Text("Hapus") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteBranch = null }) { Text("Batal") }
+            }
         )
     }
 
@@ -1435,6 +1706,7 @@ private fun AddActionPickerSheet(
     val groups = if (isPremium) {
         listOf(
             "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
+            "Cabang Urutan (Belok Arah)" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
             "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
             "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
             "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)
@@ -1442,6 +1714,7 @@ private fun AddActionPickerSheet(
     } else {
         listOf(
             "Aksi Gratis (Tersedia)" to listOf(ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE),
+            "Cabang Urutan (PRO)" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
             "Deteksi Lanjutan (PRO)" to listOf(ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
             "Sentuhan & Jeda (PRO)" to listOf(ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT),
             "Aplikasi (PRO)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
@@ -1887,4 +2160,79 @@ private fun MacroSettingsSheet(
             }
         }
     }
+}
+
+private val BRANCH_PRESET_COLORS = listOf(
+    "#F59E0B", // Amber
+    "#06B6D4", // Cyan
+    "#10B981", // Emerald
+    "#EC4899", // Pink
+    "#8B5CF6", // Violet
+    "#EF4444"  // Red
+)
+
+@Composable
+private fun MacroBranchDialog(
+    initialName: String,
+    initialColorHex: String,
+    isEdit: Boolean,
+    onConfirm: (name: String, colorHex: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var selectedColorHex by remember { mutableStateOf(initialColorHex) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (isEdit) "Ubah Cabang Urutan" else "Buat Cabang Urutan Baru") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Gunakan cabang urutan untuk jalur alternatif ketika hasil di layar tidak sesuai atau berubah arah.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(36) },
+                    label = { Text("Nama Cabang") },
+                    placeholder = { Text("mis. Jika Kalah / Ulangi / Belok Kiri") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("Warna Penanda", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    BRANCH_PRESET_COLORS.forEach { hex ->
+                        val c = parseHexColorOrNull(hex) ?: Color(0xFFF59E0B)
+                        val isSel = selectedColorHex.equals(hex, ignoreCase = true)
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(c)
+                                .border(
+                                    width = if (isSel) 3.dp else 1.dp,
+                                    color = if (isSel) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+                                    shape = CircleShape
+                                )
+                                .clickable { selectedColorHex = hex }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val clean = name.trim().ifBlank { initialName.ifBlank { "Cabang Baru" } }
+                    onConfirm(clean, selectedColorHex)
+                }
+            ) {
+                Text(if (isEdit) "Simpan" else "Buat Cabang")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Batal") }
+        }
+    )
 }

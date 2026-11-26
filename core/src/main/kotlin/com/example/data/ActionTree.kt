@@ -157,29 +157,76 @@ fun List<Action>.mapAllActions(transform: (Action) -> Action): List<Action> = ma
     transform(mappedChildren)
 }
 
-/** Depth-first walk over both main [Macro.actions] and out-of-band [Macro.stuckActions]. */
-fun Macro.allActionsSequence(): Sequence<Action> = actions.walk() + stuckActions.walk()
+/** Returns the action list for [branchId] (empty string = Jalur Utama). */
+fun Macro.actionsForBranch(branchId: String): List<Action> =
+    if (branchId.isBlank()) actions else branches.firstOrNull { it.id == branchId }?.actions.orEmpty()
+
+/** Returns a human-readable label for [branchId] ("Jalur Utama" when blank). */
+fun Macro.branchDisplayName(branchId: String): String =
+    if (branchId.isBlank()) "Jalur Utama"
+    else branches.firstOrNull { it.id == branchId }?.name?.ifBlank { "Cabang" } ?: "Jalur Utama"
+
+/** Returns a copy of this [Macro] with the actions of [branchId] (empty = Jalur Utama) transformed. */
+fun Macro.updateBranchActions(branchId: String, transform: (List<Action>) -> List<Action>): Macro =
+    if (branchId.isBlank()) {
+        copy(actions = transform(actions))
+    } else {
+        copy(branches = branches.map { b -> if (b.id == branchId) b.copy(actions = transform(b.actions)) else b })
+    }
+
+/** Depth-first walk over main [Macro.actions], all named [Macro.branches], and out-of-band [Macro.stuckActions]. */
+fun Macro.allActionsSequence(): Sequence<Action> = sequence {
+    yieldAll(actions.walk())
+    for (b in branches) {
+        yieldAll(b.actions.walk())
+    }
+    yieldAll(stuckActions.walk())
+}
 
 fun Macro.findAnyAction(id: String): Action? =
-    actions.findAction(id) ?: stuckActions.findAction(id)
+    actions.findAction(id)
+        ?: branches.firstNotNullOfOrNull { it.actions.findAction(id) }
+        ?: stuckActions.findAction(id)
 
 fun Macro.isStuckAction(id: String): Boolean =
     stuckActions.findAction(id) != null
 
+/** Returns the top-level action list that owns [actionId] (main, a named branch, or stuckActions). */
+fun Macro.ownerListForAction(actionId: String): List<Action> = when {
+    actions.findAction(actionId) != null -> actions
+    stuckActions.findAction(actionId) != null -> stuckActions
+    else -> branches.firstOrNull { it.actions.findAction(actionId) != null }?.actions ?: actions
+}
+
 fun Macro.updateAnyAction(id: String, transform: (Action) -> Action): Macro = when {
     actions.findAction(id) != null -> copy(actions = actions.updateAction(id, transform))
+    branches.any { it.actions.findAction(id) != null } -> copy(
+        branches = branches.map { b ->
+            if (b.actions.findAction(id) != null) b.copy(actions = b.actions.updateAction(id, transform)) else b
+        }
+    )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.updateAction(id, transform))
     else -> this
 }
 
 fun Macro.removeAnyAction(id: String): Macro = when {
     actions.findAction(id) != null -> copy(actions = actions.removeAction(id))
+    branches.any { it.actions.findAction(id) != null } -> copy(
+        branches = branches.map { b ->
+            if (b.actions.findAction(id) != null) b.copy(actions = b.actions.removeAction(id)) else b
+        }
+    )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.removeAction(id))
     else -> this
 }
 
 fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
     actions.findAction(id) != null -> copy(actions = actions.moveAction(id, delta))
+    branches.any { it.actions.findAction(id) != null } -> copy(
+        branches = branches.map { b ->
+            if (b.actions.findAction(id) != null) b.copy(actions = b.actions.moveAction(id, delta)) else b
+        }
+    )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.moveAction(id, delta))
     else -> this
 }
@@ -187,13 +234,23 @@ fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
 fun Macro.imageNames(): Set<String> = buildSet {
     for (a in allActionsSequence()) {
         when (a) {
-            is ImageAction -> if (a.imageName.isNotBlank()) add(a.imageName)
+            is ImageAction -> {
+                if (a.imageName.isNotBlank()) add(a.imageName)
+                a.bannedImages.filter { it.isNotBlank() }.forEach { add(it) }
+            }
             is TrackObjectAction -> a.allTemplateNames().forEach { add(it) }
+            is BranchRouterAction -> {
+                a.rules.forEach { r ->
+                    if (r.conditionType == BranchConditionType.IMAGE && r.imageName.isNotBlank()) {
+                        add(r.imageName)
+                    }
+                }
+            }
             else -> Unit
         }
     }
 }
 
-fun Macro.countActions(): Int = actions.walk().count()
+fun Macro.countActions(): Int = actions.walk().count() + branches.sumOf { it.actions.walk().count() }
 
 fun Macro.countStuckActions(): Int = stuckActions.walk().count()

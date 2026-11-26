@@ -420,6 +420,7 @@ object MacroBundleCodec {
                 originId = m.originId.ifBlank { m.id },
                 setId = if (m.setId.isNotBlank()) setIdRemap[m.setId].orEmpty() else "",
                 actions = remapList(m.actions),
+                branches = m.branches.map { b -> b.copy(actions = remapList(b.actions)) },
                 stuckActions = remapList(m.stuckActions)
             )
         }

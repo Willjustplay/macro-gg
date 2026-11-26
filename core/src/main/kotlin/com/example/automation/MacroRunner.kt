@@ -1,12 +1,19 @@
 package com.example.automation
 
 import com.example.data.Action
+import com.example.data.BannedImageMode
+import com.example.data.BranchConditionType
+import com.example.data.BranchNavigationMode
+import com.example.data.BranchOutcomeAction
+import com.example.data.BranchRouteRule
+import com.example.data.BranchRouterAction
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
 import com.example.data.FinishMacroAction
 import com.example.data.FinishMacroMode
+import com.example.data.GoToBranchAction
 import com.example.data.ImageAction
 import com.example.data.JumpAction
 import com.example.data.JumpMode
@@ -32,6 +39,8 @@ import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.Region
 import com.example.data.ResolutionScaler
+import com.example.data.actionsForBranch
+import com.example.data.branchDisplayName
 import com.example.data.kind
 import com.example.vision.ColorUtil
 import com.example.vision.Frame
@@ -91,6 +100,7 @@ interface MacroRuntime {
 private enum class FlowControl {
     NEXT,
     JUMP,
+    SWITCH_BRANCH,
     RESTART_MACRO,
     RESTART_ROOT,
     FINISH_TO_ACTIVE_CONTINUE,
@@ -114,7 +124,8 @@ private data class PendingJump(
  * - Exit App & Launch App actions for app lifecycle automation & stuck recovery
  * - Per-action success probability ([Action.chancePercent]) for random events
  * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
- * - Image, OCR Text/Value, and Color detection with full Then/Else branches + Found/NotFound flow modes
+ * - Image (with repeated clicks & banned-image avoidance), OCR Text/Value, and Color detection
+ * - Named sequence branches ([Macro.branches]), [BranchRouterAction], and [GoToBranchAction] (Switch & Call-Return)
  * - Nested loop blocks, [JumpAction] forward/backward jumps, & Chained/Linked Macros ([RunMacroAction]) with cycle protection, Passive Mode & [FinishMacroAction]
  * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
  * - Recorded gesture playback with speed multiplier
@@ -129,6 +140,8 @@ class MacroRunner(
     private var inStuckRecovery: Boolean = false
     private var pendingSwitchMacro: Macro? = null
     private var pendingJump: PendingJump? = null
+    private var pendingSwitchBranchId: String? = null
+    private var branchCallDepth: Int = 0
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -144,10 +157,14 @@ class MacroRunner(
         var currentMacro = macro
         pendingSwitchMacro = null
         pendingJump = null
+        pendingSwitchBranchId = null
+        branchCallDepth = 0
         while (!runtime.isStopped()) {
             rootWatchdogMacro = currentMacro
             inStuckRecovery = false
             pendingJump = null
+            pendingSwitchBranchId = null
+            branchCallDepth = 0
             lastProgressMs = runtime.nowMs()
             val flow = runInternal(currentMacro, depth = 0)
             if (flow == FlowControl.SWITCH_TO_ACTIVE_MACRO) {
@@ -204,8 +221,35 @@ class MacroRunner(
             runtime.log(LogLevel.INFO, if (depth == 0) "Loop #$iteration dimulai." else "Sub-macro '${macro.name}' loop #$iteration.")
 
             pendingJump = null
-            val flow = executeList(macro.actions, macro, startedAt, maxDurationMs, depth, isRootList = true)
-            pendingJump = null
+            pendingSwitchBranchId = null
+            var activeBranchId = ""
+            var branchSwitchCount = 0
+            var flow: FlowControl
+            while (true) {
+                val branchActions = macro.actionsForBranch(activeBranchId)
+                flow = executeList(branchActions, macro, startedAt, maxDurationMs, depth, isRootList = true)
+                pendingJump = null
+                if (flow == FlowControl.SWITCH_BRANCH) {
+                    val nextBranchId = pendingSwitchBranchId.orEmpty()
+                    pendingSwitchBranchId = null
+                    branchSwitchCount++
+                    if (branchSwitchCount > MAX_BRANCH_SWITCHES_PER_LOOP) {
+                        runtime.log(LogLevel.WARN, "Batas perpindahan jalur cabang ($MAX_BRANCH_SWITCHES_PER_LOOP×) tercapai dalam 1 siklus — dilanjutkan ke siklus berikutnya.")
+                        flow = FlowControl.NEXT
+                        break
+                    }
+                    if (nextBranchId.isNotBlank() && macro.branches.none { it.id == nextBranchId }) {
+                        runtime.log(LogLevel.WARN, "Jalur cabang tujuan tidak ditemukan — kembali ke Jalur Utama.")
+                        activeBranchId = ""
+                    } else {
+                        activeBranchId = nextBranchId
+                    }
+                    runtime.log(LogLevel.INFO, "🔀 Beralih arah ke '${macro.branchDisplayName(activeBranchId)}'.")
+                    markProgress()
+                    continue
+                }
+                break
+            }
             when (flow) {
                 FlowControl.STOP_MACRO -> return FlowControl.STOP_MACRO
                 FlowControl.SWITCH_TO_ACTIVE_MACRO -> return FlowControl.SWITCH_TO_ACTIVE_MACRO
@@ -237,7 +281,7 @@ class MacroRunner(
                     if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
                     continue
                 }
-                FlowControl.NEXT, FlowControl.JUMP -> {
+                FlowControl.NEXT, FlowControl.JUMP, FlowControl.SWITCH_BRANCH -> {
                     if (!runtime.isStopped() && iteration < maxLoops) {
                         val effectiveDelay = if (macro.loopDelayMs > 0) {
                             macro.loopDelayMs
@@ -623,6 +667,10 @@ class MacroRunner(
 
             is ColorAction -> executeColorAction(action, macro, startedAt, maxDurationMs, depth)
 
+            is BranchRouterAction -> executeBranchRouterAction(action, macro, startedAt, maxDurationMs, depth)
+
+            is GoToBranchAction -> executeGoToBranchAction(action, macro, startedAt, maxDurationMs, depth)
+
             is LoopAction -> {
                 val times = action.count.coerceAtLeast(1)
                 for (i in 1..times) {
@@ -788,14 +836,26 @@ class MacroRunner(
         val template = runtime.loadTemplate(action.imageName)
         if (template == null) {
             runtime.log(LogLevel.WARN, "Gambar '${action.imageName}' tidak ditemukan di pustaka.")
-            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
         }
+
+        // Preload any configured banned/forbidden image templates once
+        val bannedTemplates: List<Pair<String, PreparedTemplate>> = action.bannedImages
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .mapNotNull { bName -> runtime.loadTemplate(bName)?.let { bName to it } }
 
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var matched: MatchResult? = null
         var bestScore = 0.0
         var usedScale = 1.0
         var sawFrame = false
+        var avoidedByBanCount = 0
+        var lastBannedLabel = ""
         var lastMultiScaleMs = Long.MIN_VALUE / 2
         var multiScaleCount = 0
 
@@ -810,10 +870,6 @@ class MacroRunner(
                 val tplKey = "${action.imageName}@${frame.width}x${frame.height}"
                 val macroKey = "${macro.id}@${frame.width}x${frame.height}"
 
-                // Build ordered fast-path (sx, sy) candidates:
-                // 1) previously discovered scale for this exact template
-                // 2) expected resolution transform scales (or 1.0x)
-                // 3) previously discovered macro-wide scale (helps sibling templates hit immediately)
                 val fastScales = ArrayList<Pair<Double, Double>>(6)
                 fun addFastScale(sx: Double, sy: Double) {
                     if (fastScales.none { abs(it.first - sx) < 0.02 && abs(it.second - sy) < 0.02 }) {
@@ -828,36 +884,116 @@ class MacroRunner(
                     discoveredMacroScale[macroKey]?.let { addFastScale(it, it) }
                 }
 
+                // Step 1: Detect any banned/forbidden images on this frame
+                val bannedBoxes = ArrayList<Pair<String, MatchResult>>()
+                if (bannedTemplates.isNotEmpty()) {
+                    val banThreshold = action.bannedThreshold.coerceIn(0.45f, 0.99f).toDouble()
+                    for ((bName, bTpl) in bannedTemplates) {
+                        for ((sx, sy) in fastScales) {
+                            val cand = bTpl.scaled(sx, sy)
+                            if (cand.width > frame.width || cand.height > frame.height) continue
+                            val hits = if (scaledRegion != null &&
+                                scaledRegion.width >= cand.width &&
+                                scaledRegion.height >= cand.height
+                            ) {
+                                TemplateMatcher.findAll(
+                                    frame, cand, banThreshold, maxResults = 8,
+                                    regionLeft = scaledRegion.left, regionTop = scaledRegion.top,
+                                    regionRight = scaledRegion.right, regionBottom = scaledRegion.bottom
+                                )
+                            } else {
+                                TemplateMatcher.findAll(frame, cand, banThreshold, maxResults = 8)
+                            }
+                            if (hits.isNotEmpty()) {
+                                hits.forEach { bannedBoxes += bName to it }
+                                break
+                            }
+                        }
+                    }
+                }
+
+                if (action.bannedMode == BannedImageMode.BLOCK_IF_PRESENT && bannedBoxes.isNotEmpty()) {
+                    avoidedByBanCount++
+                    lastBannedLabel = bannedBoxes.first().first
+                    if (runtime.nowMs() >= deadline) break
+                    runtime.sleep(120L)
+                    continue
+                }
+
+                val avoidRadiusPx = frameTransform.scaleDistance(action.bannedAvoidRadiusPx.coerceAtLeast(0))
+                fun isNearBanned(m: MatchResult): Boolean {
+                    if (bannedBoxes.isEmpty()) return false
+                    for ((bName, b) in bannedBoxes) {
+                        val overlaps = m.x < b.x + b.width + avoidRadiusPx &&
+                            m.x + m.width + avoidRadiusPx > b.x &&
+                            m.y < b.y + b.height + avoidRadiusPx &&
+                            m.y + m.height + avoidRadiusPx > b.y
+                        if (overlaps) {
+                            lastBannedLabel = bName
+                            return true
+                        }
+                    }
+                    return false
+                }
+
                 val triedUniformScales = ArrayList<Double>(fastScales.size)
                 for ((sx, sy) in fastScales) {
                     val cand = template.scaled(sx, sy)
                     if (cand.width > frame.width || cand.height > frame.height) continue
                     if (abs(sx - sy) < 0.02) triedUniformScales += sx
-                    val outcome = if (scaledRegion != null &&
-                        scaledRegion.width >= cand.width &&
-                        scaledRegion.height >= cand.height
-                    ) {
-                        TemplateMatcher.findWithStats(
-                            frame, cand, action.threshold.toDouble(),
-                            scaledRegion.left, scaledRegion.top, scaledRegion.right, scaledRegion.bottom
-                        )
-                    } else {
-                        TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
-                    }
-                    if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
-                    if (outcome.match != null) {
-                        matched = outcome.match
-                        usedScale = (sx + sy) / 2.0
-                        if (macro.autoScaleResolution && abs(sx - sy) < 0.02) {
-                            discoveredTemplateScale[tplKey] = sx
-                            if (abs(sx - 1.0) >= 0.02) discoveredMacroScale[macroKey] = sx
+
+                    if (bannedBoxes.isNotEmpty()) {
+                        val allHits = if (scaledRegion != null &&
+                            scaledRegion.width >= cand.width &&
+                            scaledRegion.height >= cand.height
+                        ) {
+                            TemplateMatcher.findAll(
+                                frame, cand, action.threshold.toDouble(), maxResults = 16,
+                                regionLeft = scaledRegion.left, regionTop = scaledRegion.top,
+                                regionRight = scaledRegion.right, regionBottom = scaledRegion.bottom
+                            )
+                        } else {
+                            TemplateMatcher.findAll(frame, cand, action.threshold.toDouble(), maxResults = 16)
                         }
-                        break
+                        allHits.firstOrNull()?.let { if (it.score > bestScore) bestScore = it.score }
+                        val safeHit = allHits.firstOrNull { !isNearBanned(it) }
+                        if (safeHit != null) {
+                            matched = safeHit
+                            usedScale = (sx + sy) / 2.0
+                            if (macro.autoScaleResolution && abs(sx - sy) < 0.02) {
+                                discoveredTemplateScale[tplKey] = sx
+                                if (abs(sx - 1.0) >= 0.02) discoveredMacroScale[macroKey] = sx
+                            }
+                            break
+                        } else if (allHits.isNotEmpty()) {
+                            avoidedByBanCount++
+                        }
+                    } else {
+                        val outcome = if (scaledRegion != null &&
+                            scaledRegion.width >= cand.width &&
+                            scaledRegion.height >= cand.height
+                        ) {
+                            TemplateMatcher.findWithStats(
+                                frame, cand, action.threshold.toDouble(),
+                                scaledRegion.left, scaledRegion.top, scaledRegion.right, scaledRegion.bottom
+                            )
+                        } else {
+                            TemplateMatcher.findWithStats(frame, cand, action.threshold.toDouble())
+                        }
+                        if (outcome.bestScore > bestScore) bestScore = outcome.bestScore
+                        if (outcome.match != null) {
+                            matched = outcome.match
+                            usedScale = (sx + sy) / 2.0
+                            if (macro.autoScaleResolution && abs(sx - sy) < 0.02) {
+                                discoveredTemplateScale[tplKey] = sx
+                                if (abs(sx - 1.0) >= 0.02) discoveredMacroScale[macroKey] = sx
+                            }
+                            break
+                        }
                     }
                 }
 
-                // Adaptive multi-scale fallback (0.50x..1.50x with local ±1.5%..±4% refinement):
-                // catches DPI differences, legacy exports with sourceWidth==0, and gallery-cropped templates!
+                // Adaptive multi-scale fallback
                 if (matched == null && macro.autoScaleResolution) {
                     val nowMs = runtime.nowMs()
                     val msCooldown = if (discoveredMacroScale.containsKey(macroKey)) 750L else 400L
@@ -884,10 +1020,14 @@ class MacroRunner(
                         )
                         if (ms.bestScore > bestScore) bestScore = ms.bestScore
                         if (ms.match != null) {
-                            matched = ms.match
-                            usedScale = ms.bestScale
-                            discoveredTemplateScale[tplKey] = ms.bestScale
-                            discoveredMacroScale[macroKey] = ms.bestScale
+                            if (!isNearBanned(ms.match)) {
+                                matched = ms.match
+                                usedScale = ms.bestScale
+                                discoveredTemplateScale[tplKey] = ms.bestScale
+                                discoveredMacroScale[macroKey] = ms.bestScale
+                            } else {
+                                avoidedByBanCount++
+                            }
                         }
                     }
                 }
@@ -906,24 +1046,280 @@ class MacroRunner(
             if (action.clickOnFound) {
                 val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
                 val (ox, oy) = clickTransform.scaleDelta(action.offsetX, action.offsetY)
-                val (tx, ty) = applyJitter(
-                    matched.centerX + ox,
-                    matched.centerY + oy,
-                    clickTransform.scaleDistance(macro.jitterPx)
-                )
-                if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
+                val jitterScaled = clickTransform.scaleDistance(macro.jitterPx)
+                val taps = action.clickCount.coerceIn(1, 50)
+                val intervalMs = action.clickIntervalMs.coerceIn(0L, 5000L)
+                val durationMs = action.clickDurationMs.coerceIn(10L, 2000L)
+                if (taps > 1) {
+                    runtime.log(LogLevel.ACTION, "Klik berulang gambar '${action.imageName}' ${taps}× (jeda ${intervalMs}ms).")
+                }
+                for (t in 0 until taps) {
+                    if (runtime.isStopped()) return FlowControl.STOP_MACRO
+                    runtime.waitIfPaused()
+                    val (tx, ty) = applyJitter(matched.centerX + ox, matched.centerY + oy, jitterScaled)
+                    if (runtime.click(tx, ty, durationMs)) {
+                        runtime.onActionExecuted()
+                        markProgress()
+                    }
+                    if (t < taps - 1 && intervalMs > 0L) {
+                        val waitFlow = sleepWatchingStuck(intervalMs, macro, startedAt, maxDurationMs, depth)
+                        if (waitFlow != FlowControl.NEXT) return waitFlow
+                    }
+                }
             }
-            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.foundBranchId
+            )
         } else {
             val reqPct = (action.threshold * 100).toInt()
             val maxPct = (bestScore * 100).toInt()
             if (!sawFrame) {
                 runtime.log(LogLevel.WARN, "Deteksi '${action.imageName}' gagal: Tangkap Layar belum aktif / belum ada frame.")
+            } else if (avoidedByBanCount > 0) {
+                runtime.log(LogLevel.IMAGE, "⛔ Klik '${action.imageName}' dihindari karena gambar terlarang '$lastBannedLabel' terdeteksi.")
             } else {
                 runtime.log(LogLevel.IMAGE, "Gambar '${action.imageName}' belum cocok (maks $maxPct% < $reqPct%).")
             }
-            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
         }
+    }
+
+    private suspend fun executeGoToBranchAction(
+        action: GoToBranchAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val targetId = action.targetBranchId.trim()
+        val targetName = macro.branchDisplayName(targetId)
+        if (targetId.isNotBlank() && macro.branches.none { it.id == targetId }) {
+            runtime.log(LogLevel.WARN, "Pindah Jalur dilewati: cabang '${action.targetBranchName.ifBlank { targetId }}' tidak ditemukan.")
+            return FlowControl.NEXT
+        }
+        markProgress()
+        return when (action.mode) {
+            BranchNavigationMode.SWITCH -> {
+                pendingSwitchBranchId = targetId
+                runtime.log(LogLevel.INFO, "🔀 Pindah jalur ke '$targetName'.")
+                FlowControl.SWITCH_BRANCH
+            }
+            BranchNavigationMode.CALL_AND_RETURN -> {
+                executeNamedBranchCall(targetId, macro, startedAt, maxDurationMs, depth)
+            }
+        }
+    }
+
+    private suspend fun executeBranchRouterAction(
+        action: BranchRouterAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
+        val loadedTemplates = HashMap<String, PreparedTemplate>()
+        for (rule in action.rules) {
+            if (rule.conditionType == BranchConditionType.IMAGE && rule.imageName.isNotBlank()) {
+                if (rule.imageName !in loadedTemplates) {
+                    runtime.loadTemplate(rule.imageName)?.let { loadedTemplates[rule.imageName] = it }
+                }
+            }
+        }
+
+        var matchedRule: BranchRouteRule? = null
+        var matchedPoint: Pair<Int, Int>? = null
+        var matchedDesc = ""
+
+        while (!runtime.isStopped()) {
+            runtime.waitIfPaused()
+            checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
+
+            val frame = runtime.captureFrame()
+            val liveW = runtime.screenWidth.coerceAtLeast(1)
+            val liveH = runtime.screenHeight.coerceAtLeast(1)
+            val frameTransform = if (frame != null) {
+                ResolutionScaler.forMacro(macro, frame.width, frame.height)
+            } else {
+                ResolutionScaler.forMacro(macro, liveW, liveH)
+            }
+
+            for ((rIdx, rule) in action.rules.withIndex()) {
+                val rLabel = rule.label.ifBlank { "Kondisi #${rIdx + 1}" }
+                when (rule.conditionType) {
+                    BranchConditionType.IMAGE -> {
+                        val tpl = loadedTemplates[rule.imageName] ?: continue
+                        val f = frame ?: continue
+                        val scaledRegion = rule.region?.let { frameTransform.scaleRegion(it) }
+                        var hit: MatchResult? = null
+                        for ((sx, sy) in frameTransform.templateScaleCandidates()) {
+                            val cand = tpl.scaled(sx, sy)
+                            if (cand.width > f.width || cand.height > f.height) continue
+                            val res = if (scaledRegion != null &&
+                                scaledRegion.width >= cand.width &&
+                                scaledRegion.height >= cand.height
+                            ) {
+                                TemplateMatcher.findWithStats(
+                                    f, cand, rule.threshold.toDouble(),
+                                    scaledRegion.left, scaledRegion.top, scaledRegion.right, scaledRegion.bottom
+                                )
+                            } else {
+                                TemplateMatcher.findWithStats(f, cand, rule.threshold.toDouble())
+                            }
+                            if (res.match != null) {
+                                hit = res.match
+                                break
+                            }
+                        }
+                        if (hit == null && macro.autoScaleResolution) {
+                            val rL = scaledRegion?.left ?: 0
+                            val rT = scaledRegion?.top ?: 0
+                            val rR = scaledRegion?.right ?: f.width
+                            val rB = scaledRegion?.bottom ?: f.height
+                            hit = TemplateMatcher.findMultiScale(f, tpl, rule.threshold.toDouble(), rL, rT, rR, rB).match
+                        }
+                        if (hit != null) {
+                            matchedRule = rule
+                            matchedPoint = hit.centerX to hit.centerY
+                            matchedDesc = "$rLabel (gambar '${rule.imageName}' ${(hit.score * 100).toInt()}%)"
+                            runtime.onMatchFound(hit, rLabel)
+                            break
+                        }
+                    }
+                    BranchConditionType.COLOR -> {
+                        if (ColorUtil.parseHex(rule.color) == null) continue
+                        val (sx, sy) = frameTransform.scalePoint(rule.x, rule.y)
+                        val sampled = if (frame != null && sx in 0 until frame.width && sy in 0 until frame.height) {
+                            frame.pixels[sy * frame.width + sx]
+                        } else {
+                            runtime.samplePixelArgb(sx, sy)
+                        }
+                        if (sampled != null && ColorUtil.matches(sampled, rule.color, rule.tolerance)) {
+                            matchedRule = rule
+                            matchedPoint = sx to sy
+                            matchedDesc = "$rLabel (warna ${rule.color})"
+                            break
+                        }
+                    }
+                    BranchConditionType.TEXT -> {
+                        val scaledRegion = rule.region?.let { frameTransform.scaleRegion(it) }
+                        val blocks = runtime.recognizeText(scaledRegion, enhanced = rule.compareMode.isNumeric)
+                        val probeAction = TextAction(
+                            query = rule.textQuery,
+                            targetNumber = rule.targetNumber,
+                            compareMode = rule.compareMode,
+                            region = rule.region
+                        )
+                        val eval = TextConditionEvaluator.evaluate(
+                            action = probeAction,
+                            blocks = blocks
+                        )
+                        if (eval.matched) {
+                            matchedRule = rule
+                            matchedPoint = eval.matchedBlock?.let { it.centerX to it.centerY }
+                                ?: scaledRegion?.let { (it.left + it.width / 2) to (it.top + it.height / 2) }
+                            matchedDesc = "$rLabel (teks '${eval.matchedText}')"
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (matchedRule != null) break
+            if (runtime.nowMs() >= deadline) break
+            runtime.sleep(120L)
+        }
+
+        if (matchedRule != null) {
+            runtime.log(LogLevel.INFO, "✅ Cek Arah cocok: $matchedDesc")
+            markProgress()
+            if (matchedRule.clickOnFound && matchedPoint != null) {
+                val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+                val (tx, ty) = applyJitter(
+                    matchedPoint.first,
+                    matchedPoint.second,
+                    clickTransform.scaleDistance(macro.jitterPx)
+                )
+                if (runtime.click(tx, ty, 60L)) runtime.onActionExecuted()
+            }
+            return applyBranchOutcome(
+                outcome = matchedRule.outcome,
+                targetBranchId = matchedRule.targetBranchId,
+                macro = macro,
+                startedAt = startedAt,
+                maxDurationMs = maxDurationMs,
+                depth = depth
+            )
+        } else {
+            val fbName = macro.branchDisplayName(action.fallbackBranchId)
+            runtime.log(LogLevel.WARN, "⚠ Cek Arah: hasil tidak sesuai (${action.rules.size} kondisi) → ${action.fallbackOutcome.shortLabel} ($fbName).")
+            return applyBranchOutcome(
+                outcome = action.fallbackOutcome,
+                targetBranchId = action.fallbackBranchId,
+                macro = macro,
+                startedAt = startedAt,
+                maxDurationMs = maxDurationMs,
+                depth = depth
+            )
+        }
+    }
+
+    private suspend fun applyBranchOutcome(
+        outcome: BranchOutcomeAction,
+        targetBranchId: String,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl = when (outcome) {
+        BranchOutcomeAction.CONTINUE -> FlowControl.NEXT
+        BranchOutcomeAction.SWITCH_BRANCH -> {
+            pendingSwitchBranchId = targetBranchId.trim()
+            FlowControl.SWITCH_BRANCH
+        }
+        BranchOutcomeAction.CALL_BRANCH_RETURN ->
+            executeNamedBranchCall(targetBranchId.trim(), macro, startedAt, maxDurationMs, depth)
+        BranchOutcomeAction.RESTART_MACRO -> FlowControl.RESTART_MACRO
+        BranchOutcomeAction.STOP_MACRO -> FlowControl.STOP_MACRO
+    }
+
+    private suspend fun executeNamedBranchCall(
+        targetBranchId: String,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        if (branchCallDepth >= MAX_BRANCH_CALL_DEPTH) {
+            runtime.log(LogLevel.WARN, "Batas kedalaman singgah jalur ($MAX_BRANCH_CALL_DEPTH) tercapai — dilewati.")
+            return FlowControl.NEXT
+        }
+        if (targetBranchId.isNotBlank() && macro.branches.none { it.id == targetBranchId }) {
+            runtime.log(LogLevel.WARN, "Singgah jalur dilewati: cabang tujuan tidak ditemukan.")
+            return FlowControl.NEXT
+        }
+        val branchName = macro.branchDisplayName(targetBranchId)
+        val branchActions = macro.actionsForBranch(targetBranchId)
+        runtime.log(LogLevel.INFO, "↪ Singgah ke jalur '$branchName' (${branchActions.size} aksi)...")
+        branchCallDepth++
+        val savedJump = pendingJump
+        pendingJump = null
+        val subFlow = try {
+            executeList(branchActions, macro, startedAt, maxDurationMs, depth, isBranch = false, isRootList = true)
+        } finally {
+            pendingJump = savedJump
+            branchCallDepth--
+        }
+        if (subFlow == FlowControl.NEXT || subFlow == FlowControl.JUMP) {
+            runtime.log(LogLevel.INFO, "↩ Selesai singgah '$branchName' — kembali melanjutkan urutan sebelumnya.")
+            markProgress()
+            return FlowControl.NEXT
+        }
+        return subFlow
     }
 
     private data class TrackVariant(
@@ -995,7 +1391,10 @@ class MacroRunner(
             }
             if (variants.isEmpty()) {
                 runtime.log(LogLevel.WARN, "Gambar objek '$displayTargetName' tidak ditemukan di pustaka.")
-                return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+                return handleBranch(
+                    action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                    targetBranchId = action.notFoundBranchId
+                )
             }
         }
 
@@ -1484,7 +1883,10 @@ class MacroRunner(
                 } else {
                     runtime.log(LogLevel.IMAGE, "Objek '$displayTargetName' tidak ditemukan (maks $maxPct% < $reqPct%).")
                 }
-                return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+                return handleBranch(
+                    action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                    targetBranchId = action.notFoundBranchId
+                )
             }
 
             val leadMs = action.leadPredictionMs.coerceIn(0L, 400L)
@@ -1621,7 +2023,10 @@ class MacroRunner(
                 }
             }
 
-            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.foundBranchId
+            )
         } finally {
             runtime.setTrackingBoost(false)
         }
@@ -1657,10 +2062,16 @@ class MacroRunner(
                 val (tx, ty) = applyJitter(sx, sy, transform.scaleDistance(macro.jitterPx))
                 if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
             }
-            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.foundBranchId
+            )
         } else {
             runtime.log(LogLevel.COLOR, "Warna ${action.color} tidak cocok.")
-            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
         }
     }
 
@@ -1741,7 +2152,10 @@ class MacroRunner(
                 val ty = rawTy.coerceIn(1, liveH - 2)
                 if (runtime.click(tx, ty, 80L)) runtime.onActionExecuted()
             }
-            return handleBranch(action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.foundBranchId
+            )
         } else {
             val readInfo = when {
                 !sawBlocks -> "tidak ada teks terbaca (pastikan area baca menutupi teks/angka)"
@@ -1753,7 +2167,10 @@ class MacroRunner(
                 else -> "terbaca=\"${lastOutcome.allText.take(40)}\""
             }
             runtime.log(LogLevel.INFO, "Teks/Nilai belum cocok ($readInfo).")
-            return handleBranch(action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth)
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
         }
     }
 
@@ -1767,12 +2184,19 @@ class MacroRunner(
         macro: Macro,
         startedAt: Long,
         maxDurationMs: Long,
-        depth: Int
+        depth: Int,
+        targetBranchId: String = ""
     ): FlowControl {
         val childFlow = executeList(branchActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
         if (childFlow != FlowControl.NEXT) return childFlow
         return when (endMode) {
             NotFoundMode.CONTINUE -> FlowControl.NEXT
+            NotFoundMode.SWITCH_BRANCH -> {
+                pendingSwitchBranchId = targetBranchId.trim()
+                FlowControl.SWITCH_BRANCH
+            }
+            NotFoundMode.CALL_BRANCH_RETURN ->
+                executeNamedBranchCall(targetBranchId.trim(), macro, startedAt, maxDurationMs, depth)
             NotFoundMode.RESTART -> FlowControl.RESTART_MACRO
             NotFoundMode.FINISH -> {
                 markProgress()
@@ -1792,5 +2216,7 @@ class MacroRunner(
 
     companion object {
         private const val MAX_CHAIN_DEPTH = 5
+        private const val MAX_BRANCH_CALL_DEPTH = 16
+        private const val MAX_BRANCH_SWITCHES_PER_LOOP = 64
     }
 }

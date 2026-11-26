@@ -6,6 +6,7 @@ import com.example.data.Macro
 import com.example.data.childList
 import com.example.data.kind
 import com.example.data.slots
+import com.example.data.walk
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,9 +67,13 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
         title = "Color Spy & Deteksi Warna (PRO)",
         subtitle = "Inspeksi dan deteksi warna piksel layar tersedia di Wjust macro PRO."
     ),
+    BRANCH_ROUTING(
+        title = "Cabang Urutan & Cek Arah (PRO)",
+        subtitle = "Buat jalur cabang alternatif, Cek Hasil & Pilih Arah otomatis, dan Pindah/Singgah cabang dengan Wjust macro PRO."
+    ),
     UPGRADE_GENERAL(
         title = "Wjust macro PRO",
-        subtitle = "Buka semua 18 jenis aksi, macro tanpa batas, Macro Set, Ekspor/Impor, Anti-Macet, dan Lua Studio."
+        subtitle = "Buka semua 20 jenis aksi (termasuk Cabang Urutan), macro tanpa batas, Macro Set, Ekspor/Impor, Anti-Macet, dan Lua Studio."
     )
 }
 
@@ -125,6 +130,28 @@ object PremiumFeatureGate {
                 feature = PremiumFeature.ACTION_LOCKED,
                 reason = "Aksi '${blocked.kind.label}' khusus Wjust macro PRO. Versi gratis mendukung Klik, Swipe, dan Deteksi Gambar.",
                 blockedKind = blocked.kind
+            )
+        }
+
+        if (macro.branches.isNotEmpty()) {
+            return MacroRunDenial(
+                feature = PremiumFeature.BRANCH_ROUTING,
+                reason = "Fitur Cabang Urutan khusus Wjust macro PRO."
+            )
+        }
+
+        val usesBranchSwitch = macro.actions.walk().any { a ->
+            a is com.example.data.ImageAction && (
+                a.foundMode == com.example.data.NotFoundMode.SWITCH_BRANCH ||
+                    a.foundMode == com.example.data.NotFoundMode.CALL_BRANCH_RETURN ||
+                    a.notFound == com.example.data.NotFoundMode.SWITCH_BRANCH ||
+                    a.notFound == com.example.data.NotFoundMode.CALL_BRANCH_RETURN
+                )
+        }
+        if (usesBranchSwitch) {
+            return MacroRunDenial(
+                feature = PremiumFeature.BRANCH_ROUTING,
+                reason = "Perpindahan jalur cabang urutan khusus Wjust macro PRO."
             )
         }
 
