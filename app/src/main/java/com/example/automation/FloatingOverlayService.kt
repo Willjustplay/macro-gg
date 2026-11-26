@@ -695,13 +695,17 @@ class FloatingOverlayService : Service() {
                 val st = if (saved.autoScaleResolution) "ON (${saved.scaleMode.label})" else "OFF"
                 Toast.makeText(this, "Auto-Scale disimpan: $st", Toast.LENGTH_SHORT).show()
             },
-            onAddAction = { ref, newAction, forStuck ->
+            onAddAction = { ref, newAction, forStuck, branchId ->
                 refreshScreenSize()
                 if (forStuck) {
                     AutomationCoordinator.addStuckActionFromOverlay(ref, newAction, screenWidth, screenHeight)
                 } else {
-                    AutomationCoordinator.addActionFromOverlay(ref, newAction, screenWidth, screenHeight)
+                    AutomationCoordinator.addActionFromOverlay(ref, newAction, screenWidth, screenHeight, branchId)
                 }
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
+            },
+            onMoveActionToBranch = { actionId, targetBranchId ->
+                AutomationCoordinator.moveActionToBranchFromOverlay(actionId, targetBranchId)
                 macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
             onUpdateAction = { actionId, transform ->
@@ -736,6 +740,14 @@ class FloatingOverlayService : Service() {
             onAddNewCropImageAction = {
                 dismissMacroSettingsPanel()
                 launchScreenshotCrop(addToMacro = true, targetActionId = null)
+            },
+            onCropAddBannedImage = {
+                dismissMacroSettingsPanel()
+                launchScreenshotCrop(
+                    addToMacro = false,
+                    targetActionId = TARGET_ADD_BANNED_IMAGE,
+                    reopenSettingsActionId = TARGET_ADD_BANNED_IMAGE
+                )
             },
             onPickTargetOnScreen = { actionId ->
                 dismissMacroSettingsPanel()
@@ -1218,6 +1230,12 @@ class FloatingOverlayService : Service() {
                         ExecutionLogBus.image("Gambar '${saved.displayName}' dipotong ulang (${saved.width}×${saved.height}).")
                         Toast.makeText(this, "Dipangkas ulang: ${saved.displayName}", Toast.LENGTH_SHORT).show()
                     }
+                    targetActionId == TARGET_ADD_BANNED_IMAGE -> {
+                        val saved = store.saveImage("banned", cropped, targetFolder)
+                        cropped.recycle()
+                        AutomationCoordinator.addBannedImageToActiveMacro(saved.name)
+                        Toast.makeText(this, "⛔ Gambar terlarang ditambahkan: ${saved.displayName}", Toast.LENGTH_SHORT).show()
+                    }
                     !targetActionId.isNullOrBlank() -> {
                         val saved = store.saveImage("target", cropped, targetFolder)
                         cropped.recycle()
@@ -1243,14 +1261,18 @@ class FloatingOverlayService : Service() {
                     }
                 }
                 dismissCropOverlay()
-                if (!reopenSettingsActionId.isNullOrBlank()) {
+                if (reopenSettingsActionId == TARGET_ADD_BANNED_IMAGE) {
+                    showMacroSettingsPanel(initialTab = 3, initialEditActionId = null)
+                } else if (!reopenSettingsActionId.isNullOrBlank()) {
                     val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             },
             onCancel = {
                 dismissCropOverlay()
-                if (!reopenSettingsActionId.isNullOrBlank()) {
+                if (reopenSettingsActionId == TARGET_ADD_BANNED_IMAGE) {
+                    showMacroSettingsPanel(initialTab = 3, initialEditActionId = null)
+                } else if (!reopenSettingsActionId.isNullOrBlank()) {
                     val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
@@ -2299,6 +2321,7 @@ class FloatingOverlayService : Service() {
         const val EXTRA_ADD_TO_MACRO = "add_to_macro"
         const val EXTRA_TARGET_ACTION_ID = "target_action_id"
         const val EXTRA_TARGET_FOLDER = "target_folder"
+        const val TARGET_ADD_BANNED_IMAGE = "__ADD_BANNED_IMAGE__"
 
         fun start(
             context: Context,

@@ -40,6 +40,7 @@ import com.example.data.LocalStore
 import com.example.data.LongPressAction
 import com.example.data.LoopAction
 import com.example.data.Macro
+import com.example.data.MacroBranch
 import com.example.data.MacroSecurity
 import com.example.data.NotFoundMode
 import com.example.data.RecentsSwipeDirection
@@ -59,13 +60,17 @@ import com.example.data.TrackInteractionMode
 import com.example.data.TrackObjectAction
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
+import com.example.data.actionsForBranch
 import com.example.data.branchDisplayName
+import com.example.data.branchIdOfAction
 import com.example.data.childList
 import com.example.data.create
 import com.example.data.findAction
 import com.example.data.findAnyAction
 import com.example.data.isStuckAction
 import com.example.data.kind
+import com.example.data.moveActionToBranch
+import com.example.data.newId
 import com.example.data.slots
 import com.example.data.summary
 import kotlin.math.roundToInt
@@ -74,8 +79,9 @@ import kotlin.math.roundToInt
  * Full-featured in-overlay Macro Studio matching the in-app Macro Editor:
  * - Tab "Setelan": switch active macro, name, loop/delay/jitter/randomDelay/maxDuration,
  *   all-device Auto-Scale (ALWAYS unlocked even when macro is locked!), and marker preview toggle.
- * - Tab "Aksi": full main action tree (Then/Else/Loop), add any action kind (incl. Track Object, Exit/Launch App).
+ * - Tab "Aksi": full main & branch action tree (with branch switcher & move-action-to-branch), add any action kind.
  * - Tab "Anti-Macet": out-of-band Watchdog actions triggered automatically when main macro gets stuck.
+ * - Tab "Banned": always-active Banned Image Guard (like Watchdog) blocking clicks onto forbidden images.
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
@@ -91,7 +97,8 @@ class OverlayMacroSettingsView(
     private val onToggleShowAllMarkers: (Boolean) -> Unit,
     private val onUpdateMacro: (Macro) -> Unit,
     private val onUpdateAutoScale: (enabled: Boolean, srcW: Int, srcH: Int, mode: ResolutionScaleMode) -> Unit,
-    private val onAddAction: (ContainerRef, Action, Boolean) -> Unit,
+    private val onAddAction: (ContainerRef, Action, Boolean, String) -> Unit,
+    private val onMoveActionToBranch: (actionId: String, targetBranchId: String) -> Unit = { _, _ -> },
     private val onUpdateAction: (String, (Action) -> Action) -> Unit,
     private val onMoveAction: (String, Int) -> Unit,
     private val onDeleteAction: (String) -> Unit,
@@ -99,6 +106,7 @@ class OverlayMacroSettingsView(
     private val onCropExtraFrameForTrackAction: (actionId: String) -> Unit,
     private val onRecropExistingImage: (imageName: String) -> Unit,
     private val onAddNewCropImageAction: () -> Unit,
+    private val onCropAddBannedImage: () -> Unit = {},
     private val onPickTargetOnScreen: (actionId: String) -> Unit,
     private val onPickRegionOnScreen: (actionId: String) -> Unit,
     private val onAddBranchClickTargetOnScreen: (parentId: String, slot: Slot, isStuckBranch: Boolean) -> Unit,
@@ -108,7 +116,10 @@ class OverlayMacroSettingsView(
     private val d = resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * d).toInt()
 
-    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi, 2 = Anti-Macet
+    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi, 2 = Anti-Macet, 3 = Banned
+    private var selectedBranchId: String = "" // "" = Jalur Utama
+    private var showCreateBranchInline: Boolean = false
+    private var moveBranchActionId: String? = null
     private var editingActionId: String? = initialEditActionId
     private var quickImageSwapActionId: String? = null
     private var appPickerActionId: String? = null
@@ -121,6 +132,7 @@ class OverlayMacroSettingsView(
     private val tabSettingsBtn: TextView
     private val tabActionsBtn: TextView
     private val tabWatchdogBtn: TextView
+    private val tabBannedBtn: TextView
     private val titleView: TextView
     private val subtitleView: TextView
 
@@ -164,7 +176,7 @@ class OverlayMacroSettingsView(
         header.addView(makeBtn("✕", "#334155") { onClose() })
         addView(header)
 
-        // 3-Tab switcher row: Setelan | Aksi | Anti-Macet
+        // 4-Tab switcher row: Setelan | Aksi | Macet | Banned
         val tabsRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
@@ -181,14 +193,20 @@ class OverlayMacroSettingsView(
             clearSubScreens()
             rebuildBody()
         }
-        tabWatchdogBtn = makeTabBtn("Anti-Macet") {
+        tabWatchdogBtn = makeTabBtn("Macet") {
             activeTab = 2
             clearSubScreens()
             rebuildBody()
         }
-        tabsRow.addView(tabSettingsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
-        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
-        tabsRow.addView(tabWatchdogBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        tabBannedBtn = makeTabBtn("⛔ Ban") {
+            activeTab = 3
+            clearSubScreens()
+            rebuildBody()
+        }
+        tabsRow.addView(tabSettingsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabWatchdogBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabBannedBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         addView(tabsRow)
 
         bodyContainer.setPadding(0, 0, 0, dp(14))
@@ -208,10 +226,15 @@ class OverlayMacroSettingsView(
         quickImageSwapActionId = null
         appPickerActionId = null
         addPickerRef = null
+        moveBranchActionId = null
+        showCreateBranchInline = false
     }
 
     fun refreshWithMacro(updated: Macro) {
         macro = updated
+        if (selectedBranchId.isNotBlank() && macro.branches.none { it.id == selectedBranchId }) {
+            selectedBranchId = ""
+        }
         rebuildBody()
     }
 
@@ -226,7 +249,8 @@ class OverlayMacroSettingsView(
         val lockIcon = if (effectivelyLocked) "🔒 " else ""
         titleView.text = lockIcon + macro.name.ifBlank { "Macro Aktif" }
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
-        val recStr = if (macro.autoRecoverStuckSec > 0) " • Anti-Macet ${macro.autoRecoverStuckSec}d" else ""
+        val recStr = if (macro.autoRecoverStuckSec > 0) " • Macet ${macro.autoRecoverStuckSec}d" else ""
+        val banStr = if (macro.bannedGuardEnabled && macro.bannedImages.isNotEmpty()) " • ⛔ ${macro.bannedImages.size}" else ""
         val extra = buildList {
             if (parentSet != null) add("📦 ${parentSet.name}")
             if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
@@ -234,13 +258,15 @@ class OverlayMacroSettingsView(
             (MacroSecurity.remainingTimeLabel(macro, now) ?: parentSet?.let { MacroSecurity.remainingSetTimeLabel(it, now) })
                 ?.let { add(it) }
         }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
-        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$extra"
+        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$banStr$extra"
         tabActionsBtn.text = if (effectivelyLocked) "🔒 Aksi" else "Aksi (${macro.actions.size})"
         tabWatchdogBtn.text = if (effectivelyLocked) "🔒 Macet" else "Macet (${macro.stuckActions.size})"
+        tabBannedBtn.text = if (effectivelyLocked) "🔒 Ban" else "⛔ (${macro.bannedImages.size})"
 
         styleTab(tabSettingsBtn, activeTab == 0)
         styleTab(tabActionsBtn, activeTab == 1)
         styleTab(tabWatchdogBtn, activeTab == 2, selectedHex = "#C2410C")
+        styleTab(tabBannedBtn, activeTab == 3, selectedHex = "#DC2626")
     }
 
     private fun styleTab(tv: TextView, selected: Boolean, selectedHex: String = "#0891B2") {
@@ -268,8 +294,17 @@ class OverlayMacroSettingsView(
         val swapId = quickImageSwapActionId
         val appPickId = appPickerActionId
         val editId = editingActionId
+        val moveId = moveBranchActionId
         when {
             pickerRef != null -> buildAddActionPicker(pickerRef, forStuck = addPickerForStuck)
+            moveId != null -> {
+                val target = macro.findAnyAction(moveId)
+                if (target != null) buildMoveActionToBranchView(target)
+                else {
+                    moveBranchActionId = null
+                    rebuildBody()
+                }
+            }
             appPickId != null -> {
                 val target = macro.findAnyAction(appPickId)
                 if (target is LaunchAppAction || target is ExitAppAction) {
@@ -297,7 +332,8 @@ class OverlayMacroSettingsView(
             }
             activeTab == 0 -> buildMacroSettingsForm()
             activeTab == 1 -> buildActionList()
-            else -> buildWatchdogTab()
+            activeTab == 2 -> buildWatchdogTab()
+            else -> buildBannedGuardTab()
         }
     }
 
@@ -685,13 +721,138 @@ class OverlayMacroSettingsView(
     // ---- TAB 2: Complete Main Action Tree ----
 
     private fun buildActionList() {
+        val branchScroll = HorizontalScrollView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        val branchRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val isMainSel = selectedBranchId.isBlank()
+        branchRow.addView(makeBtn(
+            "🟢 Utama (${macro.actions.size})",
+            if (isMainSel) "#0D9488" else "#1E293B",
+            marginEndDp = 4
+        ) {
+            selectedBranchId = ""
+            showCreateBranchInline = false
+            rebuildBody()
+        })
+        macro.branches.forEach { b ->
+            val isSel = selectedBranchId == b.id
+            branchRow.addView(makeBtn(
+                "🔀 ${b.name} (${b.actions.size})",
+                if (isSel) "#D97706" else "#1E293B",
+                marginEndDp = 4
+            ) {
+                selectedBranchId = b.id
+                showCreateBranchInline = false
+                rebuildBody()
+            })
+        }
+        branchRow.addView(makeBtn(
+            if (showCreateBranchInline) "Batal" else "+ Cabang",
+            if (showCreateBranchInline) "#475569" else "#0369A1",
+            marginEndDp = 0
+        ) {
+            showCreateBranchInline = !showCreateBranchInline
+            rebuildBody()
+        })
+        branchScroll.addView(branchRow)
+        bodyContainer.addView(branchScroll)
+
+        if (showCreateBranchInline) {
+            val createBox = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#111C30"))
+                    cornerRadius = dp(8).toFloat()
+                    setStroke(dp(1), Color.parseColor("#0284C7"))
+                }
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+            val nameEt = EditText(context).apply {
+                hint = "Nama cabang baru..."
+                setText("Cabang ${macro.branches.size + 1}")
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.parseColor("#64748B"))
+                textSize = 11.5f
+                isSingleLine = true
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1E293B"))
+                    cornerRadius = dp(6).toFloat()
+                }
+                layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) }
+            }
+            createBox.addView(nameEt)
+            createBox.addView(makeBtn("Buat", "#059669") {
+                val bName = nameEt.text.toString().trim().ifBlank { "Cabang ${macro.branches.size + 1}" }.take(36)
+                val colors = listOf("#F59E0B", "#06B6D4", "#10B981", "#EC4899", "#8B5CF6", "#EF4444")
+                val created = MacroBranch(
+                    id = newId(),
+                    name = bName,
+                    colorHex = colors[macro.branches.size % colors.size]
+                )
+                val updated = macro.copy(branches = macro.branches + created)
+                macro = updated
+                selectedBranchId = created.id
+                showCreateBranchInline = false
+                onUpdateMacro(updated)
+                rebuildBody()
+            })
+            bodyContainer.addView(createBox)
+        }
+
+        val currentBranch = if (selectedBranchId.isBlank()) null else macro.branches.firstOrNull { it.id == selectedBranchId }
+        if (currentBranch != null) {
+            val bInfo = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(5), dp(8), dp(5))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#2A1D08"))
+                    cornerRadius = dp(8).toFloat()
+                    setStroke(dp(1), Color.parseColor("#D97706"))
+                }
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+            bInfo.addView(TextView(context).apply {
+                text = "🔀 Cabang: ${currentBranch.name} (${currentBranch.actions.size} aksi)"
+                setTextColor(Color.parseColor("#FDE68A"))
+                textSize = 10.5f
+                typeface = Typeface.DEFAULT_BOLD
+                layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+            })
+            bInfo.addView(makeSmallIconBtn("Hapus", "#991B1B", marginEndDp = 0) {
+                val updated = macro.copy(branches = macro.branches.filterNot { it.id == currentBranch.id })
+                macro = updated
+                selectedBranchId = ""
+                onUpdateMacro(updated)
+                rebuildBody()
+            })
+            bodyContainer.addView(bInfo)
+        }
+
         val topBtns = LinearLayout(context).apply {
             orientation = HORIZONTAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(8)
             }
         }
-        topBtns.addView(makeBtn("+ Tambah Aksi", "#1D4ED8", marginEndDp = 6) {
+        topBtns.addView(makeBtn(
+            if (currentBranch != null) "+ Aksi ke ${currentBranch.name}" else "+ Tambah Aksi",
+            "#1D4ED8",
+            marginEndDp = 6
+        ) {
             addPickerForStuck = false
             addPickerRef = ContainerRef.ROOT
             rebuildBody()
@@ -701,16 +862,21 @@ class OverlayMacroSettingsView(
         })
         bodyContainer.addView(topBtns)
 
-        if (macro.actions.isEmpty()) {
+        val branchActions = macro.actionsForBranch(selectedBranchId)
+        if (branchActions.isEmpty()) {
             bodyContainer.addView(TextView(context).apply {
-                text = "Belum ada aksi. Ketuk '+ Tambah Aksi' atau '✂ Crop Img'."
+                text = if (currentBranch != null) {
+                    "Belum ada aksi di cabang '${currentBranch.name}'. Ketuk '+ Aksi' atau pindahkan aksi dari cabang lain dengan tombol ⇄."
+                } else {
+                    "Belum ada aksi. Ketuk '+ Tambah Aksi' atau '✂ Crop Img'."
+                }
                 setTextColor(Color.parseColor("#94A3B8"))
                 textSize = 11.5f
                 setPadding(dp(4), dp(12), dp(4), dp(12))
             })
         } else {
-            macro.actions.forEachIndexed { idx, action ->
-                bodyContainer.addView(buildActionCard(idx, macro.actions.size, action, depth = 0, isStuckTree = false))
+            branchActions.forEachIndexed { idx, action ->
+                bodyContainer.addView(buildActionCard(idx, branchActions.size, action, depth = 0, isStuckTree = false))
             }
         }
     }
@@ -818,6 +984,226 @@ class OverlayMacroSettingsView(
         }
     }
 
+    // ---- TAB 4: Always-Active Banned Image Guard (like Watchdog) ----
+
+    private fun buildBannedGuardTab() {
+        val infoBox = TextView(context).apply {
+            text = "⛔ Guard Banned Gambar (Selalu Aktif seperti Watchdog). Semua aksi klik (Klik, Tahan, Gambar, Teks, Warna, Rekaman) otomatis DIBLOKIR jika mengenai gambar terlarang di bawah."
+            setTextColor(Color.parseColor("#FCA5A5"))
+            textSize = 10.5f
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#2A0B0B"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#DC2626"))
+            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        bodyContainer.addView(infoBox)
+
+        val enableCheck = CheckBox(context).apply {
+            text = "Aktifkan Guard Banned Gambar (Selalu Aktif)"
+            isChecked = macro.bannedGuardEnabled
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+            setOnCheckedChangeListener { _, checked ->
+                val updated = macro.copy(bannedGuardEnabled = checked)
+                macro = updated
+                onUpdateMacro(updated)
+                updateHeader()
+            }
+        }
+        bodyContainer.addView(enableCheck)
+
+        var chosenMode = macro.bannedMode
+        val modeRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(2)
+                bottomMargin = dp(4)
+            }
+        }
+        val modeDesc = TextView(context).apply {
+            text = chosenMode.description
+            setTextColor(Color.parseColor("#CBD5E1"))
+            textSize = 10f
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        lateinit var btnAvoid: TextView
+        lateinit var btnBlockAll: TextView
+        fun refreshModeBtns() {
+            (btnAvoid.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (chosenMode == BannedImageMode.AVOID_MATCH_AREA) "#DC2626" else "#1E293B")
+            )
+            (btnBlockAll.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (chosenMode == BannedImageMode.BLOCK_IF_PRESENT) "#DC2626" else "#1E293B")
+            )
+            modeDesc.text = chosenMode.description
+        }
+        btnAvoid = makeBtn(BannedImageMode.AVOID_MATCH_AREA.shortLabel, if (chosenMode == BannedImageMode.AVOID_MATCH_AREA) "#DC2626" else "#1E293B", marginEndDp = 5) {
+            chosenMode = BannedImageMode.AVOID_MATCH_AREA
+            refreshModeBtns()
+        }
+        btnBlockAll = makeBtn(BannedImageMode.BLOCK_IF_PRESENT.shortLabel, if (chosenMode == BannedImageMode.BLOCK_IF_PRESENT) "#DC2626" else "#1E293B") {
+            chosenMode = BannedImageMode.BLOCK_IF_PRESENT
+            refreshModeBtns()
+        }
+        modeRow.addView(btnAvoid, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(5) })
+        modeRow.addView(btnBlockAll, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        bodyContainer.addView(modeRow)
+        bodyContainer.addView(modeDesc)
+
+        var thresholdPct = (macro.bannedThreshold * 100).roundToInt().coerceIn(50, 99)
+        val thrRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        val thrLabel = TextView(context).apply {
+            text = "Kemiripan Banned: $thresholdPct%"
+            setTextColor(Color.parseColor("#E2E8F0"))
+            textSize = 11f
+            layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+        }
+        thrRow.addView(thrLabel)
+        thrRow.addView(makeSmallIconBtn("-5%", "#334155", marginEndDp = 4) {
+            thresholdPct = (thresholdPct - 5).coerceIn(50, 99)
+            thrLabel.text = "Kemiripan Banned: $thresholdPct%"
+        })
+        thrRow.addView(makeSmallIconBtn("+5%", "#334155", marginEndDp = 0) {
+            thresholdPct = (thresholdPct + 5).coerceIn(50, 99)
+            thrLabel.text = "Kemiripan Banned: $thresholdPct%"
+        })
+        bodyContainer.addView(thrRow)
+
+        val radiusField = addNumberRow(
+            bodyContainer,
+            "Radius blokir aman (px)",
+            macro.bannedAvoidRadiusPx.toString()
+        )
+
+        val actionBtns = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(2)
+                bottomMargin = dp(8)
+            }
+        }
+        actionBtns.addView(makeBtn("Simpan Guard", "#DC2626", marginEndDp = 5) {
+            val radius = (radiusField.text.toString().toIntOrNull() ?: macro.bannedAvoidRadiusPx).coerceIn(0, 500)
+            val updated = macro.copy(
+                bannedGuardEnabled = enableCheck.isChecked,
+                bannedMode = chosenMode,
+                bannedThreshold = thresholdPct / 100f,
+                bannedAvoidRadiusPx = radius
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            updateHeader()
+            Toast.makeText(context, "Guard Banned Gambar disimpan.", Toast.LENGTH_SHORT).show()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(5) })
+        actionBtns.addView(makeBtn("✂ Crop Banned", "#0F766E") {
+            onCropAddBannedImage()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        bodyContainer.addView(actionBtns)
+
+        // Active Banned Images quick chips
+        if (macro.bannedImages.isNotEmpty()) {
+            bodyContainer.addView(sectionLabel("Gambar Diblokir (${macro.bannedImages.size}) — ketuk untuk hapus"))
+            val activeScroll = HorizontalScrollView(context).apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+            val activeRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+            macro.bannedImages.forEach { bName ->
+                activeRow.addView(makeBtn(
+                    "⛔ ${bName.substringAfterLast('/').removeSuffix(".png")} ✕",
+                    "#991B1B",
+                    marginEndDp = 4
+                ) {
+                    val nextList = macro.bannedImages.filterNot { it == bName }
+                    val updated = macro.copy(bannedImages = nextList)
+                    macro = updated
+                    onUpdateMacro(updated)
+                    rebuildBody()
+                })
+            }
+            activeScroll.addView(activeRow)
+            bodyContainer.addView(activeScroll)
+        }
+
+        // Visual library toggle strip to add/remove banned images
+        val allImages = store.images.value
+        bodyContainer.addView(sectionLabel("Pilih / Lepas Gambar Terlarang (${allImages.size})"))
+        if (allImages.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Pustaka gambar masih kosong. Ketuk '✂ Crop Banned' untuk langsung memotong gambar yang ingin diblokir dari layar."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 11f
+                setPadding(dp(4), dp(6), dp(4), dp(6))
+            })
+        } else {
+            val hScroll = HorizontalScrollView(context).apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(4)
+                }
+            }
+            val strip = LinearLayout(context).apply { orientation = HORIZONTAL }
+            allImages.forEach { asset ->
+                val isBanned = asset.name in macro.bannedImages
+                val tile = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    setPadding(dp(5), dp(5), dp(5), dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor(if (isBanned) "#450A0A" else "#1E293B"))
+                        cornerRadius = dp(10).toFloat()
+                        setStroke(dp(if (isBanned) 2 else 1), Color.parseColor(if (isBanned) "#EF4444" else "#334155"))
+                    }
+                    layoutParams = LayoutParams(dp(74), LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) }
+                    setOnClickListener {
+                        val nextList = if (isBanned) {
+                            macro.bannedImages.filterNot { it == asset.name }
+                        } else {
+                            (macro.bannedImages + asset.name).distinct()
+                        }
+                        val updated = macro.copy(
+                            bannedGuardEnabled = if (!isBanned) true else macro.bannedGuardEnabled,
+                            bannedImages = nextList
+                        )
+                        macro = updated
+                        onUpdateMacro(updated)
+                        rebuildBody()
+                    }
+                }
+                val bmp = runCatching { BitmapFactory.decodeFile(asset.path) }.getOrNull()
+                tile.addView(ImageView(context).apply {
+                    if (bmp != null) setImageBitmap(bmp)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setBackgroundColor(Color.parseColor("#0B1220"))
+                    layoutParams = LayoutParams(dp(58), dp(46)).apply { bottomMargin = dp(3) }
+                })
+                tile.addView(TextView(context).apply {
+                    text = (if (isBanned) "⛔ " else "") + asset.displayName.removeSuffix(".png")
+                    setTextColor(if (isBanned) Color.parseColor("#FCA5A5") else Color.WHITE)
+                    textSize = 9.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                strip.addView(tile)
+            }
+            hScroll.addView(strip)
+            bodyContainer.addView(hScroll)
+        }
+    }
+
     private fun buildActionCard(
         idx: Int,
         siblingCount: Int,
@@ -914,6 +1300,12 @@ class OverlayMacroSettingsView(
                 onPickTargetOnScreen(action.id)
             })
         }
+        if (!isStuckTree && depth == 0) {
+            row.addView(makeSmallIconBtn("⇄", "#D97706") {
+                moveBranchActionId = action.id
+                rebuildBody()
+            })
+        }
         row.addView(makeSmallIconBtn(if (action.enabled) "ON" else "OFF", if (action.enabled) "#059669" else "#475569") {
             onUpdateAction(action.id) { it.withEnabled(!action.enabled) }
         })
@@ -978,6 +1370,101 @@ class OverlayMacroSettingsView(
         return card
     }
 
+    private fun buildMoveActionToBranchView(action: Action) {
+        val nav = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        nav.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            moveBranchActionId = null
+            rebuildBody()
+        })
+        nav.addView(TextView(context).apply {
+            text = "Pindah ke Cabang: ${action.kind.label}"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        bodyContainer.addView(nav)
+
+        val curBranchId = macro.branchIdOfAction(action.id).orEmpty()
+        bodyContainer.addView(TextView(context).apply {
+            text = "Saat ini berada di: ${macro.branchDisplayName(curBranchId)}. Pilih jalur cabang tujuan:"
+            setTextColor(Color.parseColor("#CBD5E1"))
+            textSize = 11f
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        })
+
+        fun addBranchTargetRow(targetId: String, label: String, count: Int) {
+            val isCurrent = curBranchId == targetId
+            val rowBtn = makeBtn(
+                "$label ($count aksi)" + if (isCurrent) " • Saat ini" else "",
+                if (isCurrent) "#334155" else if (targetId.isBlank()) "#0D9488" else "#B45309",
+                marginEndDp = 0
+            ) {
+                if (!isCurrent) {
+                    onMoveActionToBranch(action.id, targetId)
+                    selectedBranchId = targetId
+                    moveBranchActionId = null
+                    Toast.makeText(context, "Dipindahkan ke $label.", Toast.LENGTH_SHORT).show()
+                }
+            }.apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            }
+            bodyContainer.addView(rowBtn)
+        }
+
+        addBranchTargetRow("", "🟢 Jalur Utama", macro.actions.size)
+        macro.branches.forEach { b ->
+            addBranchTargetRow(b.id, "🔀 ${b.name}", b.actions.size)
+        }
+
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("+ Buat Cabang Baru & Pindahkan"))
+        val newRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val newBranchEt = EditText(context).apply {
+            setText("Cabang ${macro.branches.size + 1}")
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+            isSingleLine = true
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1E293B"))
+                cornerRadius = dp(8).toFloat()
+            }
+            layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) }
+        }
+        newRow.addView(newBranchEt)
+        newRow.addView(makeBtn("Buat & Pindah", "#059669") {
+            val bName = newBranchEt.text.toString().trim().ifBlank { "Cabang ${macro.branches.size + 1}" }.take(36)
+            val colors = listOf("#F59E0B", "#06B6D4", "#10B981", "#EC4899", "#8B5CF6", "#EF4444")
+            val created = MacroBranch(
+                id = newId(),
+                name = bName,
+                colorHex = colors[macro.branches.size % colors.size]
+            )
+            val withBranch = macro.copy(branches = macro.branches + created)
+            val moved = withBranch.moveActionToBranch(action.id, created.id)
+            macro = moved
+            selectedBranchId = created.id
+            moveBranchActionId = null
+            onUpdateMacro(moved)
+            rebuildBody()
+            Toast.makeText(context, "Dipindahkan ke cabang baru '$bName'.", Toast.LENGTH_SHORT).show()
+        })
+        bodyContainer.addView(newRow)
+    }
+
     private fun isPositionable(action: Action): Boolean = when (action) {
         is ClickAction, is LongPressAction, is SwipeAction, is ZoomAction, is ColorAction -> true
         else -> false
@@ -1000,6 +1487,7 @@ class OverlayMacroSettingsView(
             text = when {
                 slot != null -> "Tambah ke: ${slot.label}"
                 forStuck -> "Tambah Aksi Anti-Macet"
+                selectedBranchId.isNotBlank() -> "Tambah ke: ${macro.branchDisplayName(selectedBranchId)}"
                 else -> "Pilih Jenis Aksi"
             }
             setTextColor(Color.WHITE)
@@ -1029,8 +1517,13 @@ class OverlayMacroSettingsView(
                 }
                 setOnClickListener {
                     val defaultImg = store.images.value.firstOrNull()?.name.orEmpty()
-                    val created = k.create(screenW, screenH, imageName = defaultImg)
-                    onAddAction(ref, created, forStuck)
+                    val rawCreated = k.create(screenW, screenH, imageName = defaultImg)
+                    val created = if (rawCreated is GoToBranchAction) {
+                        val suggested = macro.branches.firstOrNull { it.id != selectedBranchId } ?: macro.branches.firstOrNull()
+                        if (suggested != null) rawCreated.copy(targetBranchId = suggested.id, targetBranchName = suggested.name)
+                        else rawCreated
+                    } else rawCreated
+                    onAddAction(ref, created, forStuck, selectedBranchId)
                     addPickerRef = null
                     editingActionId = if (k == ActionKind.STOP || k == ActionKind.RESTART) null else created.id
                 }

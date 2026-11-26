@@ -95,9 +95,10 @@ object PlayerCoordinator {
     }
 
     fun macroNeedsScreenCapture(macro: Macro): Boolean =
-        macro.allActionsSequence().any {
-            it is ImageAction || it is TrackObjectAction || it is TextAction || it is ColorAction || it is com.example.data.BranchRouterAction
-        }
+        (macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }) ||
+            macro.allActionsSequence().any {
+                it is ImageAction || it is TrackObjectAction || it is TextAction || it is ColorAction || it is com.example.data.BranchRouterAction
+            }
 
     fun togglePlayPause(screenW: Int = 1080, screenH: Int = 2400) {
         when (_engineState.value) {

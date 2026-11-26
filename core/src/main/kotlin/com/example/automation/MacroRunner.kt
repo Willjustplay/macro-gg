@@ -576,7 +576,7 @@ class MacroRunner(
                     val tx = rawTx.coerceIn(1, liveW - 2)
                     val ty = rawTy.coerceIn(1, liveH - 2)
                     runtime.log(LogLevel.ACTION, "Klik ($tx, $ty) ${action.durationMs}ms" + if (times > 1) " [${i + 1}/$times]" else "")
-                    if (runtime.click(tx, ty, action.durationMs)) {
+                    if (guardedClick(macro, tx, ty, action.durationMs)) {
                         runtime.onActionExecuted()
                         markProgress()
                     }
@@ -594,7 +594,7 @@ class MacroRunner(
                 val ty = rawTy.coerceIn(1, liveH - 2)
                 val dur = action.durationMs.coerceAtLeast(250L)
                 runtime.log(LogLevel.ACTION, "Tahan ($tx, $ty) ${dur}ms")
-                if (runtime.click(tx, ty, dur)) {
+                if (guardedClick(macro, tx, ty, dur)) {
                     runtime.onActionExecuted()
                     markProgress()
                 }
@@ -805,6 +805,17 @@ class MacroRunner(
                     if (waitMs > 0) runtime.sleep(waitMs)
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     val scaledGesture = transform.scaleRecordedGesture(g)
+                    val blockedBy = if (activeBannedGuardMacro(macro) != null) {
+                        scaledGesture.strokes.firstNotNullOfOrNull { stroke ->
+                            if (stroke.points.size >= 2) {
+                                findBlockingBannedImage(macro, stroke.points[0], stroke.points[1])
+                            } else null
+                        }
+                    } else null
+                    if (blockedBy != null) {
+                        runtime.log(LogLevel.WARN, "⛔ Gestur rekaman DIBLOKIR oleh Guard Banned Gambar ('$blockedBy')!")
+                        continue
+                    }
                     if (runtime.playRecordedGesture(scaledGesture, speed)) {
                         runtime.onActionExecuted()
                         markProgress()
@@ -884,7 +895,23 @@ class MacroRunner(
                     discoveredMacroScale[macroKey]?.let { addFastScale(it, it) }
                 }
 
-                // Step 1: Detect any banned/forbidden images on this frame
+                // Step 1: Detect any banned/forbidden images on this frame (Global Always-Active Guard + Per-Action)
+                val globalGuard = activeBannedGuardMacro(macro)
+                val globalBannedBoxes = if (globalGuard != null) {
+                    detectGlobalBannedBoxes(globalGuard, frame, region = null)
+                } else emptyList()
+
+                if (globalGuard != null &&
+                    globalGuard.bannedMode == BannedImageMode.BLOCK_IF_PRESENT &&
+                    globalBannedBoxes.isNotEmpty()
+                ) {
+                    avoidedByBanCount++
+                    lastBannedLabel = globalBannedBoxes.first().first
+                    if (runtime.nowMs() >= deadline) break
+                    runtime.sleep(120L)
+                    continue
+                }
+
                 val bannedBoxes = ArrayList<Pair<String, MatchResult>>()
                 if (bannedTemplates.isNotEmpty()) {
                     val banThreshold = action.bannedThreshold.coerceIn(0.45f, 0.99f).toDouble()
@@ -921,8 +948,23 @@ class MacroRunner(
                 }
 
                 val avoidRadiusPx = frameTransform.scaleDistance(action.bannedAvoidRadiusPx.coerceAtLeast(0))
+                val globalAvoidRadiusPx = if (globalGuard != null) {
+                    ResolutionScaler.forMacro(globalGuard, frame.width, frame.height)
+                        .scaleDistance(globalGuard.bannedAvoidRadiusPx.coerceAtLeast(0))
+                } else 0
+                val hasAnyBannedZones = bannedBoxes.isNotEmpty() || globalBannedBoxes.isNotEmpty()
+
                 fun isNearBanned(m: MatchResult): Boolean {
-                    if (bannedBoxes.isEmpty()) return false
+                    for ((bName, b) in globalBannedBoxes) {
+                        val overlaps = m.x < b.x + b.width + globalAvoidRadiusPx &&
+                            m.x + m.width + globalAvoidRadiusPx > b.x &&
+                            m.y < b.y + b.height + globalAvoidRadiusPx &&
+                            m.y + m.height + globalAvoidRadiusPx > b.y
+                        if (overlaps) {
+                            lastBannedLabel = bName
+                            return true
+                        }
+                    }
                     for ((bName, b) in bannedBoxes) {
                         val overlaps = m.x < b.x + b.width + avoidRadiusPx &&
                             m.x + m.width + avoidRadiusPx > b.x &&
@@ -942,7 +984,7 @@ class MacroRunner(
                     if (cand.width > frame.width || cand.height > frame.height) continue
                     if (abs(sx - sy) < 0.02) triedUniformScales += sx
 
-                    if (bannedBoxes.isNotEmpty()) {
+                    if (hasAnyBannedZones) {
                         val allHits = if (scaledRegion != null &&
                             scaledRegion.width >= cand.width &&
                             scaledRegion.height >= cand.height
@@ -1057,7 +1099,7 @@ class MacroRunner(
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     runtime.waitIfPaused()
                     val (tx, ty) = applyJitter(matched.centerX + ox, matched.centerY + oy, jitterScaled)
-                    if (runtime.click(tx, ty, durationMs)) {
+                    if (guardedClick(macro, tx, ty, durationMs)) {
                         runtime.onActionExecuted()
                         markProgress()
                     }
@@ -1244,7 +1286,7 @@ class MacroRunner(
                     matchedPoint.second,
                     clickTransform.scaleDistance(macro.jitterPx)
                 )
-                if (runtime.click(tx, ty, 60L)) runtime.onActionExecuted()
+                if (guardedClick(macro, tx, ty, 60L)) runtime.onActionExecuted()
             }
             return applyBranchOutcome(
                 outcome = matchedRule.outcome,
@@ -1796,7 +1838,7 @@ class MacroRunner(
                 TrackInteractionMode.TAP_CONTINUOUS -> {
                     val tapDur = action.tapDurationMs.coerceIn(20L, 400L)
                     runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Tap ($gx,$gy)$leadTag")
-                    runtime.click(gx, gy, tapDur)
+                    guardedClick(macro, gx, gy, tapDur)
                 }
                 TrackInteractionMode.DRAG_TO_POINT -> {
                     val (destX, destY) = clickTransform.scalePoint(action.targetX, action.targetY)
@@ -2060,7 +2102,7 @@ class MacroRunner(
             markProgress()
             if (action.clickOnFound) {
                 val (tx, ty) = applyJitter(sx, sy, transform.scaleDistance(macro.jitterPx))
-                if (runtime.click(tx, ty, 50L)) runtime.onActionExecuted()
+                if (guardedClick(macro, tx, ty, 50L)) runtime.onActionExecuted()
             }
             return handleBranch(
                 action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
@@ -2150,7 +2192,7 @@ class MacroRunner(
                 val (rawTx, rawTy) = applyJitter(cx, cy, transform.scaleDistance(macro.jitterPx))
                 val tx = rawTx.coerceIn(1, liveW - 2)
                 val ty = rawTy.coerceIn(1, liveH - 2)
-                if (runtime.click(tx, ty, 80L)) runtime.onActionExecuted()
+                if (guardedClick(macro, tx, ty, 80L)) runtime.onActionExecuted()
             }
             return handleBranch(
                 action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
@@ -2172,6 +2214,96 @@ class MacroRunner(
                 targetBranchId = action.notFoundBranchId
             )
         }
+    }
+
+    /** Returns the active macro carrying an enabled always-on Banned Image Guard (local macro or root active macro). */
+    private fun activeBannedGuardMacro(macro: Macro): Macro? = when {
+        macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() } -> macro
+        rootWatchdogMacro?.let { it.bannedGuardEnabled && it.bannedImages.any { img -> img.isNotBlank() } } == true -> rootWatchdogMacro
+        else -> null
+    }
+
+    /** Detects all global banned image bounding boxes on [frame] for [guardMacro]. */
+    private fun detectGlobalBannedBoxes(
+        guardMacro: Macro,
+        frame: Frame,
+        region: Region? = null
+    ): List<Pair<String, MatchResult>> {
+        val names = guardMacro.bannedImages.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (names.isEmpty()) return emptyList()
+        val guardTransform = ResolutionScaler.forMacro(guardMacro, frame.width, frame.height)
+        val fastScales = ArrayList<Pair<Double, Double>>(4)
+        fun addScale(sx: Double, sy: Double) {
+            if (fastScales.none { abs(it.first - sx) < 0.02 && abs(it.second - sy) < 0.02 }) {
+                fastScales += sx to sy
+            }
+        }
+        guardTransform.templateScaleCandidates().forEach { (sx, sy) -> addScale(sx, sy) }
+        val macroKey = "${guardMacro.id}@${frame.width}x${frame.height}"
+        if (guardMacro.autoScaleResolution) {
+            discoveredMacroScale[macroKey]?.let { addScale(it, it) }
+        }
+        val threshold = guardMacro.bannedThreshold.coerceIn(0.45f, 0.99f).toDouble()
+        val found = ArrayList<Pair<String, MatchResult>>()
+        for (bName in names) {
+            val tpl = runtime.loadTemplate(bName) ?: continue
+            for ((sx, sy) in fastScales) {
+                val cand = tpl.scaled(sx, sy)
+                if (cand.width > frame.width || cand.height > frame.height) continue
+                val hits = if (region != null && region.width >= cand.width && region.height >= cand.height) {
+                    TemplateMatcher.findAll(
+                        frame, cand, threshold, maxResults = 8,
+                        regionLeft = region.left, regionTop = region.top,
+                        regionRight = region.right, regionBottom = region.bottom
+                    )
+                } else {
+                    TemplateMatcher.findAll(frame, cand, threshold, maxResults = 8)
+                }
+                if (hits.isNotEmpty()) {
+                    hits.forEach { found += bName to it }
+                    break
+                }
+            }
+        }
+        return found
+    }
+
+    /**
+     * Checks the always-active Banned Image Guard before dispatching any click at ([clickX], [clickY]).
+     * Returns the matched banned image name if the click must be BLOCKED, or null when safe to click.
+     */
+    private fun findBlockingBannedImage(macro: Macro, clickX: Int, clickY: Int): String? {
+        val guard = activeBannedGuardMacro(macro) ?: return null
+        val frame = runtime.captureFrame() ?: return null
+        val boxes = detectGlobalBannedBoxes(guard, frame)
+        if (boxes.isEmpty()) return null
+        if (guard.bannedMode == BannedImageMode.BLOCK_IF_PRESENT) {
+            return boxes.first().first
+        }
+        val guardTransform = ResolutionScaler.forMacro(guard, frame.width, frame.height)
+        val avoidPx = guardTransform.scaleDistance(guard.bannedAvoidRadiusPx.coerceAtLeast(0))
+        val sw = runtime.screenWidth.coerceAtLeast(1)
+        val sh = runtime.screenHeight.coerceAtLeast(1)
+        val fx = if (frame.width != sw) ((clickX.toLong() * frame.width) / sw).toInt() else clickX
+        val fy = if (frame.height != sh) ((clickY.toLong() * frame.height) / sh).toInt() else clickY
+        for ((bName, b) in boxes) {
+            if (fx in (b.x - avoidPx)..(b.x + b.width + avoidPx) &&
+                fy in (b.y - avoidPx)..(b.y + b.height + avoidPx)
+            ) {
+                return bName
+            }
+        }
+        return null
+    }
+
+    /** Always-active guarded click wrapper used across all macro actions. */
+    private suspend fun guardedClick(macro: Macro, x: Int, y: Int, durationMs: Long): Boolean {
+        val blockedBy = findBlockingBannedImage(macro, x, y)
+        if (blockedBy != null) {
+            runtime.log(LogLevel.WARN, "⛔ Klik ($x, $y) DIBLOKIR oleh Guard Banned Gambar ('$blockedBy')!")
+            return false
+        }
+        return runtime.click(x, y, durationMs)
     }
 
     private fun formatPlainNumber(v: Double): String =

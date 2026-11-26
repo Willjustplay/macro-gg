@@ -1586,6 +1586,7 @@ private fun MacroListCard(
     val hasRandom = allActions.any { it.chancePercent < 100 }
     val stuckActionCount = remember(macro) { macro.countStuckActions() }
     val hasWatchdog = macro.autoRecoverStuckSec > 0 && stuckActionCount > 0
+    val hasBannedGuard = macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }
     val scaleTransform = remember(macro.sourceWidth, macro.sourceHeight, macro.autoScaleResolution, macro.scaleMode, screenW, screenH) {
         ResolutionScaler.forMacro(macro, screenW, screenH)
     }
@@ -1759,8 +1760,8 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive / Auto-Scale / Watchdog badges row (Auto-Scale chip is always clickable without password)
-            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog) {
+            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard badges row
+            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (effectivelyLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -1790,6 +1791,9 @@ private fun MacroListCard(
                     }
                     if (hasWatchdog) {
                         FeatureTag("🛡 Anti-Macet ${macro.autoRecoverStuckSec}d", Color(0xFFF97316))
+                    }
+                    if (hasBannedGuard) {
+                        FeatureTag("⛔ Banned ${macro.bannedImages.size}", Color(0xFFEF4444))
                     }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)

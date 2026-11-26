@@ -659,7 +659,8 @@ class LocalStore(context: Context) {
                 val updated = m.copy(
                     actions = rewriteList(m.actions),
                     branches = m.branches.map { b -> b.copy(actions = rewriteList(b.actions)) },
-                    stuckActions = rewriteList(m.stuckActions)
+                    stuckActions = rewriteList(m.stuckActions),
+                    bannedImages = m.bannedImages.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it }
                 )
                 saveMacro(updated)
             }

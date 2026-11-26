@@ -35,9 +35,11 @@ import com.example.data.TrackObjectAction
 import com.example.data.ZoomAction
 import com.example.data.allActionsSequence
 import com.example.data.insertInto
+import com.example.data.moveActionToBranch
 import com.example.data.moveAnyAction
 import com.example.data.removeAnyAction
 import com.example.data.updateAnyAction
+import com.example.data.updateBranchActions
 import com.example.vision.Frame
 import com.example.vision.MatchResult
 import com.example.vision.OcrBlock
@@ -391,7 +393,13 @@ object AutomationCoordinator {
         else -> action
     }
 
-    fun addActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
+    fun addActionFromOverlay(
+        ref: ContainerRef,
+        action: Action,
+        screenW: Int = 0,
+        screenH: Int = 0,
+        branchId: String = ""
+    ) {
         if (rejectIfActiveMacroLocked()) return
         val (sw, sh) = resolveScreenSize(screenW, screenH)
         _activeMode.value = AutomationMode.MACRO
@@ -399,8 +407,28 @@ object AutomationCoordinator {
             val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
             val t = ResolutionScaler.forMacro(base, sw, sh)
             val storedAction = unscaleActionForStorage(t, action)
-            base.copy(actions = base.actions.insertInto(ref, storedAction))
+            base.updateBranchActions(branchId) { list -> list.insertInto(ref, storedAction) }
         }
+    }
+
+    fun moveActionToBranchFromOverlay(actionId: String, targetBranchId: String) {
+        if (rejectIfActiveMacroLocked()) return
+        updateActiveMacro(persist = true) { macro ->
+            macro.moveActionToBranch(actionId, targetBranchId)
+        }
+    }
+
+    fun addBannedImageToActiveMacro(imageName: String) {
+        if (rejectIfActiveMacroLocked()) return
+        val clean = imageName.trim()
+        if (clean.isBlank()) return
+        updateActiveMacro(persist = true) { macro ->
+            macro.copy(
+                bannedGuardEnabled = true,
+                bannedImages = (macro.bannedImages + clean).distinct()
+            )
+        }
+        ExecutionLogBus.image("⛔ Gambar terlarang '$clean' ditambahkan ke Guard Banned Gambar (selalu aktif).")
     }
 
     fun addStuckActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
@@ -539,6 +567,7 @@ object AutomationCoordinator {
         val visited = HashSet<String>()
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
+            if (m.bannedGuardEnabled && m.bannedImages.any { it.isNotBlank() }) return true
             for (a in m.allActionsSequence()) {
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
