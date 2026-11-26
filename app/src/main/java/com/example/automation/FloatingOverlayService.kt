@@ -510,6 +510,10 @@ class FloatingOverlayService : Service() {
         })
 
         toolsRow.addView(makeCompactButton("●", "#B91C1C") {
+            if (!com.example.billing.PremiumStateHolder.isPremium.value) {
+                Toast.makeText(this, "🔒 Rekam Sentuhan khusus Wjust macro PRO — buka aplikasi untuk upgrade", Toast.LENGTH_LONG).show()
+                return@makeCompactButton
+            }
             val active = AutomationCoordinator.activeMacro.value
             if (MacroSecurity.isEffectivelyLocked(active, store.getMacroSetById(active.setId))) {
                 Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat ditambah rekaman", Toast.LENGTH_SHORT).show()
@@ -523,6 +527,10 @@ class FloatingOverlayService : Service() {
         })
 
         toolsRow.addView(makeCompactButton("◎", "#6D28D9") {
+            if (!com.example.billing.PremiumStateHolder.isPremium.value) {
+                Toast.makeText(this, "🔒 Color Spy khusus Wjust macro PRO — buka aplikasi untuk upgrade", Toast.LENGTH_LONG).show()
+                return@makeCompactButton
+            }
             toggleColorSpy()
         })
 
@@ -690,6 +698,10 @@ class FloatingOverlayService : Service() {
                 Toast.makeText(this, "Setelan macro disimpan", Toast.LENGTH_SHORT).show()
             },
             onUpdateAutoScale = { enabled, srcW, srcH, mode ->
+                if (!com.example.billing.PremiumStateHolder.isPremium.value) {
+                    Toast.makeText(this, "🔒 Auto-Scale Resolusi khusus Wjust macro PRO", Toast.LENGTH_SHORT).show()
+                    return@OverlayMacroSettingsView
+                }
                 val saved = AutomationCoordinator.updateAutoScaleWithoutUnlock(enabled, srcW, srcH, mode)
                 macroSettingsView?.refreshWithMacro(saved)
                 val st = if (saved.autoScaleResolution) "ON (${saved.scaleMode.label})" else "OFF"

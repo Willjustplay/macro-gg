@@ -46,6 +46,7 @@ mlkitTextRecognition = "16.0.1"
 flatlaf = "3.8"
 jna = "5.15.0"
 kotlinxCoroutinesSwing = "1.10.2"
+billing = "7.1.1"
 
 
 [libraries]
@@ -107,6 +108,7 @@ mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition"
 flatlaf = { group = "com.formdev", name = "flatlaf", version.ref = "flatlaf" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 jna-platform = { group = "net.java.dev.jna", name = "jna-platform", version.ref = "jna" }
+billing-ktx = { group = "com.android.billingclient", name = "billing-ktx", version.ref = "billing" }
 
 
 [plugins]

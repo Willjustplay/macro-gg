@@ -1118,9 +1118,8 @@ class LocalStore(context: Context) {
                     loopDelayMs = 600,
                     jitterPx = 4,
                     actions = listOf(
-                        ClickAction(x = 540, y = 1200, durationMs = 50, delayAfterMs = 400),
-                        WaitAction(durationMs = 500, randomMs = 200),
-                        SwipeAction(x1 = 540, y1 = 1500, x2 = 540, y2 = 900, durationMs = 300, delayAfterMs = 400)
+                        ClickAction(x = 540, y = 1200, durationMs = 50, delayAfterMs = 600),
+                        SwipeAction(x1 = 540, y1 = 1500, x2 = 540, y2 = 900, durationMs = 300, delayAfterMs = 500)
                     )
                 )
             )

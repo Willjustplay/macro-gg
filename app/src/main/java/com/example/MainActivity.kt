@@ -69,9 +69,13 @@ import com.example.automation.ExecutionLogBus
 import com.example.automation.FloatingOverlayService
 import com.example.automation.MacroAccessibilityService
 import com.example.automation.ScreenCaptureService
+import com.example.billing.BillingConfig
+import com.example.billing.PremiumFeature
+import com.example.billing.PremiumFeatureGate
 import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.MacroSet
+import com.example.ui.AccessibilityDisclosureDialog
 import com.example.ui.CreateOrEditMacroSetDialog
 import com.example.ui.DeleteMacroSetDialog
 import com.example.ui.ImageLibraryScreen
@@ -86,6 +90,8 @@ import com.example.ui.MacroViewModel
 import com.example.ui.ManageMacroSetMembersSheet
 import com.example.ui.MoveMacroToSetDialog
 import com.example.ui.PasswordUnlockDialog
+import com.example.ui.PremiumPaywallSheet
+import com.example.ui.ProLockBadge
 import com.example.ui.SettingsPanel
 import com.example.ui.theme.TapLuaTheme
 import kotlinx.coroutines.launch
@@ -128,6 +134,8 @@ private fun WjustMacroApp() {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
     val syntaxResult by viewModel.syntaxResult.collectAsStateWithLifecycle()
+    val billingState by viewModel.billingState.collectAsStateWithLifecycle()
+    val isPremium = billingState.isPremium
 
     val engineState by AutomationCoordinator.engineState.collectAsStateWithLifecycle()
     val isOverlayActive by AutomationCoordinator.isOverlayActive.collectAsStateWithLifecycle()
@@ -148,6 +156,31 @@ private fun WjustMacroApp() {
     var passwordPromptAction by remember { mutableStateOf("") } // "EDIT" | "SECURITY" | "LOGO" | "DUPLICATE"
     var pendingExportMacro by remember { mutableStateOf<Macro?>(null) }
     var pendingExportSingleUse by remember { mutableStateOf(false) }
+
+    // Premium paywall & Play Store mandatory accessibility prominent disclosure state
+    var paywallRequest by remember { mutableStateOf<Pair<PremiumFeature, String?>?>(null) }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
+
+    fun openPaywall(feature: PremiumFeature, customReason: String? = null) {
+        viewModel.clearBillingStatusMessage()
+        paywallRequest = feature to customReason
+    }
+
+    fun requirePremium(feature: PremiumFeature, customReason: String? = null, action: () -> Unit) {
+        if (isPremium) action() else openPaywall(feature, customReason)
+    }
+
+    fun openManageSubscriptions() {
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(BillingConfig.PLAY_SUBSCRIPTIONS_URL)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }.onFailure {
+            scope.launch { snackbarHostState.showSnackbar("Buka Google Play → Langganan untuk mengelola paket Anda.") }
+        }
+    }
 
     // Macro Set modals & password-guard state
     var showCreateSetDialog by remember { mutableStateOf(false) }
@@ -276,81 +309,95 @@ private fun WjustMacroApp() {
     }
 
     fun openLocalImportPicker() {
-        loadingLocalImportFiles = true
-        showLocalImportDialog = true
-        viewModel.loadLocalImportFiles { files ->
-            localImportFiles = files
-            loadingLocalImportFiles = false
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            loadingLocalImportFiles = true
+            showLocalImportDialog = true
+            viewModel.loadLocalImportFiles { files ->
+                localImportFiles = files
+                loadingLocalImportFiles = false
+            }
         }
     }
 
     fun safeExportMacro(m: Macro, singleUseImport: Boolean = false) {
-        val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-        val fileName = if (singleUseImport) "${safeName}_1x.zip" else "$safeName.zip"
-        pendingExportMacro = m
-        pendingExportSingleUse = singleUseImport
-        runCatching {
-            exportMacroLauncher.launch(fileName)
-        }.onFailure {
-            pendingExportMacro = null
-            pendingExportSingleUse = false
-            viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport)
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
+            val fileName = if (singleUseImport) "${safeName}_1x.zip" else "$safeName.zip"
+            pendingExportMacro = m
+            pendingExportSingleUse = singleUseImport
+            runCatching {
+                exportMacroLauncher.launch(fileName)
+            }.onFailure {
+                pendingExportMacro = null
+                pendingExportSingleUse = false
+                viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUseImport)
+            }
         }
     }
 
     fun safeExportMacroSet(set: MacroSet, singleUseImport: Boolean = false) {
-        val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
-        val fileName = if (singleUseImport) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
-        pendingExportSet = set
-        pendingExportSetSingleUse = singleUseImport
-        runCatching {
-            exportMacroSetLauncher.launch(fileName)
-        }.onFailure {
-            pendingExportSet = null
-            pendingExportSetSingleUse = false
-            viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUseImport)
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
+            val fileName = if (singleUseImport) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
+            pendingExportSet = set
+            pendingExportSetSingleUse = singleUseImport
+            runCatching {
+                exportMacroSetLauncher.launch(fileName)
+            }.onFailure {
+                pendingExportSet = null
+                pendingExportSetSingleUse = false
+                viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUseImport)
+            }
         }
     }
 
     fun safeExportBackup() {
-        runCatching {
-            exportBackupLauncher.launch("wjust_macro_backup.zip")
-        }.onFailure {
-            viewModel.exportAllBackupToDownloads()
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            runCatching {
+                exportBackupLauncher.launch("wjust_macro_backup.zip")
+            }.onFailure {
+                viewModel.exportAllBackupToDownloads()
+            }
         }
     }
 
     fun safeExportImage(assetName: String, displayName: String) {
-        pendingExportImageName = assetName
-        runCatching {
-            exportImageLauncher.launch(displayName)
-        }.onFailure {
-            pendingExportImageName = null
-            viewModel.exportImageToDownloads(assetName, displayName)
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            pendingExportImageName = assetName
+            runCatching {
+                exportImageLauncher.launch(displayName)
+            }.onFailure {
+                pendingExportImageName = null
+                viewModel.exportImageToDownloads(assetName, displayName)
+            }
         }
     }
 
     fun safeExportImagesZip(selected: List<String>) {
-        pendingExportImagesZip = selected
-        runCatching {
-            exportImagesZipLauncher.launch("gambar_wjust_macro.zip")
-        }.onFailure {
-            pendingExportImagesZip = emptyList()
-            viewModel.exportImagesZipToDownloads(selected)
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            pendingExportImagesZip = selected
+            runCatching {
+                exportImagesZipLauncher.launch("gambar_wjust_macro.zip")
+            }.onFailure {
+                pendingExportImagesZip = emptyList()
+                viewModel.exportImagesZipToDownloads(selected)
+            }
         }
     }
 
     fun safeImportFile() {
-        val openedDoc = runCatching {
-            importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
-        }.isSuccess
-        if (openedDoc) return
+        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+            val openedDoc = runCatching {
+                importLauncher.launch(arrayOf("application/zip", "application/json", "*/*"))
+            }.isSuccess
+            if (openedDoc) return@requirePremium
 
-        val openedContent = runCatching {
-            importGetContentFallbackLauncher.launch("*/*")
-        }.isSuccess
-        if (!openedContent) {
-            openLocalImportPicker()
+            val openedContent = runCatching {
+                importGetContentFallbackLauncher.launch("*/*")
+            }.isSuccess
+            if (!openedContent) {
+                openLocalImportPicker()
+            }
         }
     }
 
@@ -366,12 +413,14 @@ private fun WjustMacroApp() {
     }
 
     fun safePickMacroLogo(target: Macro) {
-        pendingLogoMacro = target
-        runCatching {
-            macroLogoLauncher.launch("image/*")
-        }.onFailure {
-            pendingLogoMacro = null
-            scope.launch { snackbarHostState.showSnackbar("Pemilih gambar sistem tidak tersedia — pilih dari Pustaka Gambar.") }
+        requirePremium(PremiumFeature.CUSTOM_LOGO) {
+            pendingLogoMacro = target
+            runCatching {
+                macroLogoLauncher.launch("image/*")
+            }.onFailure {
+                pendingLogoMacro = null
+                scope.launch { snackbarHostState.showSnackbar("Pemilih gambar sistem tidak tersedia — pilih dari Pustaka Gambar.") }
+            }
         }
     }
 
@@ -379,6 +428,7 @@ private fun WjustMacroApp() {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshPermissions(context)
+                viewModel.refreshBilling()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -413,6 +463,10 @@ private fun WjustMacroApp() {
         }.onFailure {
             scope.launch { snackbarHostState.showSnackbar("Buka Pengaturan → Aksesibilitas secara manual.") }
         }
+    }
+
+    fun requestAccessibilityWithDisclosure() {
+        showAccessibilityDisclosure = true
     }
 
     fun requestOverlayPermission() {
@@ -497,25 +551,33 @@ private fun WjustMacroApp() {
     }
 
     fun requestOpenSecurity(m: Macro) {
-        val pSet = parentSetOf(m)
-        if (MacroSecurity.hasPassword(m) || (pSet != null && MacroSecurity.hasSetPassword(pSet))) {
-            passwordPromptMacroId = m.id
-            passwordPromptAction = "SECURITY"
-        } else {
-            securitySheetMacroId = m.id
+        requirePremium(PremiumFeature.SECURITY_LOCK) {
+            val pSet = parentSetOf(m)
+            if (MacroSecurity.hasPassword(m) || (pSet != null && MacroSecurity.hasSetPassword(pSet))) {
+                passwordPromptMacroId = m.id
+                passwordPromptAction = "SECURITY"
+            } else {
+                securitySheetMacroId = m.id
+            }
         }
     }
 
     fun requestChangeLogo(m: Macro) {
-        if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
-            passwordPromptMacroId = m.id
-            passwordPromptAction = "LOGO"
-        } else {
-            logoSheetMacroId = m.id
+        requirePremium(PremiumFeature.CUSTOM_LOGO) {
+            if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
+                passwordPromptMacroId = m.id
+                passwordPromptAction = "LOGO"
+            } else {
+                logoSheetMacroId = m.id
+            }
         }
     }
 
     fun requestDuplicateMacro(m: Macro) {
+        if (!PremiumFeatureGate.canCreateMacro(macros.size, isPremium)) {
+            openPaywall(PremiumFeature.MACRO_LIMIT)
+            return
+        }
         if (MacroSecurity.isEffectivelyLocked(m, parentSetOf(m)) && m.id !in unlockedMacroIds) {
             passwordPromptMacroId = m.id
             passwordPromptAction = "DUPLICATE"
@@ -525,65 +587,79 @@ private fun WjustMacroApp() {
     }
 
     fun requestCreateMacroInSet(set: MacroSet) {
-        if (set.isLocked) {
-            passwordPromptSetId = set.id
-            passwordPromptSetAction = "ADD_MACRO"
-        } else {
-            val created = viewModel.createNewMacro(setId = set.id)
-            editingMacroId = created.id
+        requirePremium(PremiumFeature.MACRO_SET) {
+            if (set.isLocked) {
+                passwordPromptSetId = set.id
+                passwordPromptSetAction = "ADD_MACRO"
+            } else {
+                val created = viewModel.createNewMacro(setId = set.id)
+                editingMacroId = created.id
+            }
         }
     }
 
     fun requestEditMacroSet(set: MacroSet) {
-        if (set.isLocked) {
-            passwordPromptSetId = set.id
-            passwordPromptSetAction = "EDIT_SET"
-        } else {
-            editingSetId = set.id
+        requirePremium(PremiumFeature.MACRO_SET) {
+            if (set.isLocked) {
+                passwordPromptSetId = set.id
+                passwordPromptSetAction = "EDIT_SET"
+            } else {
+                editingSetId = set.id
+            }
         }
     }
 
     fun requestManageMacroSetMembers(set: MacroSet) {
-        if (set.isLocked) {
-            passwordPromptSetId = set.id
-            passwordPromptSetAction = "MEMBERS"
-        } else {
-            managingMembersSetId = set.id
+        requirePremium(PremiumFeature.MACRO_SET) {
+            if (set.isLocked) {
+                passwordPromptSetId = set.id
+                passwordPromptSetAction = "MEMBERS"
+            } else {
+                managingMembersSetId = set.id
+            }
         }
     }
 
     fun requestOpenMacroSetSecurity(set: MacroSet) {
-        if (MacroSecurity.hasSetPassword(set)) {
-            passwordPromptSetId = set.id
-            passwordPromptSetAction = "SECURITY"
-        } else {
-            securitySheetSetId = set.id
+        requirePremium(PremiumFeature.MACRO_SET) {
+            if (MacroSecurity.hasSetPassword(set)) {
+                passwordPromptSetId = set.id
+                passwordPromptSetAction = "SECURITY"
+            } else {
+                securitySheetSetId = set.id
+            }
         }
     }
 
     fun requestDuplicateMacroSet(set: MacroSet) {
-        if (set.isLocked) {
-            passwordPromptSetId = set.id
-            passwordPromptSetAction = "DUPLICATE"
-        } else {
-            viewModel.duplicateMacroSet(set)
+        requirePremium(PremiumFeature.MACRO_SET) {
+            if (set.isLocked) {
+                passwordPromptSetId = set.id
+                passwordPromptSetAction = "DUPLICATE"
+            } else {
+                viewModel.duplicateMacroSet(set)
+            }
         }
     }
 
     fun requestMoveMacroToSet(m: Macro) {
-        val curSet = parentSetOf(m)
-        if (curSet != null && curSet.isLocked) {
-            pendingMoveMacroId = m.id
-            passwordPromptSetId = curSet.id
-            passwordPromptSetAction = "MOVE_OUT"
-        } else {
-            movingMacroId = m.id
+        requirePremium(PremiumFeature.MACRO_SET) {
+            val curSet = parentSetOf(m)
+            if (curSet != null && curSet.isLocked) {
+                pendingMoveMacroId = m.id
+                passwordPromptSetId = curSet.id
+                passwordPromptSetAction = "MOVE_OUT"
+            } else {
+                movingMacroId = m.id
+            }
         }
     }
 
     fun requestTogglePassivePull(m: Macro) {
-        if (!m.isPassive) return
-        viewModel.toggleMacroPassiveEnabled(m)
+        requirePremium(PremiumFeature.SECURITY_LOCK) {
+            if (!m.isPassive) return@requirePremium
+            viewModel.toggleMacroPassiveEnabled(m)
+        }
     }
 
     fun launchMacroIfAllowed(m: Macro) {
@@ -591,6 +667,11 @@ private fun WjustMacroApp() {
         val denial = MacroSecurity.checkDirectRun(m, viewModel.effectiveNowMs(), pSet)
         if (denial != null) {
             scope.launch { snackbarHostState.showSnackbar(MacroSecurity.denialMessage(m, denial, pSet)) }
+            return
+        }
+        val premiumDenial = PremiumFeatureGate.checkMacroRun(m, isPremium)
+        if (premiumDenial != null) {
+            openPaywall(premiumDenial.feature, premiumDenial.reason)
             return
         }
         AutomationCoordinator.selectMacro(m)
@@ -669,13 +750,17 @@ private fun WjustMacroApp() {
                     )
                 },
                 onLaunchRecorderOverlay = { m ->
-                    AutomationCoordinator.selectMacro(m)
-                    launchOverlay(FloatingOverlayService.ACTION_OPEN_RECORDER)
+                    requirePremium(PremiumFeature.TOUCH_RECORDER) {
+                        AutomationCoordinator.selectMacro(m)
+                        launchOverlay(FloatingOverlayService.ACTION_OPEN_RECORDER)
+                    }
                 },
                 onBack = {
                     unlockedMacroIds = unlockedMacroIds - editingMacro.id
                     editingMacroId = null
-                }
+                },
+                isPremium = isPremium,
+                onRequirePremium = { feature, reason -> openPaywall(feature, reason) }
             )
         } else {
             val (homeSw, homeSh) = screenMetrics()
@@ -729,7 +814,7 @@ private fun WjustMacroApp() {
                                 if (permissions.accessibilityEnabled) {
                                     scope.launch { snackbarHostState.showSnackbar("Aksesibilitas sudah aktif.") }
                                 } else {
-                                    openAccessibilitySettings()
+                                    requestAccessibilityWithDisclosure()
                                 }
                             },
                             onRequestOverlay = {
@@ -753,20 +838,30 @@ private fun WjustMacroApp() {
                             },
                             onStopEngine = { AutomationCoordinator.stop() },
                             onQuickAutoClicker = {
-                                val (sw, sh) = screenMetrics()
-                                val quick = viewModel.createQuickAutoClicker(sw, sh)
-                                AutomationCoordinator.selectMacro(quick)
-                                launchOverlay()
+                                if (!PremiumFeatureGate.canCreateMacro(macros.size, isPremium)) {
+                                    openPaywall(PremiumFeature.MACRO_LIMIT)
+                                } else {
+                                    val (sw, sh) = screenMetrics()
+                                    val quick = viewModel.createQuickAutoClicker(sw, sh)
+                                    AutomationCoordinator.selectMacro(quick)
+                                    launchOverlay()
+                                }
                             },
                             onCreateMacro = {
-                                val created = viewModel.createNewMacro()
-                                editingMacroId = created.id
+                                if (!PremiumFeatureGate.canCreateMacro(macros.size, isPremium)) {
+                                    openPaywall(PremiumFeature.MACRO_LIMIT)
+                                } else {
+                                    val created = viewModel.createNewMacro()
+                                    editingMacroId = created.id
+                                }
                             },
                             onCreateMacroInSet = ::requestCreateMacroInSet,
                             onImportMacro = ::safeImportFile,
                             onCreateMacroSet = {
-                                createSetPreselectedMacroIds = emptySet()
-                                showCreateSetDialog = true
+                                requirePremium(PremiumFeature.MACRO_SET) {
+                                    createSetPreselectedMacroIds = emptySet()
+                                    showCreateSetDialog = true
+                                }
                             },
                             onEditMacroSet = ::requestEditMacroSet,
                             onManageMacroSetMembers = ::requestManageMacroSetMembers,
@@ -774,9 +869,11 @@ private fun WjustMacroApp() {
                             onDuplicateMacroSet = ::requestDuplicateMacroSet,
                             onExportMacroSet = { set, singleUse -> safeExportMacroSet(set, singleUseImport = singleUse) },
                             onExportMacroSetDirectToDownloads = { set, singleUse ->
-                                val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
-                                val fileName = if (singleUse) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
-                                viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUse)
+                                requirePremium(PremiumFeature.EXPORT_IMPORT) {
+                                    val safeName = set.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro_set" }
+                                    val fileName = if (singleUse) "${safeName}_set_1x.zip" else "${safeName}_set.zip"
+                                    viewModel.exportMacroSetToDownloads(set, fileName, singleUseImport = singleUse)
+                                }
                             },
                             onDeleteMacroSet = { set -> deletingSetId = set.id },
                             onMoveMacroToSet = ::requestMoveMacroToSet,
@@ -784,16 +881,25 @@ private fun WjustMacroApp() {
                             onLaunchMacroOverlay = ::launchMacroIfAllowed,
                             onChangeMacroLogo = ::requestChangeLogo,
                             onOpenMacroSecurity = ::requestOpenSecurity,
-                            onOpenAutoScale = { m -> autoScaleSheetMacroId = m.id },
+                            onOpenAutoScale = { m ->
+                                requirePremium(PremiumFeature.AUTO_SCALE) {
+                                    autoScaleSheetMacroId = m.id
+                                }
+                            },
                             onTogglePassivePull = ::requestTogglePassivePull,
                             onDuplicateMacro = ::requestDuplicateMacro,
                             onExportMacro = { m, singleUse -> safeExportMacro(m, singleUseImport = singleUse) },
                             onExportMacroDirectToDownloads = { m, singleUse ->
-                                val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
-                                val fileName = if (singleUse) "${safeName}_1x.zip" else "$safeName.zip"
-                                viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUse)
+                                requirePremium(PremiumFeature.EXPORT_IMPORT) {
+                                    val safeName = m.name.replace(Regex("[^A-Za-z0-9_\\-]"), "_").ifBlank { "macro" }
+                                    val fileName = if (singleUse) "${safeName}_1x.zip" else "$safeName.zip"
+                                    viewModel.exportMacroToDownloads(m, fileName, singleUseImport = singleUse)
+                                }
                             },
-                            onDeleteMacro = { m -> viewModel.deleteMacro(m.id) }
+                            onDeleteMacro = { m -> viewModel.deleteMacro(m.id) },
+                            isPremium = isPremium,
+                            activePlanLabel = billingState.activePlanLabel,
+                            onOpenPaywall = { f -> openPaywall(f) }
                         )
 
                         MainTab.IMAGES -> ImageLibraryScreen(
@@ -823,7 +929,11 @@ private fun WjustMacroApp() {
                         )
 
                         MainTab.TOOLS -> Column(modifier = Modifier.fillMaxSize()) {
-                            val options = listOf("Lua Studio", "Live Log", "Pengaturan")
+                            val options = listOf(
+                                if (isPremium) "Lua Studio" else "🔒 Lua",
+                                "Live Log",
+                                "Pengaturan"
+                            )
                             SingleChoiceSegmentedButtonRow(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -840,37 +950,51 @@ private fun WjustMacroApp() {
                                 }
                             }
                             when (toolsSubTab) {
-                                0 -> LuaStudioScreen(
-                                    scripts = scripts,
-                                    images = images,
-                                    syntaxResult = syntaxResult,
-                                    onCreateScript = viewModel::createNewScript,
-                                    onSaveScript = viewModel::saveScript,
-                                    onDeleteScript = viewModel::deleteScript,
-                                    onValidateSyntax = viewModel::validateLuaSyntax,
-                                    onClearSyntaxResult = viewModel::clearSyntaxResult,
-                                    onLaunchOverlayWithScript = { s ->
-                                        AutomationCoordinator.selectLuaScript(s)
-                                        launchOverlay()
-                                    },
-                                    onRunScriptNow = { s ->
-                                        if (!permissions.accessibilityEnabled) {
-                                            scope.launch { snackbarHostState.showSnackbar("Aktifkan Wjust macro di Accessibility Settings terlebih dahulu.") }
-                                            openAccessibilitySettings()
-                                        } else {
-                                            val (sw, sh) = screenMetrics()
-                                            AutomationCoordinator.runLuaScript(s, sw, sh)
+                                0 -> if (isPremium) {
+                                    LuaStudioScreen(
+                                        scripts = scripts,
+                                        images = images,
+                                        syntaxResult = syntaxResult,
+                                        onCreateScript = viewModel::createNewScript,
+                                        onSaveScript = viewModel::saveScript,
+                                        onDeleteScript = viewModel::deleteScript,
+                                        onValidateSyntax = viewModel::validateLuaSyntax,
+                                        onClearSyntaxResult = viewModel::clearSyntaxResult,
+                                        onLaunchOverlayWithScript = { s ->
+                                            AutomationCoordinator.selectLuaScript(s)
+                                            launchOverlay()
+                                        },
+                                        onRunScriptNow = { s ->
+                                            if (!permissions.accessibilityEnabled) {
+                                                scope.launch { snackbarHostState.showSnackbar("Aktifkan Wjust macro di Accessibility Settings terlebih dahulu.") }
+                                                requestAccessibilityWithDisclosure()
+                                            } else {
+                                                val (sw, sh) = screenMetrics()
+                                                AutomationCoordinator.runLuaScript(s, sw, sh)
+                                            }
                                         }
-                                    }
-                                )
+                                    )
+                                } else {
+                                    LuaStudioLockedPlaceholder(
+                                        onUpgrade = { openPaywall(PremiumFeature.LUA_STUDIO) }
+                                    )
+                                }
                                 1 -> LiveLogPanel(logs = liveLogs)
                                 2 -> SettingsPanel(
                                     settings = settings,
                                     onUpdateSettings = viewModel::updateSettings,
                                     onExportAllBackup = ::safeExportBackup,
                                     onImportBackup = ::safeImportFile,
-                                    onExportBackupDirectToDownloads = { viewModel.exportAllBackupToDownloads() },
-                                    onImportFromDownloadsFolder = ::openLocalImportPicker
+                                    onExportBackupDirectToDownloads = {
+                                        requirePremium(PremiumFeature.EXPORT_IMPORT) {
+                                            viewModel.exportAllBackupToDownloads()
+                                        }
+                                    },
+                                    onImportFromDownloadsFolder = ::openLocalImportPicker,
+                                    billingState = billingState,
+                                    onOpenPaywall = { openPaywall(PremiumFeature.UPGRADE_GENERAL) },
+                                    onRestorePurchases = viewModel::restorePurchases,
+                                    onManageSubscriptions = ::openManageSubscriptions
                                 )
                             }
                         }
@@ -1163,6 +1287,84 @@ private fun WjustMacroApp() {
                 },
                 onDismiss = { showLocalImportDialog = false }
             )
+        }
+
+        // Play Store Mandatory Prominent Disclosure Dialog before opening Accessibility Settings
+        if (showAccessibilityDisclosure) {
+            AccessibilityDisclosureDialog(
+                onAccept = {
+                    showAccessibilityDisclosure = false
+                    openAccessibilitySettings()
+                },
+                onDecline = {
+                    showAccessibilityDisclosure = false
+                }
+            )
+        }
+
+        // Wjust macro PRO Subscription Paywall Sheet (Monthly & Yearly via Google Play Billing)
+        paywallRequest?.let { (feature, customReason) ->
+            PremiumPaywallSheet(
+                feature = feature,
+                customReason = customReason,
+                billingState = billingState,
+                onSelectSubscribe = { plan ->
+                    val activity = context as? Activity
+                    if (activity != null) {
+                        viewModel.launchSubscription(activity, plan)
+                    } else {
+                        scope.launch { snackbarHostState.showSnackbar("Tidak dapat membuka dialog Google Play.") }
+                    }
+                },
+                onRestorePurchases = { viewModel.restorePurchases() },
+                onManageSubscriptions = ::openManageSubscriptions,
+                onDebugTogglePremium = { override -> viewModel.setDebugPremiumOverride(override) },
+                onDismiss = { paywallRequest = null }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LuaStudioLockedPlaceholder(
+    onUpgrade: () -> Unit
+) {
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = androidx.compose.ui.Alignment.Center
+    ) {
+        androidx.compose.material3.Card(
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)
+            ) {
+                ProLockBadge(text = "FITUR PRO")
+                Text(
+                    text = "Lua Studio Khusus Wjust macro PRO",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Text(
+                    text = "Tulis, validasi, dan jalankan script otomasi Lua lengkap (image detection, OCR, loop, dan fungsi kustom) dengan berlangganan Wjust macro PRO.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                androidx.compose.material3.Button(
+                    onClick = onUpgrade,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Upgrade ke Wjust macro PRO")
+                }
+            }
         }
     }
 }

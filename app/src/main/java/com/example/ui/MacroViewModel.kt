@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -14,6 +15,10 @@ import com.example.automation.LuaSyntaxResult
 import com.example.automation.MacroAccessibilityService
 import com.example.automation.SandboxedLuaEngine
 import com.example.automation.ScreenCaptureService
+import com.example.billing.BillingUiState
+import com.example.billing.PlayBillingManager
+import com.example.billing.PremiumStateHolder
+import com.example.billing.SubscriptionPlan
 import com.example.data.Action
 import com.example.data.AppSettings
 import com.example.data.ClickAction
@@ -42,6 +47,7 @@ data class PermissionHealth(
 class MacroViewModel(private val appContext: Context) : ViewModel() {
 
     private val store = LocalStore.get(appContext)
+    private val billingManager = PlayBillingManager.get(appContext)
 
     val macros: StateFlow<List<Macro>> = store.macros
     val macroSets: StateFlow<List<MacroSet>> = store.macroSets
@@ -49,6 +55,8 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     val images: StateFlow<List<ImageAsset>> = store.images
     val imageFolders: StateFlow<List<String>> = store.imageFolders
     val settings: StateFlow<AppSettings> = store.settings
+    val billingState: StateFlow<BillingUiState> = billingManager.uiState
+    val isPremium: StateFlow<Boolean> = PremiumStateHolder.isPremium
 
     private val _permissions = MutableStateFlow(PermissionHealth())
     val permissions: StateFlow<PermissionHealth> = _permissions.asStateFlow()
@@ -62,7 +70,20 @@ class MacroViewModel(private val appContext: Context) : ViewModel() {
     init {
         AutomationCoordinator.attachStore(appContext)
         refreshPermissions(appContext)
+        billingManager.refreshEntitlements()
     }
+
+    fun refreshBilling() = billingManager.refreshEntitlements()
+
+    fun launchSubscription(activity: Activity, plan: SubscriptionPlan) {
+        billingManager.launchSubscriptionPurchase(activity, plan)
+    }
+
+    fun restorePurchases() = billingManager.restorePurchases()
+
+    fun clearBillingStatusMessage() = billingManager.clearStatusMessage()
+
+    fun setDebugPremiumOverride(enabled: Boolean?) = billingManager.setDebugPremiumOverride(enabled)
 
     fun refreshPermissions(context: Context = appContext) {
         val pm = context.getSystemService(PowerManager::class.java)

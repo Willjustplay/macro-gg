@@ -176,6 +176,10 @@ class OverlayMacroSettingsView(
             rebuildBody()
         }
         tabWatchdogBtn = makeTabBtn("Anti-Macet") {
+            if (!com.example.billing.PremiumStateHolder.isPremium.value) {
+                Toast.makeText(context, "🔒 Anti-Macet (Watchdog) khusus Wjust macro PRO", Toast.LENGTH_SHORT).show()
+                return@makeTabBtn
+            }
             activeTab = 2
             clearSubScreens()
             rebuildBody()
@@ -1002,25 +1006,38 @@ class OverlayMacroSettingsView(
         })
         bodyContainer.addView(bar)
 
+        val isPremium = com.example.billing.PremiumStateHolder.isPremium.value
         val kinds = listOf(
-            ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
+            ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE,
+            ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
             ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
-            ActionKind.CLICK, ActionKind.LONG_PRESS,
-            ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
+            ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
             ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
         )
         for (k in kinds) {
+            val isLockedByPlan = !isPremium && !com.example.billing.PremiumFeatureGate.isActionKindFree(k)
             val item = LinearLayout(context).apply {
                 orientation = VERTICAL
                 setPadding(dp(10), dp(7), dp(10), dp(7))
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#1E293B"))
+                    setColor(Color.parseColor(if (isLockedByPlan) "#151A2B" else "#1E293B"))
                     cornerRadius = dp(10).toFloat()
+                    if (isLockedByPlan) {
+                        setStroke(dp(1), Color.parseColor("#78350F"))
+                    }
                 }
                 layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                     bottomMargin = dp(5)
                 }
                 setOnClickListener {
+                    if (isLockedByPlan) {
+                        Toast.makeText(
+                            context,
+                            "🔒 Aksi '${k.label}' khusus Wjust macro PRO. Versi gratis: Klik, Swipe & Deteksi Gambar.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@setOnClickListener
+                    }
                     val defaultImg = store.images.value.firstOrNull()?.name.orEmpty()
                     val created = k.create(screenW, screenH, imageName = defaultImg)
                     onAddAction(ref, created, forStuck)
@@ -1029,8 +1046,8 @@ class OverlayMacroSettingsView(
                 }
             }
             item.addView(TextView(context).apply {
-                text = k.label
-                setTextColor(Color.WHITE)
+                text = if (isLockedByPlan) "🔒 ${k.label}  [PRO]" else k.label
+                setTextColor(if (isLockedByPlan) Color.parseColor("#FDE68A") else Color.WHITE)
                 textSize = 12f
                 typeface = Typeface.DEFAULT_BOLD
             })

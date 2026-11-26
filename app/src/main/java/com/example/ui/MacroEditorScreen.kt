@@ -171,7 +171,9 @@ fun MacroEditorScreen(
     onLaunchTargetPickerOverlay: (Macro, String) -> Unit,
     onLaunchRegionPickerOverlay: (Macro, String) -> Unit,
     onLaunchRecorderOverlay: (Macro) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    isPremium: Boolean = false,
+    onRequirePremium: (com.example.billing.PremiumFeature, String?) -> Unit = { _, _ -> }
 ) {
     var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Aksi Utama, 1 = Anti-Macet (Watchdog)
     var editingAction by remember { mutableStateOf<Action?>(null) }
@@ -396,13 +398,17 @@ fun MacroEditorScreen(
             item(key = "editor_tab_switcher") {
                 val tabLabels = listOf(
                     "Aksi Utama (${macro.actions.size})",
-                    "Anti-Macet (${macro.stuckActions.size})"
+                    if (isPremium) "Anti-Macet (${macro.stuckActions.size})" else "🔒 Anti-Macet (PRO)"
                 )
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     tabLabels.forEachIndexed { idx, label ->
                         SegmentedButton(
                             selected = editorTab == idx,
                             onClick = {
+                                if (idx == 1 && !isPremium) {
+                                    onRequirePremium(com.example.billing.PremiumFeature.WATCHDOG, null)
+                                    return@SegmentedButton
+                                }
                                 editorTab = idx
                                 dragPreviewActions = null
                             },
@@ -432,14 +438,20 @@ fun MacroEditorScreen(
                             Text("Crop Gambar", maxLines = 1)
                         }
                         OutlinedButton(
-                            onClick = { onLaunchRecorderOverlay(macro) },
+                            onClick = {
+                                if (!isPremium) {
+                                    onRequirePremium(com.example.billing.PremiumFeature.TOUCH_RECORDER, null)
+                                } else {
+                                    onLaunchRecorderOverlay(macro)
+                                }
+                            },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.weight(1f),
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 9.dp)
                         ) {
                             Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Rekam Sentuhan", maxLines = 1)
+                            Text(if (isPremium) "Rekam Sentuhan" else "Rekam (PRO)", maxLines = 1)
                         }
                     }
                 }
@@ -770,7 +782,16 @@ fun MacroEditorScreen(
     addTargetRef?.let { targetRef ->
         AddActionPickerSheet(
             isNested = targetRef.parentId != null,
+            isPremium = isPremium,
             onPick = { kind ->
+                if (!isPremium && !com.example.billing.PremiumFeatureGate.isActionKindFree(kind)) {
+                    addTargetRef = null
+                    onRequirePremium(
+                        com.example.billing.PremiumFeature.ACTION_LOCKED,
+                        "Aksi '${kind.label}' khusus Wjust macro PRO. Versi gratis hanya mendukung Klik, Swipe, dan Deteksi Gambar."
+                    )
+                    return@AddActionPickerSheet
+                }
                 val defaultImg = images.firstOrNull()?.name.orEmpty()
                 val created = kind.create(screenW, screenH, imageName = defaultImg)
                 mutateActions { it.insertInto(targetRef, created) }
@@ -828,6 +849,11 @@ fun MacroEditorScreen(
             logoPath = logoPath,
             screenW = screenW,
             screenH = screenH,
+            isPremium = isPremium,
+            onRequirePremium = { feature ->
+                showMacroSettings = false
+                onRequirePremium(feature, null)
+            },
             onChangeLogo = {
                 showMacroSettings = false
                 onChangeLogo()
@@ -1402,15 +1428,26 @@ private fun QuickImagePickerSheet(
 @Composable
 private fun AddActionPickerSheet(
     isNested: Boolean,
+    isPremium: Boolean,
     onPick: (ActionKind) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val groups = listOf(
-        "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
-        "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
-        "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
-        "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)
-    )
+    val groups = if (isPremium) {
+        listOf(
+            "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
+            "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
+            "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
+            "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)
+        )
+    } else {
+        listOf(
+            "Aksi Gratis (Tersedia)" to listOf(ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE),
+            "Deteksi Lanjutan (PRO)" to listOf(ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
+            "Sentuhan & Jeda (PRO)" to listOf(ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT),
+            "Aplikasi (PRO)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
+            "Alur & Hubungkan Macro (PRO)" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)
+        )
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1431,11 +1468,15 @@ private fun AddActionPickerSheet(
                 Text(heading, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     kinds.forEach { kind ->
+                        val isLocked = !isPremium && !com.example.billing.PremiumFeatureGate.isActionKindFree(kind)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                .background(
+                                    if (isLocked) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                )
                                 .clickable { onPick(kind) }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1444,15 +1485,29 @@ private fun AddActionPickerSheet(
                                 modifier = Modifier
                                     .size(34.dp)
                                     .clip(RoundedCornerShape(9.dp))
-                                    .background(kind.accentColor().copy(alpha = 0.16f)),
+                                    .background(kind.accentColor().copy(alpha = if (isLocked) 0.09f else 0.16f)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(kind.icon(), contentDescription = null, tint = kind.accentColor(), modifier = Modifier.size(18.dp))
+                                Icon(
+                                    kind.icon(),
+                                    contentDescription = null,
+                                    tint = if (isLocked) kind.accentColor().copy(alpha = 0.65f) else kind.accentColor(),
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                             Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(kind.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    kind.label,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isLocked) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f) else MaterialTheme.colorScheme.onSurface
+                                )
                                 Text(kind.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (isLocked) {
+                                Spacer(Modifier.width(8.dp))
+                                ProLockBadge()
                             }
                         }
                     }
@@ -1469,6 +1524,8 @@ private fun MacroSettingsSheet(
     logoPath: String?,
     screenW: Int,
     screenH: Int,
+    isPremium: Boolean,
+    onRequirePremium: (com.example.billing.PremiumFeature) -> Unit,
     onChangeLogo: () -> Unit,
     onOpenSecurity: () -> Unit,
     onTogglePassivePull: () -> Unit,
@@ -1721,38 +1778,84 @@ private fun MacroSettingsSheet(
 
             HorizontalDivider()
 
-            // Auto-Scale Resolusi Layar (semua perangkat: HP, Tablet, Foldable, Emulator, CloudPhone)
-            AutoScaleControlsBlock(
-                macro = macro,
-                screenW = screenW,
-                screenH = screenH,
-                autoScale = autoScale,
-                onAutoScaleChange = { autoScale = it },
-                sourceWText = sourceWText,
-                onSourceWChange = { sourceWText = it },
-                sourceHText = sourceHText,
-                onSourceHChange = { sourceHText = it },
-                scaleMode = scaleMode,
-                onScaleModeChange = { scaleMode = it }
-            )
+            // Auto-Scale Resolusi Layar (PRO)
+            if (isPremium) {
+                AutoScaleControlsBlock(
+                    macro = macro,
+                    screenW = screenW,
+                    screenH = screenH,
+                    autoScale = autoScale,
+                    onAutoScaleChange = { autoScale = it },
+                    sourceWText = sourceWText,
+                    onSourceWChange = { sourceWText = it },
+                    sourceHText = sourceHText,
+                    onSourceHChange = { sourceHText = it },
+                    scaleMode = scaleMode,
+                    onScaleModeChange = { scaleMode = it }
+                )
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = ProGoldColor.copy(alpha = 0.08f),
+                    border = BorderStroke(1.dp, ProGoldColor.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onRequirePremium(com.example.billing.PremiumFeature.AUTO_SCALE) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("Auto-Scale Resolusi Layar", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                            Text("Sesuaikan koordinat lintas layar HP/Tablet/Emulator", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        ProLockBadge()
+                    }
+                }
+            }
 
             HorizontalDivider()
-            Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            OutlinedTextField(
-                value = stuckSec,
-                onValueChange = { stuckSec = it.filter(Char::isDigit) },
-                label = { Text("Pulihkan otomatis jika macet (detik, 0=off)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth()
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                StuckRecoveryMode.entries.forEach { m ->
-                    FilterChip(
-                        selected = recoveryMode == m,
-                        onClick = { recoveryMode = m },
-                        label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
-                    )
+            if (isPremium) {
+                Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                OutlinedTextField(
+                    value = stuckSec,
+                    onValueChange = { stuckSec = it.filter(Char::isDigit) },
+                    label = { Text("Pulihkan otomatis jika macet (detik, 0=off)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StuckRecoveryMode.entries.forEach { m ->
+                        FilterChip(
+                            selected = recoveryMode == m,
+                            onClick = { recoveryMode = m },
+                            label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = ProGoldColor.copy(alpha = 0.08f),
+                    border = BorderStroke(1.dp, ProGoldColor.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onRequirePremium(com.example.billing.PremiumFeature.WATCHDOG) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("Auto Perbaiki Macro Macet (Watchdog)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                            Text("Pulihkan otomatis jika macro berhenti/macet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        ProLockBadge()
+                    }
                 }
             }
 
@@ -1770,12 +1873,12 @@ private fun MacroSettingsSheet(
                                 jitterPx = (jitter.toIntOrNull() ?: 0).coerceIn(0, 60),
                                 randomDelayMs = (randomDelay.toLongOrNull() ?: 0L).coerceAtLeast(0L),
                                 maxDurationMin = (maxMin.toIntOrNull() ?: 0).coerceIn(0, 1440),
-                                autoRecoverStuckSec = (stuckSec.toIntOrNull() ?: 0).coerceIn(0, 3600),
-                                stuckRecoveryMode = recoveryMode,
-                                sourceWidth = savedSrcW,
-                                sourceHeight = savedSrcH,
-                                autoScaleResolution = autoScale,
-                                scaleMode = scaleMode
+                                autoRecoverStuckSec = if (isPremium) (stuckSec.toIntOrNull() ?: 0).coerceIn(0, 3600) else 0,
+                                stuckRecoveryMode = if (isPremium) recoveryMode else macro.stuckRecoveryMode,
+                                sourceWidth = if (isPremium) savedSrcW else macro.sourceWidth,
+                                sourceHeight = if (isPremium) savedSrcH else macro.sourceHeight,
+                                autoScaleResolution = if (isPremium) autoScale else macro.autoScaleResolution,
+                                scaleMode = if (isPremium) scaleMode else macro.scaleMode
                             )
                         )
                     },

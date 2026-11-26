@@ -149,7 +149,10 @@ fun MacroHomeScreen(
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro, Boolean) -> Unit,
     onExportMacroDirectToDownloads: (Macro, Boolean) -> Unit = onExportMacro,
-    onDeleteMacro: (Macro) -> Unit
+    onDeleteMacro: (Macro) -> Unit,
+    isPremium: Boolean = false,
+    activePlanLabel: String = "Gratis",
+    onOpenPaywall: (com.example.billing.PremiumFeature) -> Unit = {}
 ) {
     var exportDialogMacro by remember { mutableStateOf<Macro?>(null) }
     var exportDialogPreferDownloads by remember { mutableStateOf(false) }
@@ -280,6 +283,84 @@ fun MacroHomeScreen(
                         Icon(Icons.Filled.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (isOverlayActive) "Tutup Bar" else "Buka Bar", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // Subscription / Free Tier Status Banner
+        item(key = "subscription_banner") {
+            if (isPremium) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF064E3B).copy(alpha = 0.25f),
+                    border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenPaywall(com.example.billing.PremiumFeature.UPGRADE_GENERAL) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = null,
+                                tint = Color(0xFF34D399),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "Wjust macro PRO • $activePlanLabel",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA7F3D0)
+                            )
+                        }
+                        Text(
+                            text = "Semua Fitur Aktif",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF6EE7B7)
+                        )
+                    }
+                }
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = ProGoldColor.copy(alpha = 0.10f),
+                    border = BorderStroke(1.dp, ProGoldColor.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenPaywall(com.example.billing.PremiumFeature.UPGRADE_GENERAL) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Versi Gratis • ${macros.size}/${com.example.billing.PremiumFeatureGate.FREE_MAX_MACROS} Macro",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = ProGoldLightColor
+                            )
+                            Text(
+                                text = "Gratis: Klik, Swipe & Deteksi Gambar • Upgrade PRO untuk semua fitur",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        ProLockBadge(text = "UPGRADE PRO")
                     }
                 }
             }

@@ -599,6 +599,14 @@ object AutomationCoordinator {
             ExecutionLogBus.error(MacroSecurity.denialMessage(macro, denial, parentSet))
             return
         }
+        com.example.billing.PremiumFeatureGate.checkMacroRun(
+            macro = macro,
+            isPremium = com.example.billing.PremiumStateHolder.isPremium.value
+        )?.let { premiumDenial ->
+            _engineState.value = EngineState.ERROR
+            ExecutionLogBus.error("🔒 ${premiumDenial.reason}")
+            return
+        }
         if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
             ExecutionLogBus.error("Accessibility Service belum aktif! Aktifkan di Pengaturan Aksesibilitas.")
@@ -849,6 +857,11 @@ object AutomationCoordinator {
 
     fun runLuaScript(script: LuaScript, screenWidth: Int, screenHeight: Int) {
         stop()
+        if (!com.example.billing.PremiumStateHolder.isPremium.value) {
+            _engineState.value = EngineState.ERROR
+            ExecutionLogBus.error("🔒 Lua Studio khusus Wjust macro PRO. Upgrade untuk menjalankan script Lua.")
+            return
+        }
         if (!MacroAccessibilityService.isConnected.value) {
             _engineState.value = EngineState.ERROR
             ExecutionLogBus.error("Accessibility Service belum aktif! Aktifkan terlebih dahulu.")

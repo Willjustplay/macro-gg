@@ -150,7 +150,11 @@ fun SettingsPanel(
     onExportAllBackup: () -> Unit,
     onImportBackup: () -> Unit,
     onExportBackupDirectToDownloads: () -> Unit = onExportAllBackup,
-    onImportFromDownloadsFolder: () -> Unit = onImportBackup
+    onImportFromDownloadsFolder: () -> Unit = onImportBackup,
+    billingState: com.example.billing.BillingUiState = com.example.billing.BillingUiState(),
+    onOpenPaywall: () -> Unit = {},
+    onRestorePurchases: () -> Unit = {},
+    onManageSubscriptions: () -> Unit = {}
 ) {
     var tapMsText by remember(settings.defaultTapDurationMs) { mutableStateOf(settings.defaultTapDurationMs.toString()) }
     var jitterText by remember(settings.defaultJitterPx) { mutableStateOf(settings.defaultJitterPx.toString()) }
@@ -162,10 +166,77 @@ fun SettingsPanel(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Subscription / PRO Card
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (billingState.isPremium) {
+                    Color(0xFF064E3B).copy(alpha = 0.25f)
+                } else {
+                    ProGoldColor.copy(alpha = 0.10f)
+                }
+            )
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (billingState.isPremium) "Wjust macro PRO Aktif" else "Wjust macro PRO",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = if (billingState.isPremium) {
+                                "Paket aktif: ${billingState.activePlanLabel} • Semua fitur terbuka"
+                            } else {
+                                "Paket saat ini: Gratis (Klik, Swipe, Deteksi Gambar • maks. 3 macro)"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (!billingState.isPremium) {
+                        ProLockBadge(text = "UPGRADE")
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onOpenPaywall, modifier = Modifier.weight(1.2f)) {
+                        Text(if (billingState.isPremium) "Detail Paket" else "Upgrade PRO", maxLines = 1)
+                    }
+                    OutlinedButton(onClick = onRestorePurchases, modifier = Modifier.weight(1f)) {
+                        Text("Pulihkan", maxLines = 1)
+                    }
+                }
+                if (billingState.isPremium) {
+                    OutlinedButton(onClick = onManageSubscriptions, modifier = Modifier.fillMaxWidth()) {
+                        Text("Kelola Langganan di Google Play", maxLines = 1)
+                    }
+                }
+            }
+        }
+
         // Backup / Export / Import (with direct CloudPhone / Redfinger Download/WjustMacro option)
         Card(shape = RoundedCornerShape(14.dp)) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Backup & Pindah Perangkat (Offline)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Backup & Pindah Perangkat (Offline)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (!billingState.isPremium) {
+                        ProLockBadge()
+                    }
+                }
                 Text(
                     "Semua macro, gambar target, dan script Lua disimpan lokal di perangkat ini. Di CloudPhone/Redfinger, gunakan simpan langsung ke Download/WjustMacro agar tidak bergantung pada pemilih file sistem.",
                     style = MaterialTheme.typography.bodySmall,
