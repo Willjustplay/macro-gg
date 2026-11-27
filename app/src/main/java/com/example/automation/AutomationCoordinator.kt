@@ -144,6 +144,9 @@ object AutomationCoordinator {
     private val _humanBreakRemainingSec = MutableStateFlow(0)
     val humanBreakRemainingSec: StateFlow<Int> = _humanBreakRemainingSec.asStateFlow()
 
+    private val _liveSessionStats = MutableStateFlow<com.example.data.LiveSessionStats?>(null)
+    val liveSessionStats: StateFlow<com.example.data.LiveSessionStats?> = _liveSessionStats.asStateFlow()
+
     fun toggleVisualDebug(): Boolean {
         val next = !_visualDebugEnabled.value
         _visualDebugEnabled.value = next
@@ -628,7 +631,8 @@ object AutomationCoordinator {
             for (a in m.allActionsSequence()) {
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction ||
                     (a is com.example.data.VariableAction && a.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
-                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP)
+                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP) ||
+                    (a is com.example.data.NotifyAction && a.includeScreenshot)
                 ) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
@@ -711,12 +715,64 @@ object AutomationCoordinator {
 
         val startedAt = System.currentTimeMillis()
         val counter = AtomicInteger(0)
+        val watchdogCount = AtomicInteger(0)
+        val bannedCount = AtomicInteger(0)
+        val accountSwitchCount = AtomicInteger(0)
+        val humanBreakCount = AtomicInteger(0)
+        val lastVarsRef = java.util.concurrent.atomic.AtomicReference<Map<String, Double>>(emptyMap())
         val localStore = store
+
+        fun publishLiveStats() {
+            _liveSessionStats.value = com.example.data.LiveSessionStats(
+                macroName = _activeMacro.value.name.ifBlank { macro.name },
+                startedAtMs = startedAt,
+                loopsCompleted = _currentLoop.value,
+                actionsExecuted = counter.get(),
+                watchdogRecoveries = watchdogCount.get(),
+                bannedBlocks = bannedCount.get(),
+                accountSwitches = accountSwitchCount.get(),
+                humanBreaks = humanBreakCount.get()
+            )
+        }
+        publishLiveStats()
 
         activeJob = engineScope.launch {
             ExecutionLogBus.info(
                 "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
             )
+            var lastPeriodicReportAt = startedAt
+            val periodicReportJob = launch {
+                while (isActive && !stopRequested.get()) {
+                    delay(15_000L)
+                    val cfg = localStore?.notificationConfig?.value ?: continue
+                    val intervalMin = cfg.periodicReportMinutes
+                    if (intervalMin <= 0 || !cfg.hasAnyRemoteConfigured()) continue
+                    val now = System.currentTimeMillis()
+                    if (now - lastPeriodicReportAt >= intervalMin * 60_000L) {
+                        lastPeriodicReportAt = now
+                        val dur = (now - startedAt).coerceAtLeast(0L)
+                        val loops = _currentLoop.value
+                        val acts = counter.get()
+                        val rateL = com.example.data.FarmingStatsCalculator.formatRate(
+                            com.example.data.FarmingStatsCalculator.ratePerHour(loops, dur)
+                        )
+                        val accLine = _activeAccountLabel.value.takeIf { it.isNotBlank() }?.let { "\nAkun: $it" } ?: ""
+                        val msg = "Durasi: ${com.example.data.FarmingStatsCalculator.formatDuration(dur)} • Loop: $loops ($rateL/jam) • Aksi: $acts" +
+                            "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}$accLine"
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Laporan Berkala — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = msg,
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+            }
             val runtime = object : MacroRuntime {
                 override val screenWidth: Int get() = liveScreenSize(screenWidth, screenHeight).first
                 override val screenHeight: Int get() = liveScreenSize(screenWidth, screenHeight).second
@@ -953,43 +1009,177 @@ object AutomationCoordinator {
                     _debugEvents.tryEmit(event)
                 }
                 override fun onVariablesChanged(variables: Map<String, Double>) {
+                    lastVarsRef.set(variables)
                     _liveVariables.value = variables
                 }
                 override fun onHumanBreakChanged(remainingSec: Int) {
                     _humanBreakRemainingSec.value = remainingSec.coerceAtLeast(0)
+                }
+                override fun onWatchdogTriggered(modeLabel: String) {
+                    val count = watchdogCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnWatchdog && cfg.hasAnyRemoteConfigured()) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Watchdog Anti-Macet — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = "Recovery #$count ($modeLabel) pada loop #${_currentLoop.value}.",
+                            level = com.example.data.NotifyLevel.WARNING,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+                override fun onBannedBlocked(imageName: String) {
+                    bannedCount.incrementAndGet()
+                    publishLiveStats()
+                }
+                override fun onAccountSwitched(accountLabel: String) {
+                    val count = accountSwitchCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnAccountSwitch && cfg.hasAnyRemoteConfigured()) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Ganti Akun — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = "Beralih ke akun '$accountLabel' (perpindahan #$count, loop #${_currentLoop.value}).",
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = false,
+                            triggerPhoneAlarm = false
+                        )
+                    }
+                }
+                override fun onHumanBreakStarted(durationSec: Int) {
+                    humanBreakCount.incrementAndGet()
+                    publishLiveStats()
+                }
+                override suspend fun sendNotification(
+                    title: String,
+                    message: String,
+                    level: com.example.data.NotifyLevel,
+                    sendRemote: Boolean,
+                    includeScreenshot: Boolean,
+                    triggerPhoneAlarm: Boolean
+                ) {
+                    val cfg = localStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                        context = appCtx,
+                        config = cfg,
+                        title = title,
+                        message = message,
+                        level = level,
+                        sendRemote = sendRemote,
+                        includeScreenshot = includeScreenshot,
+                        triggerPhoneAlarm = triggerPhoneAlarm,
+                        captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                    )
                 }
                 override fun onMatchFound(match: MatchResult, label: String) {
                     if (!_visualDebugEnabled.value && localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)
                     }
                 }
-                override fun onLoopChanged(loop: Int) { _currentLoop.value = loop }
-                override fun onActionExecuted() { _actionsExecuted.value = counter.incrementAndGet() }
+                override fun onLoopChanged(loop: Int) {
+                    _currentLoop.value = loop
+                    publishLiveStats()
+                }
+                override fun onActionExecuted() {
+                    _actionsExecuted.value = counter.incrementAndGet()
+                    publishLiveStats()
+                }
                 override fun log(level: LogLevel, message: String) = ExecutionLogBus.log(level, message)
                 override fun nowMs(): Long = localStore?.effectiveNowMs() ?: System.currentTimeMillis()
             }
 
+            var endReason = "Selesai"
+            var errorDetail = ""
             try {
                 // Brief settle delay so releasing the floating Play button never cancels action #1
                 cooperativeDelay(140L)
                 MacroRunner(runtime).run(macro)
+                if (stopRequested.get()) {
+                    endReason = "Dihentikan"
+                }
             } catch (_: CancellationException) {
+                endReason = "Dihentikan"
                 ExecutionLogBus.info("Macro dihentikan.")
             } catch (t: Throwable) {
+                endReason = "Error"
+                errorDetail = t.message ?: t::class.java.simpleName
                 _engineState.value = EngineState.ERROR
-                ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
+                ExecutionLogBus.error("Error: $errorDetail")
             } finally {
+                periodicReportJob.cancel()
                 localStore?.flushClockWatermark()
                 ScreenCaptureService.trackingCaptureMode = false
                 ScreenCaptureService.highFrequencyCapture = false
+                val endedAt = System.currentTimeMillis()
+                val elapsed = (endedAt - startedAt).coerceAtLeast(0L)
+                val finalLoops = _currentLoop.value
+                val finalActions = counter.get()
+                val finalMacroName = _activeMacro.value.name.ifBlank { macro.name }
+                if (elapsed >= 500L || finalActions > 0 || finalLoops > 0 || endReason == "Error") {
+                    localStore?.recordFarmingSession(
+                        com.example.data.FarmingSessionRecord(
+                            macroId = macro.id,
+                            macroName = finalMacroName,
+                            startedAtMs = startedAt,
+                            endedAtMs = endedAt,
+                            durationMs = elapsed,
+                            loopsCompleted = finalLoops,
+                            actionsExecuted = finalActions,
+                            watchdogRecoveries = watchdogCount.get(),
+                            bannedBlocks = bannedCount.get(),
+                            accountSwitches = accountSwitchCount.get(),
+                            humanBreaks = humanBreakCount.get(),
+                            endReason = endReason,
+                            finalVariables = lastVarsRef.get()
+                        )
+                    )
+                }
+                val cfg = localStore?.notificationConfig?.value
+                if (cfg != null) {
+                    val durTxt = com.example.data.FarmingStatsCalculator.formatDuration(elapsed)
+                    if (endReason == "Error" && (cfg.notifyOnError || cfg.alarmOnError)) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Error — $finalMacroName",
+                            message = "$errorDetail\nDurasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions",
+                            level = com.example.data.NotifyLevel.CRITICAL,
+                            sendRemote = cfg.notifyOnError,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnError,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    } else if (endReason == "Selesai" && (cfg.notifyOnComplete || cfg.alarmOnComplete)) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Selesai — $finalMacroName",
+                            message = "Durasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions" +
+                                "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}",
+                            level = com.example.data.NotifyLevel.SUCCESS,
+                            sendRemote = cfg.notifyOnComplete,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnComplete,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
                 _liveVariables.value = emptyMap()
                 _humanBreakRemainingSec.value = 0
-                val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                _liveSessionStats.value = null
                 if (_engineState.value != EngineState.ERROR) {
                     _engineState.value = EngineState.IDLE
                 }
                 pausedFlag.set(false)
-                ExecutionLogBus.info("Selesai (${counter.get()} aksi dalam ${elapsed}ms).")
+                ExecutionLogBus.info("Selesai ($finalActions aksi dalam ${elapsed}ms).")
             }
         }
     }
@@ -1181,6 +1371,7 @@ object AutomationCoordinator {
         _activeAccountLabel.value = ""
         _liveVariables.value = emptyMap()
         _humanBreakRemainingSec.value = 0
+        _liveSessionStats.value = null
         ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null

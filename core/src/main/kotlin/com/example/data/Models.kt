@@ -129,6 +129,15 @@ enum class VariableCompareOp(val label: String, val symbol: String) {
     }
 }
 
+/** Severity level for [NotifyAction] and remote Telegram/Discord notifications. */
+@Serializable
+enum class NotifyLevel(val label: String, val icon: String) {
+    INFO("Info", "ℹ️"),
+    SUCCESS("Sukses", "✅"),
+    WARNING("Peringatan", "⚠️"),
+    CRITICAL("Darurat / Alarm", "🚨")
+}
+
 /** Action taken when a [BranchRouteRule] matches (or when no rule matches as fallback). */
 @Serializable
 enum class BranchOutcomeAction(val label: String, val shortLabel: String) {
@@ -1054,6 +1063,30 @@ data class CheckVariableAction(
 }
 
 /**
+ * Dispatches a notification to the user's locally configured Telegram Bot / Discord Webhook
+ * (never embedding credentials in the macro!) and/or rings the local Phone Alarm (sound + vibrate).
+ * Supports dynamic placeholders: `{macro}`, `{loop}`, `{actions}`, `{account}`, `{var:name}`.
+ */
+@Serializable
+@SerialName("notify")
+data class NotifyAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 200,
+    override val chancePercent: Int = 100,
+    val title: String = "Notifikasi Macro",
+    val message: String = "Kondisi tercapai di {macro} (Loop #{loop})!",
+    val level: NotifyLevel = NotifyLevel.INFO,
+    val sendRemote: Boolean = true,
+    val includeScreenshot: Boolean = false,
+    val triggerPhoneAlarm: Boolean = false
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/**
  * Humanizer Engine configuration: makes taps, swipes, timing, and periodic AFK pauses look natural
  * like a real human hand while staying within safe target bounds.
  */
@@ -1311,6 +1344,7 @@ enum class ActionKind(val label: String, val description: String) {
     SELECT_ACCOUNT("Pilih / Buka Akun Giliran", "Cari & klik akun via OCR + Auto-Scroll dan/atau buka Clone App akun giliran"),
     VARIABLE("Atur Variabel / Hitungan", "Simpan angka, tambah/kurang counter, atau baca angka OCR ke variabel tanpa coding"),
     CHECK_VARIABLE("Cek Variabel / Hitungan", "Bandingkan nilai variabel (=, <, >, dll) lalu jalankan cabang If/Else atau pindah arah"),
+    NOTIFY("Kirim Notifikasi / Alarm", "Kirim pesan & screenshot ke Telegram/Discord atau bunyikan alarm HP"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
     FINISH_MACRO("Selesaikan Macro", "Selesaikan macro pasif/sub-macro lalu switch ke macro aktif tanpa berhenti"),
@@ -1339,6 +1373,7 @@ val Action.kind: ActionKind
         is SelectAccountAction -> ActionKind.SELECT_ACCOUNT
         is VariableAction -> ActionKind.VARIABLE
         is CheckVariableAction -> ActionKind.CHECK_VARIABLE
+        is NotifyAction -> ActionKind.NOTIFY
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
         is FinishMacroAction -> ActionKind.FINISH_MACRO
@@ -1435,6 +1470,11 @@ fun Action.summary(): String {
             val scopeTag = if (scope == VariableScope.PER_ACCOUNT) " [Akun]" else ""
             "$vName ${operator.symbol} $rhs$scopeTag"
         }
+        is NotifyAction -> buildString {
+            append("${level.icon} ${title.ifBlank { message }.take(28)}")
+            if (includeScreenshot) append(" • 📷")
+            if (triggerPhoneAlarm) append(" • 🔊")
+        }
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
         is FinishMacroAction -> when (mode) {
@@ -1504,6 +1544,7 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.SELECT_ACCOUNT -> SelectAccountAction()
         ActionKind.VARIABLE -> VariableAction()
         ActionKind.CHECK_VARIABLE -> CheckVariableAction()
+        ActionKind.NOTIFY -> NotifyAction()
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
         ActionKind.FINISH_MACRO -> FinishMacroAction()
@@ -1562,6 +1603,7 @@ internal fun Action.withMappedIds(idMap: Map<String, String>): Action {
             thenActions = thenActions.map { it.withMappedIds(idMap) },
             elseActions = elseActions.map { it.withMappedIds(idMap) }
         )
+        is NotifyAction -> copy(id = mappedId)
         is LoopAction -> copy(
             id = mappedId,
             actions = actions.map { it.withMappedIds(idMap) }

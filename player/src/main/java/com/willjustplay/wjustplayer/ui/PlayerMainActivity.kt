@@ -122,6 +122,7 @@ private fun WjustPlayerApp(
     val engineState by PlayerCoordinator.engineState.collectAsStateWithLifecycle()
     val isOverlayActive by PlayerCoordinator.isOverlayActive.collectAsStateWithLifecycle()
     val activeMacro by PlayerCoordinator.activeMacro.collectAsStateWithLifecycle()
+    val liveSessionStats by PlayerCoordinator.liveSessionStats.collectAsStateWithLifecycle()
     val logs by PlayerSafeLogBus.logs.collectAsStateWithLifecycle()
     val isCapturing by PlayerScreenCaptureService.isCapturing.collectAsStateWithLifecycle()
     val isAccessibilityConnected by PlayerAccessibilityService.isConnected.collectAsStateWithLifecycle()
@@ -129,6 +130,7 @@ private fun WjustPlayerApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     var showLocalImportDialog by remember { mutableStateOf(false) }
+    var showStatsAndNotifySheet by remember { mutableStateOf(false) }
     var managingAccountsMacro by remember { mutableStateOf<Macro?>(null) }
     var localWjmFiles by remember { mutableStateOf<List<PlayerStorageHelper.LocalWjmEntry>>(emptyList()) }
     var loadingLocalFiles by remember { mutableStateOf(false) }
@@ -371,7 +373,8 @@ private fun WjustPlayerApp(
                         onManageAccounts = { target -> managingAccountsMacro = target },
                         onTogglePassive = viewModel::togglePassive,
                         onDeleteMacro = viewModel::deleteMacro,
-                        onDeleteMacroSet = viewModel::deleteMacroSet
+                        onDeleteMacroSet = viewModel::deleteMacroSet,
+                        onOpenStatsAndNotify = { showStatsAndNotifySheet = true }
                     )
                     PlayerTab.LOGS -> PlayerLogScreen(
                         logs = logs,
@@ -379,6 +382,14 @@ private fun WjustPlayerApp(
                     )
                 }
             }
+        }
+
+        if (showStatsAndNotifySheet) {
+            PlayerStatsAndNotifySheet(
+                notifyStore = com.willjustplay.wjustplayer.data.PlayerNotificationStore.get(context),
+                liveStats = liveSessionStats,
+                onDismiss = { showStatsAndNotifySheet = false }
+            )
         }
 
         if (showAccessibilityDisclosure) {

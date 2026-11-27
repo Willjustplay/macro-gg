@@ -2020,7 +2020,7 @@ class OverlayMacroSettingsView(
         } else {
             listOf(
                 ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
-                ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE,
+                ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE, ActionKind.NOTIFY,
                 ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT,
                 ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
                 ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
@@ -3798,6 +3798,97 @@ class OverlayMacroSettingsView(
                             foundMode = foundMode,
                             notFound = notFoundMode,
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: cv.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is com.example.data.NotifyAction -> {
+                var level = action.level
+                var sendRemote = action.sendRemote
+                var includeShot = action.includeScreenshot
+                var phoneAlarm = action.triggerPhoneAlarm
+
+                bodyContainer.addView(TextView(context).apply {
+                    text = "🔔 Kirim Notifikasi Telegram/Discord & Alarm HP (dukung {macro}, {loop}, {actions}, {account}, {var:nama})"
+                    setTextColor(Color.parseColor("#F59E0B"))
+                    textSize = 11f
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+
+                val lvlBtns = mutableListOf<Pair<com.example.data.NotifyLevel, TextView>>()
+                fun refreshLvl() {
+                    lvlBtns.forEach { (l, tv) ->
+                        val active = l == level
+                        tv.background = GradientDrawable().apply {
+                            setColor(if (active) Color.parseColor("#D97706") else Color.parseColor("#1E293B"))
+                            cornerRadius = dp(7).toFloat()
+                        }
+                        tv.setTextColor(if (active) Color.WHITE else Color.parseColor("#94A3B8"))
+                    }
+                }
+                val lvlRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                com.example.data.NotifyLevel.entries.forEachIndexed { idx, l ->
+                    val tv = TextView(context).apply {
+                        text = "${l.icon} ${l.label}"
+                        textSize = 10f
+                        gravity = Gravity.CENTER
+                        setPadding(dp(4), dp(6), dp(4), dp(6))
+                        setOnClickListener { level = l; refreshLvl() }
+                    }
+                    lvlBtns += l to tv
+                    lvlRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < com.example.data.NotifyLevel.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(lvlRow)
+                refreshLvl()
+
+                val titleF = addTextRow(bodyContainer, "Judul notifikasi", action.title)
+                val msgF = addTextRow(bodyContainer, "Pesan", action.message)
+                val remoteBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                val shotBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                val alarmBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                fun refreshFlags() {
+                    remoteBtn.text = if (sendRemote) "✓ Kirim ke Telegram / Discord" else "○ Tidak kirim ke Telegram / Discord"
+                    remoteBtn.background = GradientDrawable().apply {
+                        setColor(if (sendRemote) Color.parseColor("#0EA5E9") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    shotBtn.text = if (includeShot) "✓ Lampirkan Screenshot Layar" else "○ Tanpa Screenshot Layar"
+                    shotBtn.background = GradientDrawable().apply {
+                        setColor(if (includeShot) Color.parseColor("#10B981") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    alarmBtn.text = if (phoneAlarm) "✓ Bunyikan Alarm & Getar HP" else "○ Tanpa Alarm HP Lokal"
+                    alarmBtn.background = GradientDrawable().apply {
+                        setColor(if (phoneAlarm) Color.parseColor("#D97706") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                }
+                remoteBtn.setOnClickListener { sendRemote = !sendRemote; refreshFlags() }
+                shotBtn.setOnClickListener { includeShot = !includeShot; refreshFlags() }
+                alarmBtn.setOnClickListener { phoneAlarm = !phoneAlarm; refreshFlags() }
+                listOf(remoteBtn, shotBtn, alarmBtn).forEach { b ->
+                    bodyContainer.addView(b, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(5) })
+                }
+                refreshFlags()
+
+                val delF = addNumberRow(bodyContainer, "Jeda setelah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    saveEdited { cur ->
+                        val na = (cur as? com.example.data.NotifyAction) ?: action
+                        na.copy(
+                            title = titleF.text.toString().trim().take(80),
+                            message = msgF.text.toString().trim().take(400),
+                            level = level,
+                            sendRemote = sendRemote,
+                            includeScreenshot = includeShot,
+                            triggerPhoneAlarm = phoneAlarm,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: na.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
                 }

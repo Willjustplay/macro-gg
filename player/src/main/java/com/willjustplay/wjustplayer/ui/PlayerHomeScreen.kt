@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.WarningAmber
@@ -146,7 +147,8 @@ fun PlayerHomeScreen(
     onManageAccounts: (Macro) -> Unit,
     onTogglePassive: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit,
-    onDeleteMacroSet: (MacroSet, Boolean) -> Unit
+    onDeleteMacroSet: (MacroSet, Boolean) -> Unit,
+    onOpenStatsAndNotify: () -> Unit = {}
 ) {
     var expandedSetIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteMacro by remember { mutableStateOf<Macro?>(null) }
@@ -263,7 +265,27 @@ fun PlayerHomeScreen(
                     }
                 }
 
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFF59E0B).copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.35f))
+                ) {
+                    IconButton(
+                        onClick = onOpenStatsAndNotify,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Filled.QueryStats,
+                            contentDescription = "Statistik & Notifikasi",
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(6.dp))
 
                 if (engineState == PlayerEngineState.RUNNING || engineState == PlayerEngineState.PAUSED) {
                     Button(

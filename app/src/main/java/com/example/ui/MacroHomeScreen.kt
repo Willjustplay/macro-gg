@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.WarningAmber
@@ -150,7 +151,8 @@ fun MacroHomeScreen(
     onDuplicateMacro: (Macro) -> Unit,
     onExportMacro: (Macro, Boolean, Boolean) -> Unit,
     onExportMacroDirectToDownloads: (Macro, Boolean, Boolean) -> Unit = onExportMacro,
-    onDeleteMacro: (Macro) -> Unit
+    onDeleteMacro: (Macro) -> Unit,
+    onOpenStatsAndNotify: () -> Unit = {}
 ) {
     var exportDialogMacro by remember { mutableStateOf<Macro?>(null) }
     var exportDialogPreferDownloads by remember { mutableStateOf(false) }
@@ -259,7 +261,27 @@ fun MacroHomeScreen(
                     }
                 }
 
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFF59E0B).copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.35f))
+                ) {
+                    IconButton(
+                        onClick = onOpenStatsAndNotify,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Filled.QueryStats,
+                            contentDescription = "Statistik & Notifikasi",
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(6.dp))
 
                 if (engineState == EngineState.RUNNING || engineState == EngineState.PAUSED) {
                     Button(

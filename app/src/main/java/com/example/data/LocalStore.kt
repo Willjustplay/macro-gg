@@ -72,6 +72,15 @@ class LocalStore(context: Context) {
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
+    private val notifyConfigFile = File(rootDir, "notify_config.json")
+    private val farmingStatsFile = File(rootDir, "farming_stats.json")
+
+    private val _notificationConfig = MutableStateFlow(loadNotificationConfig())
+    val notificationConfig: StateFlow<NotificationConfig> = _notificationConfig.asStateFlow()
+
+    private val _farmingStats = MutableStateFlow(loadFarmingStats())
+    val farmingStats: StateFlow<List<FarmingSessionRecord>> = _farmingStats.asStateFlow()
+
     init {
         effectiveNowMs()
         flushClockWatermark()
@@ -115,6 +124,8 @@ class LocalStore(context: Context) {
         _imageFolders.value = loadImageFolders()
         _images.value = loadImages()
         _settings.value = loadSettings()
+        _notificationConfig.value = loadNotificationConfig()
+        _farmingStats.value = loadFarmingStats()
     }
 
     /** Returns the device's current real physical display size (width x height in pixels). */
@@ -146,6 +157,44 @@ class LocalStore(context: Context) {
     fun saveSettings(settings: AppSettings) {
         prefs.edit().putString(KEY_SETTINGS, json.encodeToString(settings)).apply()
         _settings.value = settings
+    }
+
+    // ---- Local Notification Config & Farming Statistics (Never exported in .zip / .wjm) ----
+
+    private fun loadNotificationConfig(): NotificationConfig {
+        if (!notifyConfigFile.exists()) return NotificationConfig()
+        return runCatching {
+            json.decodeFromString<NotificationConfig>(notifyConfigFile.readText())
+        }.getOrDefault(NotificationConfig())
+    }
+
+    fun saveNotificationConfig(config: NotificationConfig) {
+        runCatching {
+            rootDir.mkdirs()
+            notifyConfigFile.writeText(json.encodeToString(config))
+        }
+        _notificationConfig.value = config
+    }
+
+    private fun loadFarmingStats(): List<FarmingSessionRecord> {
+        if (!farmingStatsFile.exists()) return emptyList()
+        return runCatching {
+            json.decodeFromString<List<FarmingSessionRecord>>(farmingStatsFile.readText())
+        }.getOrDefault(emptyList()).sortedByDescending { it.endedAtMs }
+    }
+
+    fun recordFarmingSession(record: FarmingSessionRecord) {
+        val next = (listOf(record) + _farmingStats.value).take(120)
+        runCatching {
+            rootDir.mkdirs()
+            farmingStatsFile.writeText(json.encodeToString(next))
+        }
+        _farmingStats.value = next
+    }
+
+    fun clearFarmingStats() {
+        runCatching { if (farmingStatsFile.exists()) farmingStatsFile.delete() }
+        _farmingStats.value = emptyList()
     }
 
     // ---- Macros & Custom Macro Logos ----

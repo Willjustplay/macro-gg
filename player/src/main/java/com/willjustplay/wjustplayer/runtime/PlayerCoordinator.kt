@@ -59,6 +59,7 @@ object PlayerCoordinator {
 
     @Volatile private var store: PlayerStore? = null
     @Volatile private var accountStore: PlayerAccountStore? = null
+    @Volatile private var notifyStore: com.willjustplay.wjustplayer.data.PlayerNotificationStore? = null
     @Volatile private var appCtx: Context? = null
     @Volatile private var activeJob: Job? = null
 
@@ -87,10 +88,16 @@ object PlayerCoordinator {
     private val _humanBreakRemainingSec = MutableStateFlow(0)
     val humanBreakRemainingSec: StateFlow<Int> = _humanBreakRemainingSec.asStateFlow()
 
+    private val _liveSessionStats = MutableStateFlow<com.example.data.LiveSessionStats?>(null)
+    val liveSessionStats: StateFlow<com.example.data.LiveSessionStats?> = _liveSessionStats.asStateFlow()
+
     fun attach(context: Context) {
         if (appCtx == null) appCtx = context.applicationContext
         if (accountStore == null) {
             accountStore = PlayerAccountStore.get(context)
+        }
+        if (notifyStore == null) {
+            notifyStore = com.willjustplay.wjustplayer.data.PlayerNotificationStore.get(context)
         }
         if (store == null) {
             val s = PlayerStore.get(context)
@@ -138,7 +145,8 @@ object PlayerCoordinator {
                     it is ColorAction ||
                     it is com.example.data.BranchRouterAction ||
                     (it is com.example.data.VariableAction && it.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
-                    (it is SelectAccountAction && (it.methodOverride ?: macro.accountSwitch.method) != AccountSwitchMethod.CLONE_APP)
+                    (it is SelectAccountAction && (it.methodOverride ?: macro.accountSwitch.method) != AccountSwitchMethod.CLONE_APP) ||
+                    (it is com.example.data.NotifyAction && it.includeScreenshot)
             }
 
     fun togglePlayPause(screenW: Int = 1080, screenH: Int = 2400) {
@@ -184,6 +192,7 @@ object PlayerCoordinator {
         PlayerScreenCaptureService.highFrequencyCapture = false
         _activeAccountLabel.value = ""
         _humanBreakRemainingSec.value = 0
+        _liveSessionStats.value = null
         _engineState.value = PlayerEngineState.IDLE
     }
 
@@ -227,10 +236,63 @@ object PlayerCoordinator {
 
         val startedAt = System.currentTimeMillis()
         val counter = AtomicInteger(0)
+        val watchdogCount = AtomicInteger(0)
+        val bannedCount = AtomicInteger(0)
+        val accountSwitchCount = AtomicInteger(0)
+        val humanBreakCount = AtomicInteger(0)
+        val localNotifyStore = notifyStore
+
+        fun publishLiveStats() {
+            _liveSessionStats.value = com.example.data.LiveSessionStats(
+                macroName = _activeMacro.value?.name?.ifBlank { effectiveMacro.name } ?: effectiveMacro.name,
+                startedAtMs = startedAt,
+                loopsCompleted = _currentLoop.value,
+                actionsExecuted = counter.get(),
+                watchdogRecoveries = watchdogCount.get(),
+                bannedBlocks = bannedCount.get(),
+                accountSwitches = accountSwitchCount.get(),
+                humanBreaks = humanBreakCount.get()
+            )
+        }
+        publishLiveStats()
 
         activeJob = engineScope.launch {
             val loopText = if (effectiveMacro.loopCount <= 0) "∞" else "${effectiveMacro.loopCount}×"
             PlayerSafeLogBus.info("Memulai '${effectiveMacro.name}' (Loop: $loopText).")
+
+            var lastPeriodicReportAt = startedAt
+            val periodicReportJob = launch {
+                while (isActive && !stopRequested.get()) {
+                    delay(15_000L)
+                    val cfg = localNotifyStore?.notificationConfig?.value ?: continue
+                    val intervalMin = cfg.periodicReportMinutes
+                    if (intervalMin <= 0 || !cfg.hasAnyRemoteConfigured()) continue
+                    val now = System.currentTimeMillis()
+                    if (now - lastPeriodicReportAt >= intervalMin * 60_000L) {
+                        lastPeriodicReportAt = now
+                        val dur = (now - startedAt).coerceAtLeast(0L)
+                        val loops = _currentLoop.value
+                        val acts = counter.get()
+                        val rateL = com.example.data.FarmingStatsCalculator.formatRate(
+                            com.example.data.FarmingStatsCalculator.ratePerHour(loops, dur)
+                        )
+                        val accLine = _activeAccountLabel.value.takeIf { it.isNotBlank() }?.let { "\nAkun: $it" } ?: ""
+                        val msg = "Durasi: ${com.example.data.FarmingStatsCalculator.formatDuration(dur)} • Loop: $loops ($rateL/jam) • Aksi: $acts" +
+                            "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}$accLine"
+                        PlayerNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Laporan Berkala — ${_activeMacro.value?.name ?: effectiveMacro.name}",
+                            message = msg,
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+            }
 
             val runtime = object : MacroRuntime {
                 override val screenWidth: Int get() = liveScreenSize(fallbackW, fallbackH).first
@@ -453,12 +515,83 @@ object PlayerCoordinator {
                     _humanBreakRemainingSec.value = remainingSec.coerceAtLeast(0)
                 }
 
+                override fun onWatchdogTriggered(modeLabel: String) {
+                    val count = watchdogCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localNotifyStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnWatchdog && cfg.hasAnyRemoteConfigured()) {
+                        PlayerNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Watchdog Anti-Macet — ${_activeMacro.value?.name ?: effectiveMacro.name}",
+                            message = "Recovery #$count ($modeLabel) pada loop #${_currentLoop.value}.",
+                            level = com.example.data.NotifyLevel.WARNING,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+
+                override fun onBannedBlocked(imageName: String) {
+                    // Only count locally; do not expose internal asset filenames in Wjust Player
+                    bannedCount.incrementAndGet()
+                    publishLiveStats()
+                }
+
+                override fun onAccountSwitched(accountLabel: String) {
+                    val count = accountSwitchCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localNotifyStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnAccountSwitch && cfg.hasAnyRemoteConfigured()) {
+                        PlayerNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Ganti Akun — ${_activeMacro.value?.name ?: effectiveMacro.name}",
+                            message = "Beralih ke akun '$accountLabel' (perpindahan #$count, loop #${_currentLoop.value}).",
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = false,
+                            triggerPhoneAlarm = false
+                        )
+                    }
+                }
+
+                override fun onHumanBreakStarted(durationSec: Int) {
+                    humanBreakCount.incrementAndGet()
+                    publishLiveStats()
+                }
+
+                override suspend fun sendNotification(
+                    title: String,
+                    message: String,
+                    level: com.example.data.NotifyLevel,
+                    sendRemote: Boolean,
+                    includeScreenshot: Boolean,
+                    triggerPhoneAlarm: Boolean
+                ) {
+                    val cfg = localNotifyStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+                    PlayerNotifyManager.dispatchAsync(
+                        context = appCtx,
+                        config = cfg,
+                        title = title,
+                        message = message,
+                        level = level,
+                        sendRemote = sendRemote,
+                        includeScreenshot = includeScreenshot,
+                        triggerPhoneAlarm = triggerPhoneAlarm,
+                        captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                    )
+                }
+
                 override fun onMatchFound(match: MatchResult, label: String) {
                     // Intentionally silent in Wjust Player to keep template locations hidden
                 }
 
                 override fun onLoopChanged(loop: Int) {
                     _currentLoop.value = loop
+                    publishLiveStats()
                     if (loop > 0) {
                         PlayerSafeLogBus.info("Loop #$loop berjalan...")
                     }
@@ -466,6 +599,7 @@ object PlayerCoordinator {
 
                 override fun onActionExecuted() {
                     _actionsExecuted.value = counter.incrementAndGet()
+                    publishLiveStats()
                 }
 
                 override fun log(level: LogLevel, message: String) {
@@ -475,22 +609,84 @@ object PlayerCoordinator {
                 override fun nowMs(): Long = localStore?.effectiveNowMs() ?: System.currentTimeMillis()
             }
 
+            var endReason = "Selesai"
             try {
                 cooperativeDelay(140L)
                 MacroRunner(runtime).run(effectiveMacro)
+                if (stopRequested.get()) {
+                    endReason = "Dihentikan"
+                }
             } catch (_: CancellationException) {
+                endReason = "Dihentikan"
                 PlayerSafeLogBus.info("Macro dihentikan.")
             } catch (t: Throwable) {
+                endReason = "Error"
                 _engineState.value = PlayerEngineState.ERROR
                 PlayerSafeLogBus.error("Terjadi kesalahan saat menjalankan macro.")
             } finally {
+                periodicReportJob.cancel()
                 localStore?.flushClockWatermark()
                 PlayerScreenCaptureService.trackingCaptureMode = false
                 PlayerScreenCaptureService.highFrequencyCapture = false
+                val endedAt = System.currentTimeMillis()
+                val elapsed = (endedAt - startedAt).coerceAtLeast(0L)
+                val finalLoops = _currentLoop.value
+                val finalActions = counter.get()
+                val finalMacroName = _activeMacro.value?.name?.ifBlank { effectiveMacro.name } ?: effectiveMacro.name
+                if (elapsed >= 500L || finalActions > 0 || finalLoops > 0 || endReason == "Error") {
+                    localNotifyStore?.recordFarmingSession(
+                        com.example.data.FarmingSessionRecord(
+                            macroId = effectiveMacro.id,
+                            macroName = finalMacroName,
+                            startedAtMs = startedAt,
+                            endedAtMs = endedAt,
+                            durationMs = elapsed,
+                            loopsCompleted = finalLoops,
+                            actionsExecuted = finalActions,
+                            watchdogRecoveries = watchdogCount.get(),
+                            bannedBlocks = bannedCount.get(),
+                            accountSwitches = accountSwitchCount.get(),
+                            humanBreaks = humanBreakCount.get(),
+                            endReason = endReason,
+                            finalVariables = emptyMap() // Keep creator variable names hidden in Wjust Player
+                        )
+                    )
+                }
+                val cfg = localNotifyStore?.notificationConfig?.value
+                if (cfg != null) {
+                    val durTxt = com.example.data.FarmingStatsCalculator.formatDuration(elapsed)
+                    if (endReason == "Error" && (cfg.notifyOnError || cfg.alarmOnError)) {
+                        PlayerNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Error — $finalMacroName",
+                            message = "Terjadi kesalahan saat menjalankan macro.\nDurasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions",
+                            level = com.example.data.NotifyLevel.CRITICAL,
+                            sendRemote = cfg.notifyOnError,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnError,
+                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                        )
+                    } else if (endReason == "Selesai" && (cfg.notifyOnComplete || cfg.alarmOnComplete)) {
+                        PlayerNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Selesai — $finalMacroName",
+                            message = "Durasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions" +
+                                "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}",
+                            level = com.example.data.NotifyLevel.SUCCESS,
+                            sendRemote = cfg.notifyOnComplete,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnComplete,
+                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
                 _activeAccountLabel.value = ""
                 _humanBreakRemainingSec.value = 0
+                _liveSessionStats.value = null
                 skipAccountRequested.set(false)
-                val elapsedSec = ((System.currentTimeMillis() - startedAt).coerceAtLeast(0L) / 1000.0)
+                val elapsedSec = elapsed / 1000.0
                 if (_engineState.value != PlayerEngineState.ERROR) {
                     _engineState.value = PlayerEngineState.IDLE
                 }

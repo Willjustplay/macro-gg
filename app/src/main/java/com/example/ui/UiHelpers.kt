@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.ManageAccounts
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Swipe
@@ -58,6 +59,7 @@ fun ActionKind.icon(): ImageVector = when (this) {
     ActionKind.SELECT_ACCOUNT -> Icons.Filled.ManageAccounts
     ActionKind.VARIABLE -> Icons.Filled.Calculate
     ActionKind.CHECK_VARIABLE -> Icons.AutoMirrored.Filled.Rule
+    ActionKind.NOTIFY -> Icons.Filled.NotificationsActive
     ActionKind.RUN_MACRO -> Icons.Filled.Link
     ActionKind.FINISH_MACRO -> Icons.Filled.TaskAlt
     ActionKind.JUMP -> Icons.Filled.DoubleArrow
@@ -85,6 +87,7 @@ fun ActionKind.accentColor(): Color = when (this) {
     ActionKind.SELECT_ACCOUNT -> Color(0xFF06B6D4)
     ActionKind.VARIABLE -> Color(0xFFA855F7)
     ActionKind.CHECK_VARIABLE -> Color(0xFFEC4899)
+    ActionKind.NOTIFY -> Color(0xFFF59E0B)
     ActionKind.RUN_MACRO -> Color(0xFFEC4899)
     ActionKind.FINISH_MACRO -> Color(0xFF059669)
     ActionKind.JUMP -> Color(0xFF7C3AED)

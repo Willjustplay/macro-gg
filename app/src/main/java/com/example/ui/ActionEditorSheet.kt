@@ -1487,6 +1487,13 @@ fun ActionEditorSheet(
                     )
                 }
 
+                is com.example.data.NotifyAction -> {
+                    NotifyActionEditor(
+                        action = a,
+                        onUpdate = { draft = it }
+                    )
+                }
+
                 is RestartAction, is StopAction -> {
                     Text(
                         "Aksi kontrol alur (dapat diatur peluang Random Event di bawah jika ingin acak).",
@@ -1757,7 +1764,7 @@ private fun BranchSectionEditor(
                 val quickKinds = listOf(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
                     ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT,
-                    ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE,
+                    ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE, ActionKind.NOTIFY,
                     ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
                     ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
                     ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP

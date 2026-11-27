@@ -1793,6 +1793,7 @@ private fun AddActionPickerSheet(
     val groups = listOf(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
         "Variabel & Hitungan (Tanpa Kode)" to listOf(ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE),
+        "Notifikasi & Alarm HP" to listOf(ActionKind.NOTIFY),
         "Cabang & Arah Urutan" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
         "Ganti Akun Game (Semua Game)" to listOf(ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),

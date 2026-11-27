@@ -19,6 +19,7 @@ import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
+import com.example.data.FarmingStatsCalculator
 import com.example.data.FinishMacroAction
 import com.example.data.FinishMacroMode
 import com.example.data.GoToBranchAction
@@ -33,6 +34,8 @@ import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.MacroSet
 import com.example.data.NotFoundMode
+import com.example.data.NotifyAction
+import com.example.data.NotifyLevel
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.RecentsSwipeDirection
@@ -120,6 +123,18 @@ interface MacroRuntime {
     fun onVisualDebug(event: VisualDebugEvent) {}
     fun onVariablesChanged(variables: Map<String, Double>) {}
     fun onHumanBreakChanged(remainingSec: Int) {}
+    fun onWatchdogTriggered(modeLabel: String) {}
+    fun onBannedBlocked(imageName: String) {}
+    fun onAccountSwitched(accountLabel: String) {}
+    fun onHumanBreakStarted(durationSec: Int) {}
+    suspend fun sendNotification(
+        title: String,
+        message: String,
+        level: NotifyLevel,
+        sendRemote: Boolean,
+        includeScreenshot: Boolean,
+        triggerPhoneAlarm: Boolean
+    ) {}
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
@@ -156,6 +171,7 @@ private data class PendingJump(
  * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
  * - Image (with repeated clicks & banned-image avoidance), OCR Text/Value, Color detection & Live Visual Debugger
  * - Visual Variables & Counters ([VariableAction], [CheckVariableAction], and VARIABLE rules in [BranchRouterAction])
+ * - Remote Notifications (Telegram/Discord + Screenshot) & Local Phone Alarm ([NotifyAction])
  * - Named sequence branches ([Macro.branches]), [BranchRouterAction], and [GoToBranchAction] (Switch & Call-Return)
  * - Universal Multi-Account rotation ([Macro.accountSwitch], [SwitchAccountAction], [SelectAccountAction]) via OCR + Auto-Scroll and Clone App switching
  * - Nested loop blocks, [JumpAction] forward/backward jumps, & Chained/Linked Macros ([RunMacroAction]) with cycle protection, Passive Mode & [FinishMacroAction]
@@ -189,6 +205,9 @@ class MacroRunner(
     private val accountVariables = HashMap<String, LinkedHashMap<String, Double>>()
     /** Scheduled epoch ms for the next Humanizer "Human Break" pause (0 = disabled). */
     private var nextHumanBreakAtMs: Long = 0L
+    /** Live counters for notification template expansion (`{loop}`, `{actions}`). */
+    private var rootLoopNumber: Int = 0
+    private var sessionActionsCounter: Int = 0
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -215,6 +234,8 @@ class MacroRunner(
             previousAccountPackage = ""
             accountLoopCounter = 0
             accountStartedAtMs = runtime.nowMs()
+            rootLoopNumber = 0
+            sessionActionsCounter = 0
             visitedAccountIdsInCycle.clear()
             runtimeAccountLastUsed.clear()
             sessionVariables.clear()
@@ -312,7 +333,10 @@ class MacroRunner(
                 break
             }
             iteration++
-            if (depth == 0) runtime.onLoopChanged(iteration)
+            if (depth == 0) {
+                rootLoopNumber = iteration
+                runtime.onLoopChanged(iteration)
+            }
             runtime.log(LogLevel.INFO, if (depth == 0) "Loop #$iteration dimulai." else "Sub-macro '${macro.name}' loop #$iteration.")
 
             pendingJump = null
@@ -484,6 +508,7 @@ class MacroRunner(
         }
 
         runtime.log(LogLevel.WARN, "Anti-Macet (Watchdog): Aksi utama macet > ${sec}d — mengaktifkan '${effectiveMode.label}'.")
+        runtime.onWatchdogTriggered(effectiveMode.label)
         lastProgressMs = runtime.nowMs()
 
         return when (effectiveMode) {
@@ -788,6 +813,40 @@ class MacroRunner(
 
             is CheckVariableAction -> executeCheckVariableAction(action, macro, startedAt, maxDurationMs, depth)
 
+            is NotifyAction -> {
+                val vars = mergedVariablesSnapshot()
+                val accName = currentAccount?.label.orEmpty()
+                val expandedTitle = FarmingStatsCalculator.expandNotifyTemplate(
+                    template = action.title.ifBlank { "Notifikasi Macro" },
+                    macroName = macro.name,
+                    loop = rootLoopNumber,
+                    actionsExecuted = sessionActionsCounter,
+                    accountLabel = accName,
+                    variables = vars
+                )
+                val expandedMessage = FarmingStatsCalculator.expandNotifyTemplate(
+                    template = action.message,
+                    macroName = macro.name,
+                    loop = rootLoopNumber,
+                    actionsExecuted = sessionActionsCounter,
+                    accountLabel = accName,
+                    variables = vars
+                )
+                runtime.log(LogLevel.INFO, "🔔 Notifikasi [${action.level.label}]: $expandedTitle — ${expandedMessage.take(80)}")
+                runtime.sendNotification(
+                    title = expandedTitle,
+                    message = expandedMessage,
+                    level = action.level,
+                    sendRemote = action.sendRemote,
+                    includeScreenshot = action.includeScreenshot,
+                    triggerPhoneAlarm = action.triggerPhoneAlarm
+                )
+                sessionActionsCounter++
+                runtime.onActionExecuted()
+                markProgress()
+                FlowControl.NEXT
+            }
+
             is LoopAction -> {
                 val times = action.count.coerceAtLeast(1)
                 for (i in 1..times) {
@@ -947,6 +1006,7 @@ class MacroRunner(
                             )
                         }
                         runtime.log(LogLevel.WARN, "⛔ Gestur rekaman DIBLOKIR oleh Guard Banned Gambar ('${hit.imageName}')!")
+                        runtime.onBannedBlocked(hit.imageName)
                         continue
                     }
                     if (runtime.playRecordedGesture(scaledGesture, speed)) {
@@ -2571,6 +2631,7 @@ class MacroRunner(
                 )
             }
             runtime.log(LogLevel.WARN, "⛔ Klik (${click.x}, ${click.y}) DIBLOKIR oleh Guard Banned Gambar ('${blocked.imageName}')!")
+            runtime.onBannedBlocked(blocked.imageName)
             return false
         }
         if (isLongPress) {
@@ -2589,7 +2650,9 @@ class MacroRunner(
                 )
             )
         }
-        return runtime.click(click.x, click.y, click.durationMs)
+        val ok = runtime.click(click.x, click.y, click.durationMs)
+        if (ok) sessionActionsCounter++
+        return ok
     }
 
     /** Humanizer-aware swipe wrapper supporting curved quadratic Bezier arcs and Live Visual Debug telemetry. */
@@ -2632,11 +2695,13 @@ class MacroRunner(
                 )
             )
         }
-        return if (sw.curved) {
+        val ok = if (sw.curved) {
             runtime.swipeCurved(sw.x1, sw.y1, sw.cx, sw.cy, sw.x2, sw.y2, sw.durationMs)
         } else {
             runtime.swipe(sw.x1, sw.y1, sw.x2, sw.y2, sw.durationMs)
         }
+        if (ok) sessionActionsCounter++
+        return ok
     }
 
     /** Triggers a natural Humanizer "Human Break" AFK pause when scheduled; updates Watchdog progress so Watchdog never misfires. */
@@ -2659,6 +2724,7 @@ class MacroRunner(
 
         val totalSec = ((breakDurMs + 999L) / 1000L).toInt().coerceAtLeast(1)
         runtime.log(LogLevel.INFO, "☕ Human Break dimulai (${totalSec} dtk) — istirahat alami agar terlihat seperti manusia...")
+        runtime.onHumanBreakStarted(totalSec)
         var remMs = breakDurMs
         try {
             while (remMs > 0L && !runtime.isStopped()) {
@@ -2717,14 +2783,18 @@ class MacroRunner(
         publishVariablesSnapshot()
     }
 
-    private fun publishVariablesSnapshot() {
+    private fun mergedVariablesSnapshot(): Map<String, Double> {
         val merged = LinkedHashMap<String, Double>(sessionVariables.size + 4)
         merged.putAll(sessionVariables)
         accountVariables[activeAccountVarKey()]?.forEach { (k, v) ->
             val displayKey = if (k in merged) "👤$k" else k
             merged[displayKey] = v
         }
-        runtime.onVariablesChanged(merged)
+        return merged
+    }
+
+    private fun publishVariablesSnapshot() {
+        runtime.onVariablesChanged(mergedVariablesSnapshot())
     }
 
     private suspend fun executeVariableAction(
@@ -3035,6 +3105,7 @@ class MacroRunner(
             if (switchFlow == FlowControl.STOP_MACRO || runtime.isStopped()) return FlowControl.STOP_MACRO
 
             if (!lastAccountSelectFailed) {
+                runtime.onAccountSwitched(chosen.label)
                 markProgress()
                 return if (restartAfterSwitch) FlowControl.RESTART_ROOT else FlowControl.NEXT
             }
