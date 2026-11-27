@@ -84,6 +84,9 @@ object PlayerCoordinator {
     private val _activeAccountLabel = MutableStateFlow("")
     val activeAccountLabel: StateFlow<String> = _activeAccountLabel.asStateFlow()
 
+    private val _humanBreakRemainingSec = MutableStateFlow(0)
+    val humanBreakRemainingSec: StateFlow<Int> = _humanBreakRemainingSec.asStateFlow()
+
     fun attach(context: Context) {
         if (appCtx == null) appCtx = context.applicationContext
         if (accountStore == null) {
@@ -134,6 +137,7 @@ object PlayerCoordinator {
                     it is TextAction ||
                     it is ColorAction ||
                     it is com.example.data.BranchRouterAction ||
+                    (it is com.example.data.VariableAction && it.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
                     (it is SelectAccountAction && (it.methodOverride ?: macro.accountSwitch.method) != AccountSwitchMethod.CLONE_APP)
             }
 
@@ -179,6 +183,7 @@ object PlayerCoordinator {
         PlayerScreenCaptureService.trackingCaptureMode = false
         PlayerScreenCaptureService.highFrequencyCapture = false
         _activeAccountLabel.value = ""
+        _humanBreakRemainingSec.value = 0
         _engineState.value = PlayerEngineState.IDLE
     }
 
@@ -216,6 +221,7 @@ object PlayerCoordinator {
         _currentLoop.value = 0
         _actionsExecuted.value = 0
         _activeAccountLabel.value = ""
+        _humanBreakRemainingSec.value = 0
         _engineState.value = PlayerEngineState.RUNNING
         PlayerScreenCaptureService.highFrequencyCapture = true
 
@@ -238,6 +244,18 @@ object PlayerCoordinator {
 
                 override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
                     PlayerAccessibilityService.dispatchSwipe(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs)
+
+                override suspend fun swipeCurved(
+                    x1: Int,
+                    y1: Int,
+                    cx: Int,
+                    cy: Int,
+                    x2: Int,
+                    y2: Int,
+                    durationMs: Long
+                ): Boolean = PlayerAccessibilityService.dispatchCurvedSwipe(
+                    x1.toFloat(), y1.toFloat(), cx.toFloat(), cy.toFloat(), x2.toFloat(), y2.toFloat(), durationMs
+                )
 
                 override suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean =
                     PlayerAccessibilityService.dispatchZoom(cx.toFloat(), cy.toFloat(), zoomIn, distancePx, durationMs)
@@ -429,6 +447,12 @@ object PlayerCoordinator {
                 override fun consumeManualSkipAccountRequest(): Boolean =
                     skipAccountRequested.getAndSet(false)
 
+                override fun isVisualDebugEnabled(): Boolean = false
+
+                override fun onHumanBreakChanged(remainingSec: Int) {
+                    _humanBreakRemainingSec.value = remainingSec.coerceAtLeast(0)
+                }
+
                 override fun onMatchFound(match: MatchResult, label: String) {
                     // Intentionally silent in Wjust Player to keep template locations hidden
                 }
@@ -464,6 +488,7 @@ object PlayerCoordinator {
                 PlayerScreenCaptureService.trackingCaptureMode = false
                 PlayerScreenCaptureService.highFrequencyCapture = false
                 _activeAccountLabel.value = ""
+                _humanBreakRemainingSec.value = 0
                 skipAccountRequested.set(false)
                 val elapsedSec = ((System.currentTimeMillis() - startedAt).coerceAtLeast(0L) / 1000.0)
                 if (_engineState.value != PlayerEngineState.ERROR) {

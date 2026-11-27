@@ -1381,7 +1381,7 @@ private fun ActionNodeCard(
                             )
                         }
                     }
-                    action is TextAction || action is com.example.data.SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion) -> {
+                    action is TextAction || action is com.example.data.SelectAccountAction || (action is com.example.data.VariableAction && action.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) || (action is TrackObjectAction && action.trackAnyMotion) -> {
                         IconButton(onClick = { onPickRegionOnScreen(action.id) }, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.CropFree,
@@ -1415,7 +1415,7 @@ private fun ActionNodeCard(
                                 onClick = { menuExpanded = false; onQuickSwapImage(action) }
                             )
                         }
-                        if (action is TextAction || action is com.example.data.SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion)) {
+                        if (action is TextAction || action is com.example.data.SelectAccountAction || (action is com.example.data.VariableAction && action.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) || (action is TrackObjectAction && action.trackAnyMotion)) {
                             DropdownMenuItem(
                                 text = { Text("Pilih Area di Layar") },
                                 leadingIcon = { Icon(Icons.Filled.CropFree, null) },
@@ -1792,6 +1792,7 @@ private fun AddActionPickerSheet(
 ) {
     val groups = listOf(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
+        "Variabel & Hitungan (Tanpa Kode)" to listOf(ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE),
         "Cabang & Arah Urutan" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
         "Ganti Akun Game (Semua Game)" to listOf(ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
@@ -1879,6 +1880,7 @@ private fun MacroSettingsSheet(
         mutableStateOf(if (macro.sourceHeight > 0) macro.sourceHeight.toString() else "")
     }
     var scaleMode by remember(macro.id) { mutableStateOf(macro.scaleMode) }
+    var humanizer by remember(macro.id) { mutableStateOf(macro.humanizer) }
     val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -2108,6 +2110,14 @@ private fun MacroSettingsSheet(
 
             HorizontalDivider()
 
+            // Humanizer Engine (Anti-Deteksi Alami: Gaussian click, Bezier swipe, organic delay & Human Break)
+            HumanizerSettingsSection(
+                config = humanizer,
+                onUpdate = { humanizer = it }
+            )
+
+            HorizontalDivider()
+
             // Auto-Scale Resolusi Layar (semua perangkat: HP, Tablet, Foldable, Emulator, CloudPhone)
             AutoScaleControlsBlock(
                 macro = macro,
@@ -2162,7 +2172,8 @@ private fun MacroSettingsSheet(
                                 sourceWidth = savedSrcW,
                                 sourceHeight = savedSrcH,
                                 autoScaleResolution = autoScale,
-                                scaleMode = scaleMode
+                                scaleMode = scaleMode,
+                                humanizer = humanizer
                             )
                         )
                     },

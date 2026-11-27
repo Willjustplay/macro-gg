@@ -76,12 +76,15 @@ object PlayerSafeLogBus {
             msg.startsWith("Watchdog", ignoreCase = true) ||
             msg.startsWith("Anti-Macet", ignoreCase = true) ||
             msg.startsWith("Beralih", ignoreCase = true) ||
-            msg.startsWith("Batas durasi", ignoreCase = true)
+            msg.startsWith("Batas durasi", ignoreCase = true) ||
+            msg.startsWith("☕ Human Break", ignoreCase = true)
     }
 
     private fun containsSensitiveCoordsOrAssets(msg: String): Boolean {
         return msg.contains(".png", ignoreCase = true) ||
             msg.contains(".jpg", ignoreCase = true) ||
+            msg.contains("Variabel", ignoreCase = true) ||
+            msg.contains("OCR angka untuk", ignoreCase = true) ||
             msg.contains("#") && Regex("#[0-9A-Fa-f]{6}").containsMatchIn(msg) ||
             Regex("\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\)").containsMatchIn(msg)
     }

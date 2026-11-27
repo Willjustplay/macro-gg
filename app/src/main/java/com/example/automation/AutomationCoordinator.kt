@@ -132,6 +132,32 @@ object AutomationCoordinator {
     private val _activeAccountLabel = MutableStateFlow("")
     val activeAccountLabel: StateFlow<String> = _activeAccountLabel.asStateFlow()
 
+    private val _visualDebugEnabled = MutableStateFlow(false)
+    val visualDebugEnabled: StateFlow<Boolean> = _visualDebugEnabled.asStateFlow()
+
+    private val _debugEvents = kotlinx.coroutines.flow.MutableSharedFlow<VisualDebugEvent>(extraBufferCapacity = 48)
+    val debugEvents: kotlinx.coroutines.flow.SharedFlow<VisualDebugEvent> = _debugEvents
+
+    private val _liveVariables = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val liveVariables: StateFlow<Map<String, Double>> = _liveVariables.asStateFlow()
+
+    private val _humanBreakRemainingSec = MutableStateFlow(0)
+    val humanBreakRemainingSec: StateFlow<Int> = _humanBreakRemainingSec.asStateFlow()
+
+    fun toggleVisualDebug(): Boolean {
+        val next = !_visualDebugEnabled.value
+        _visualDebugEnabled.value = next
+        ExecutionLogBus.info(
+            if (next) "🐞 Debug Visual AKTIF — kotak deteksi, skor %, OCR & kurva swipe ditampilkan di layar."
+            else "🐞 Debug Visual dimatikan."
+        )
+        return next
+    }
+
+    fun setVisualDebugEnabled(enabled: Boolean) {
+        _visualDebugEnabled.value = enabled
+    }
+
     fun requestSkipAccount() {
         if (_engineState.value == EngineState.RUNNING || _engineState.value == EngineState.PAUSED) {
             skipAccountRequested.set(true)
@@ -346,6 +372,7 @@ object AutomationCoordinator {
                     is ImageAction -> a.copy(region = storedRegion)
                     is TrackObjectAction -> a.copy(region = storedRegion)
                     is com.example.data.SelectAccountAction -> a.copy(region = storedRegion)
+                    is com.example.data.VariableAction -> a.copy(region = storedRegion)
                     else -> a
                 }
             }
@@ -600,6 +627,7 @@ object AutomationCoordinator {
             if (m.accountSwitch.enabled && m.accountSwitch.method != com.example.data.AccountSwitchMethod.CLONE_APP && m.accountSwitch.accounts.any { it.enabled }) return true
             for (a in m.allActionsSequence()) {
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction ||
+                    (a is com.example.data.VariableAction && a.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
                     (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP)
                 ) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
@@ -676,6 +704,8 @@ object AutomationCoordinator {
         _currentLoop.value = 0
         _actionsExecuted.value = 0
         _activeAccountLabel.value = ""
+        _liveVariables.value = emptyMap()
+        _humanBreakRemainingSec.value = 0
         _engineState.value = EngineState.RUNNING
         ScreenCaptureService.highFrequencyCapture = true
 
@@ -698,6 +728,18 @@ object AutomationCoordinator {
 
                 override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
                     MacroAccessibilityService.dispatchSwipe(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs)
+
+                override suspend fun swipeCurved(
+                    x1: Int,
+                    y1: Int,
+                    cx: Int,
+                    cy: Int,
+                    x2: Int,
+                    y2: Int,
+                    durationMs: Long
+                ): Boolean = MacroAccessibilityService.dispatchCurvedSwipe(
+                    x1.toFloat(), y1.toFloat(), cx.toFloat(), cy.toFloat(), x2.toFloat(), y2.toFloat(), durationMs
+                )
 
                 override suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean =
                     MacroAccessibilityService.dispatchZoom(cx.toFloat(), cy.toFloat(), zoomIn, distancePx, durationMs)
@@ -906,8 +948,18 @@ object AutomationCoordinator {
                     }
                 }
                 override fun consumeManualSkipAccountRequest(): Boolean = skipAccountRequested.getAndSet(false)
+                override fun isVisualDebugEnabled(): Boolean = _visualDebugEnabled.value
+                override fun onVisualDebug(event: VisualDebugEvent) {
+                    _debugEvents.tryEmit(event)
+                }
+                override fun onVariablesChanged(variables: Map<String, Double>) {
+                    _liveVariables.value = variables
+                }
+                override fun onHumanBreakChanged(remainingSec: Int) {
+                    _humanBreakRemainingSec.value = remainingSec.coerceAtLeast(0)
+                }
                 override fun onMatchFound(match: MatchResult, label: String) {
-                    if (localStore?.settings?.value?.showDebugMatchBox != false) {
+                    if (!_visualDebugEnabled.value && localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)
                     }
                 }
@@ -930,6 +982,8 @@ object AutomationCoordinator {
                 localStore?.flushClockWatermark()
                 ScreenCaptureService.trackingCaptureMode = false
                 ScreenCaptureService.highFrequencyCapture = false
+                _liveVariables.value = emptyMap()
+                _humanBreakRemainingSec.value = 0
                 val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 if (_engineState.value != EngineState.ERROR) {
                     _engineState.value = EngineState.IDLE
@@ -1125,6 +1179,8 @@ object AutomationCoordinator {
         pausedFlag.set(false)
         skipAccountRequested.set(false)
         _activeAccountLabel.value = ""
+        _liveVariables.value = emptyMap()
+        _humanBreakRemainingSec.value = 0
         ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null

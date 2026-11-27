@@ -53,6 +53,7 @@ class PlayerOverlayService : Service() {
     private var statusDot: View? = null
     private var activeAccountRow: LinearLayout? = null
     private var activeAccountBadgeView: TextView? = null
+    private var humanBreakBadgeView: TextView? = null
 
     private var hiddenBubbleView: View? = null
     private var logOverlayView: View? = null
@@ -265,6 +266,27 @@ class PlayerOverlayService : Service() {
         activeAccountRow = accountRow
         activeAccountBadgeView = accountBadge
         root.addView(accountRow)
+
+        val breakBadge = TextView(this).apply {
+            text = ""
+            visibility = View.GONE
+            setTextColor(Color.parseColor("#FDE68A"))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#3B2506"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#F59E0B"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(5) }
+        }
+        humanBreakBadgeView = breakBadge
+        root.addView(breakBadge)
 
         // Single clean playback row: [▶/⏸] [■] [👁] [≡] [⌂] [✕]
         val row = LinearLayout(this).apply {
@@ -573,6 +595,18 @@ class PlayerOverlayService : Service() {
                 } else {
                     activeAccountBadgeView?.text = "👤 $label"
                     activeAccountRow?.visibility = View.VISIBLE
+                }
+            }
+        }
+        serviceScope.launch {
+            PlayerCoordinator.humanBreakRemainingSec.collectLatest { remSec ->
+                if (remSec <= 0) {
+                    humanBreakBadgeView?.visibility = View.GONE
+                } else {
+                    val m = remSec / 60
+                    val s = remSec % 60
+                    humanBreakBadgeView?.text = String.format("☕ Istirahat: %02d:%02d", m, s)
+                    humanBreakBadgeView?.visibility = View.VISIBLE
                 }
             }
         }

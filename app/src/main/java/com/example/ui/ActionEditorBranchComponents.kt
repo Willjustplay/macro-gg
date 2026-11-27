@@ -747,6 +747,56 @@ private fun BranchRouteRuleCard(
                         }
                     }
                 }
+
+                BranchConditionType.VARIABLE -> {
+                    OutlinedTextField(
+                        value = rule.variableName,
+                        onValueChange = { v -> onUpdateRule(rule.copy(variableName = v.take(32))) },
+                        label = { Text("Nama Variabel") },
+                        placeholder = { Text("mis. hitung, serangan, gold") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        com.example.data.VariableCompareOp.entries.forEach { op ->
+                            FilterChip(
+                                selected = rule.variableOp == op,
+                                onClick = { onUpdateRule(rule.copy(variableOp = op)) },
+                                label = { Text(op.symbol, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    var varTargetStr by remember(rule.id, rule.variableTargetValue) {
+                        mutableStateOf(
+                            if (rule.variableTargetValue == rule.variableTargetValue.toLong().toDouble()) {
+                                rule.variableTargetValue.toLong().toString()
+                            } else rule.variableTargetValue.toString()
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = varTargetStr,
+                            onValueChange = { raw ->
+                                varTargetStr = raw
+                                raw.replace(',', '.').toDoubleOrNull()?.let { v ->
+                                    onUpdateRule(rule.copy(variableTargetValue = v))
+                                }
+                            },
+                            label = { Text("Angka Target") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = rule.variableCompareToVar,
+                            onValueChange = { v -> onUpdateRule(rule.copy(variableCompareToVar = v.take(32))) },
+                            label = { Text("Atau Var Lain") },
+                            placeholder = { Text("opsional") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
             }
 
             Row(

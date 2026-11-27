@@ -1588,6 +1588,7 @@ private fun MacroListCard(
     val hasWatchdog = macro.autoRecoverStuckSec > 0 && stuckActionCount > 0
     val hasBannedGuard = macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }
     val hasMultiAccount = macro.accountSwitch.enabled
+    val hasHumanizer = macro.humanizer.preset != com.example.data.HumanizerPreset.OFF
     val scaleTransform = remember(macro.sourceWidth, macro.sourceHeight, macro.autoScaleResolution, macro.scaleMode, screenW, screenH) {
         ResolutionScaler.forMacro(macro, screenW, screenH)
     }
@@ -1761,8 +1762,8 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard / Multi-Account badges row
-            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard || hasMultiAccount) {
+            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard / Multi-Account / Humanizer badges row
+            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard || hasMultiAccount || hasHumanizer) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (effectivelyLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -1798,6 +1799,14 @@ private fun MacroListCard(
                     }
                     if (hasMultiAccount) {
                         FeatureTag("👥 ${macro.accountSwitch.accounts.size} Akun", Color(0xFF0EA5E9))
+                    }
+                    if (hasHumanizer) {
+                        val hColor = when (macro.humanizer.preset) {
+                            com.example.data.HumanizerPreset.NATURAL -> Color(0xFF10B981)
+                            com.example.data.HumanizerPreset.STEALTH -> Color(0xFF06B6D4)
+                            else -> Color(0xFFA855F7)
+                        }
+                        FeatureTag("🤖 ${macro.humanizer.preset.label}", hColor)
                     }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)
