@@ -7,8 +7,11 @@ import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.AccountProfile
 import com.example.data.Macro
 import com.example.data.MacroSet
+import com.willjustplay.wjustplayer.data.PlayerAccountStore
+import com.willjustplay.wjustplayer.data.PlayerMacroAccounts
 import com.willjustplay.wjustplayer.data.PlayerStorageHelper
 import com.willjustplay.wjustplayer.data.PlayerStore
 import com.willjustplay.wjustplayer.runtime.PlayerAccessibilityService
@@ -35,9 +38,11 @@ data class PlayerPermissions(
 class PlayerViewModel(private val appContext: Context) : ViewModel() {
 
     private val store = PlayerStore.get(appContext)
+    private val accountStore = PlayerAccountStore.get(appContext)
 
     val macros: StateFlow<List<Macro>> = store.macros
     val macroSets: StateFlow<List<MacroSet>> = store.macroSets
+    val accountsByKey: StateFlow<Map<String, PlayerMacroAccounts>> = accountStore.accountsByKey
 
     private val _permissions = MutableStateFlow(PlayerPermissions())
     val permissions: StateFlow<PlayerPermissions> = _permissions.asStateFlow()
@@ -65,6 +70,17 @@ class PlayerViewModel(private val appContext: Context) : ViewModel() {
     fun effectiveNowMs(): Long = store.effectiveNowMs()
 
     fun macroIconPath(iconName: String): String? = store.macroIconPath(iconName)
+
+    fun accountKeyFor(macro: Macro): String = accountStore.keyFor(macro)
+
+    fun accountsFor(macro: Macro): List<AccountProfile> = accountStore.getFor(macro).accounts
+
+    fun saveMacroAccounts(macro: Macro, accounts: List<AccountProfile>) {
+        accountStore.saveAccounts(macro, accounts)
+        val activeCount = accounts.count { it.enabled }
+        PlayerSafeLogBus.info("Daftar akun lokal '${macro.name}' disimpan ($activeCount akun aktif).")
+        _messages.tryEmit("Akun lokal '${macro.name}' disimpan ($activeCount aktif).")
+    }
 
     fun togglePassive(macro: Macro) {
         val updated = store.togglePassiveEnabled(macro.id) ?: return

@@ -28,6 +28,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
+import android.text.TextUtils
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
@@ -62,6 +63,7 @@ import com.example.data.TrackInteractionMode
 import com.example.data.TrackObjectAction
 import com.example.data.ZoomAction
 import com.example.data.isStuckAction
+import com.example.data.isSwitchAccountAction
 import com.example.data.walkWithSlot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +100,8 @@ class FloatingOverlayService : Service() {
     private var collapseBtn: TextView? = null
     private var playPauseBtn: TextView? = null
     private var statusDotView: View? = null
+    private var activeAccountRow: LinearLayout? = null
+    private var activeAccountBadgeView: TextView? = null
     private var isCollapsed = false
 
     // Hide Buttons Mode (minimizes entire overlay UI to a tiny translucent bubble)
@@ -545,6 +549,42 @@ class FloatingOverlayService : Service() {
         expandedToolsRow = toolsRow
         root.addView(toolsRow)
 
+        // Row 3 (auto-shown while running Multi-Account): [👤 2/5 • Farm 2] [⏭]
+        val accRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(6), dp(3), dp(4), dp(3))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0B2942"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#0EA5E9"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(4) }
+        }
+        val accText = TextView(this).apply {
+            text = ""
+            setTextColor(Color.parseColor("#7DD3FC"))
+            textSize = 10.5f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+        }
+        accRow.addView(accText)
+        accRow.addView(makeCompactButton("⏭", "#0284C7", marginEndDp = 0) {
+            AutomationCoordinator.requestSkipAccount()
+            Toast.makeText(this, "⏭ Pindah ke akun berikutnya...", Toast.LENGTH_SHORT).show()
+        })
+        activeAccountBadgeView = accText
+        activeAccountRow = accRow
+        root.addView(accRow)
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -659,6 +699,15 @@ class FloatingOverlayService : Service() {
         if (macroSettingsView != null) dismissMacroSettingsPanel() else showMacroSettingsPanel()
     }
 
+    private fun overlayTabForAction(actionId: String): Int {
+        val m = AutomationCoordinator.activeMacro.value
+        return when {
+            m.isSwitchAccountAction(actionId) -> 4
+            m.isStuckAction(actionId) -> 2
+            else -> 1
+        }
+    }
+
     private fun showMacroSettingsPanel(initialTab: Int = 0, initialEditActionId: String? = null) {
         dismissMacroSettingsPanel()
         dismissMarkerEditor()
@@ -706,6 +755,11 @@ class FloatingOverlayService : Service() {
             },
             onMoveActionToBranch = { actionId, targetBranchId ->
                 AutomationCoordinator.moveActionToBranchFromOverlay(actionId, targetBranchId)
+                macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
+            },
+            onAddSwitchAccountAction = { ref, newAction ->
+                refreshScreenSize()
+                AutomationCoordinator.addSwitchAccountActionFromOverlay(ref, newAction, screenWidth, screenHeight)
                 macroSettingsView?.refreshWithMacro(AutomationCoordinator.activeMacro.value)
             },
             onUpdateAction = { actionId, transform ->
@@ -766,10 +820,11 @@ class FloatingOverlayService : Service() {
                     durationMs = tapMs,
                     delayAfterMs = 250L
                 )
-                if (isStuckBranch) {
-                    AutomationCoordinator.addStuckActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
-                } else {
-                    AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                val isSwitchParent = AutomationCoordinator.activeMacro.value.isSwitchAccountAction(parentId)
+                when {
+                    isSwitchParent -> AutomationCoordinator.addSwitchAccountActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                    isStuckBranch -> AutomationCoordinator.addStuckActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
+                    else -> AutomationCoordinator.addActionFromOverlay(ContainerRef(parentId, slot), created, screenWidth, screenHeight)
                 }
                 dismissMacroSettingsPanel()
                 launchTargetPicker(created.id, reopenSettingsActionId = parentId)
@@ -940,14 +995,14 @@ class FloatingOverlayService : Service() {
                 dismissTargetPicker()
                 Toast.makeText(this, "Posisi target disimpan ($nx1, $ny1)", Toast.LENGTH_SHORT).show()
                 if (reopenSettingsActionId != null) {
-                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    val tabIdx = overlayTabForAction(reopenSettingsActionId)
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             },
             onCancel = {
                 dismissTargetPicker()
                 if (reopenSettingsActionId != null) {
-                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    val tabIdx = overlayTabForAction(reopenSettingsActionId)
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             }
@@ -1264,7 +1319,7 @@ class FloatingOverlayService : Service() {
                 if (reopenSettingsActionId == TARGET_ADD_BANNED_IMAGE) {
                     showMacroSettingsPanel(initialTab = 3, initialEditActionId = null)
                 } else if (!reopenSettingsActionId.isNullOrBlank()) {
-                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    val tabIdx = overlayTabForAction(reopenSettingsActionId)
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             },
@@ -1273,7 +1328,7 @@ class FloatingOverlayService : Service() {
                 if (reopenSettingsActionId == TARGET_ADD_BANNED_IMAGE) {
                     showMacroSettingsPanel(initialTab = 3, initialEditActionId = null)
                 } else if (!reopenSettingsActionId.isNullOrBlank()) {
-                    val tabIdx = if (AutomationCoordinator.activeMacro.value.isStuckAction(reopenSettingsActionId)) 2 else 1
+                    val tabIdx = overlayTabForAction(reopenSettingsActionId)
                     showMacroSettingsPanel(initialTab = tabIdx, initialEditActionId = reopenSettingsActionId)
                 }
             }
@@ -1419,6 +1474,13 @@ class FloatingOverlayService : Service() {
         serviceScope.launch {
             AutomationCoordinator.matchHighlight.collect { highlight ->
                 updateMatchHighlight(highlight)
+            }
+        }
+
+        serviceScope.launch {
+            AutomationCoordinator.activeAccountLabel.collect { label ->
+                activeAccountBadgeView?.text = label
+                activeAccountRow?.visibility = if (label.isNotBlank()) View.VISIBLE else View.GONE
             }
         }
 

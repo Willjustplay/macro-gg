@@ -78,6 +78,11 @@ object MacroBundleCodec {
         return result
     }
 
+    /** Strips personal account credentials before portable .zip/.wjm export while preserving reusable switchActions. */
+    private fun Macro.sanitizedForPortableExport(): Macro =
+        if (accountSwitch.accounts.isEmpty() && accountSwitch.lastAccountId.isBlank()) this
+        else copy(accountSwitch = accountSwitch.copy(accounts = emptyList(), lastAccountId = ""))
+
     /**
      * Writes a portable .zip containing:
      * - `macro.json` (root macro)
@@ -96,7 +101,7 @@ object MacroBundleCodec {
         exportedAtEpochMs: Long = System.currentTimeMillis()
     ): ExportResult {
         val stableOrigin = root.originId.ifBlank { root.id }
-        val baseRoot = root.copy(originId = stableOrigin)
+        val baseRoot = root.sanitizedForPortableExport().copy(originId = stableOrigin)
         val generatedToken = if (singleUseImport) MacroSecurity.generateSalt() else ""
         val exportRoot = if (singleUseImport) {
             MacroSecurity.attachOneTimeExportToken(baseRoot, generatedToken)
@@ -104,7 +109,7 @@ object MacroBundleCodec {
             baseRoot
         }
 
-        val bundle = collectMacroBundle(exportRoot, lookupMacro)
+        val bundle = collectMacroBundle(exportRoot) { id -> lookupMacro(id)?.sanitizedForPortableExport() }
         val referencedImages = LinkedHashSet<String>()
         val referencedIcons = LinkedHashSet<String>()
         bundle.forEach { m ->
@@ -198,7 +203,7 @@ object MacroBundleCodec {
 
         val memberIds = memberMacros.map { it.id }.toHashSet()
         val exportMembers = memberMacros.map { rawMember ->
-            val withOriginAndSet = rawMember.copy(
+            val withOriginAndSet = rawMember.sanitizedForPortableExport().copy(
                 originId = rawMember.originId.ifBlank { rawMember.id },
                 setId = exportSet.id
             )
@@ -213,7 +218,7 @@ object MacroBundleCodec {
         val visited = HashSet<String>(memberIds)
         val externalLinked = ArrayList<Macro>()
         for (member in exportMembers) {
-            for (linked in collectMacroBundle(member, lookupMacro).drop(1)) {
+            for (linked in collectMacroBundle(member) { id -> lookupMacro(id)?.sanitizedForPortableExport() }.drop(1)) {
                 if (visited.add(linked.id)) {
                     val prepared = linked.copy(
                         originId = linked.originId.ifBlank { linked.id },
@@ -400,7 +405,10 @@ object MacroBundleCodec {
                 setId = "",
                 actions = macro.actions.cloneWithRemappedIds(),
                 branches = macro.branches.map { b -> b.copy(actions = b.actions.cloneWithRemappedIds()) },
-                stuckActions = macro.stuckActions.cloneWithRemappedIds()
+                stuckActions = macro.stuckActions.cloneWithRemappedIds(),
+                accountSwitch = macro.accountSwitch.copy(
+                    switchActions = macro.accountSwitch.switchActions.cloneWithRemappedIds()
+                )
             )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
         }
@@ -500,7 +508,10 @@ object MacroBundleCodec {
                 setId = if (m.setId.isNotBlank()) setIdRemap[m.setId].orEmpty() else "",
                 actions = remapList(m.actions),
                 branches = m.branches.map { b -> b.copy(actions = remapList(b.actions)) },
-                stuckActions = remapList(m.stuckActions)
+                stuckActions = remapList(m.stuckActions),
+                accountSwitch = m.accountSwitch.copy(
+                    switchActions = remapList(m.accountSwitch.switchActions)
+                )
             )
         }
 

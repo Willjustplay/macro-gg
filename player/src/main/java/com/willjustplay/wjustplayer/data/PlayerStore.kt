@@ -343,7 +343,10 @@ class PlayerStore private constructor(context: Context) {
                 setId = finalSetId,
                 actions = relinkList(incoming.actions),
                 branches = incoming.branches.map { b -> b.copy(actions = relinkList(b.actions)) },
-                stuckActions = relinkList(incoming.stuckActions)
+                stuckActions = relinkList(incoming.stuckActions),
+                accountSwitch = incoming.accountSwitch.copy(
+                    switchActions = relinkList(incoming.accountSwitch.switchActions)
+                )
             )
             if (existing != null) {
                 val res = MacroSecurity.mergeOverwrittenMacro(existing, relinked, now)

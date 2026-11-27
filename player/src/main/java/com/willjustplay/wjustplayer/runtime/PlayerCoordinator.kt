@@ -11,6 +11,8 @@ import com.example.automation.LogLevel
 import com.example.automation.MacroRunner
 import com.example.automation.MacroRuntime
 import com.example.automation.RecentsDismissGeometry
+import com.example.data.AccountProfile
+import com.example.data.AccountSwitchMethod
 import com.example.data.ColorAction
 import com.example.data.ExitAppMode
 import com.example.data.ImageAction
@@ -20,6 +22,7 @@ import com.example.data.MacroSet
 import com.example.data.RecentsSwipeDirection
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.SelectAccountAction
 import com.example.data.TextAction
 import com.example.data.TrackObjectAction
 import com.example.data.allActionsSequence
@@ -27,6 +30,7 @@ import com.example.vision.Frame
 import com.example.vision.MatchResult
 import com.example.vision.OcrBlock
 import com.example.vision.PreparedTemplate
+import com.willjustplay.wjustplayer.data.PlayerAccountStore
 import com.willjustplay.wjustplayer.data.PlayerStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -54,11 +58,13 @@ object PlayerCoordinator {
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Volatile private var store: PlayerStore? = null
+    @Volatile private var accountStore: PlayerAccountStore? = null
     @Volatile private var appCtx: Context? = null
     @Volatile private var activeJob: Job? = null
 
     private val stopRequested = AtomicBoolean(false)
     private val pausedFlag = AtomicBoolean(false)
+    private val skipAccountRequested = AtomicBoolean(false)
 
     private val _engineState = MutableStateFlow(PlayerEngineState.IDLE)
     val engineState: StateFlow<PlayerEngineState> = _engineState.asStateFlow()
@@ -75,8 +81,14 @@ object PlayerCoordinator {
     private val _actionsExecuted = MutableStateFlow(0)
     val actionsExecuted: StateFlow<Int> = _actionsExecuted.asStateFlow()
 
+    private val _activeAccountLabel = MutableStateFlow("")
+    val activeAccountLabel: StateFlow<String> = _activeAccountLabel.asStateFlow()
+
     fun attach(context: Context) {
         if (appCtx == null) appCtx = context.applicationContext
+        if (accountStore == null) {
+            accountStore = PlayerAccountStore.get(context)
+        }
         if (store == null) {
             val s = PlayerStore.get(context)
             store = s
@@ -94,10 +106,35 @@ object PlayerCoordinator {
         _activeMacro.value = macro
     }
 
+    fun requestSkipAccount() {
+        if (_engineState.value == PlayerEngineState.RUNNING || _engineState.value == PlayerEngineState.PAUSED) {
+            skipAccountRequested.set(true)
+            PlayerSafeLogBus.info("Permintaan pindah akun berikutnya diterima...")
+        }
+    }
+
+    private fun mergeLocalAccounts(macro: Macro): Macro {
+        if (!macro.accountSwitch.enabled) return macro
+        val local = accountStore?.getFor(macro) ?: return macro
+        if (local.accounts.isEmpty()) return macro
+        return macro.copy(
+            accountSwitch = macro.accountSwitch.copy(
+                accounts = local.accounts,
+                lastAccountId = local.lastAccountId
+            )
+        )
+    }
+
     fun macroNeedsScreenCapture(macro: Macro): Boolean =
         (macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }) ||
+            (macro.accountSwitch.enabled && macro.accountSwitch.method != AccountSwitchMethod.CLONE_APP) ||
             macro.allActionsSequence().any {
-                it is ImageAction || it is TrackObjectAction || it is TextAction || it is ColorAction || it is com.example.data.BranchRouterAction
+                it is ImageAction ||
+                    it is TrackObjectAction ||
+                    it is TextAction ||
+                    it is ColorAction ||
+                    it is com.example.data.BranchRouterAction ||
+                    (it is SelectAccountAction && (it.methodOverride ?: macro.accountSwitch.method) != AccountSwitchMethod.CLONE_APP)
             }
 
     fun togglePlayPause(screenW: Int = 1080, screenH: Int = 2400) {
@@ -136,10 +173,12 @@ object PlayerCoordinator {
     fun stop() {
         stopRequested.set(true)
         pausedFlag.set(false)
+        skipAccountRequested.set(false)
         activeJob?.cancel()
         activeJob = null
         PlayerScreenCaptureService.trackingCaptureMode = false
         PlayerScreenCaptureService.highFrequencyCapture = false
+        _activeAccountLabel.value = ""
         _engineState.value = PlayerEngineState.IDLE
     }
 
@@ -161,15 +200,22 @@ object PlayerCoordinator {
             return
         }
 
-        if (macroNeedsScreenCapture(macro) && !PlayerScreenCaptureService.isCapturing.value) {
+        val effectiveMacro = mergeLocalAccounts(macro)
+        if (effectiveMacro.accountSwitch.enabled && effectiveMacro.accountSwitch.accounts.none { it.enabled }) {
+            PlayerSafeLogBus.warn("Macro Multi-Akun belum memiliki daftar akun lokal. Ketuk 'Atur Akun Saya' di aplikasi Wjust Player untuk menambahkan akun Anda.")
+        }
+
+        if (macroNeedsScreenCapture(effectiveMacro) && !PlayerScreenCaptureService.isCapturing.value) {
             PlayerSafeLogBus.warn("Tangkap layar belum aktif — aktifkan izin Tangkap Layar agar deteksi berjalan.")
         }
 
         selectMacro(macro)
         stopRequested.set(false)
         pausedFlag.set(false)
+        skipAccountRequested.set(false)
         _currentLoop.value = 0
         _actionsExecuted.value = 0
+        _activeAccountLabel.value = ""
         _engineState.value = PlayerEngineState.RUNNING
         PlayerScreenCaptureService.highFrequencyCapture = true
 
@@ -177,8 +223,8 @@ object PlayerCoordinator {
         val counter = AtomicInteger(0)
 
         activeJob = engineScope.launch {
-            val loopText = if (macro.loopCount <= 0) "∞" else "${macro.loopCount}×"
-            PlayerSafeLogBus.info("Memulai '${macro.name}' (Loop: $loopText).")
+            val loopText = if (effectiveMacro.loopCount <= 0) "∞" else "${effectiveMacro.loopCount}×"
+            PlayerSafeLogBus.info("Memulai '${effectiveMacro.name}' (Loop: $loopText).")
 
             val runtime = object : MacroRuntime {
                 override val screenWidth: Int get() = liveScreenSize(fallbackW, fallbackH).first
@@ -345,13 +391,43 @@ object PlayerCoordinator {
                 }
 
                 override fun loadTemplate(name: String): PreparedTemplate? = localStore?.loadTemplate(name)
-                override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)
+                override fun loadMacro(id: String): Macro? = localStore?.getMacroById(id)?.let { mergeLocalAccounts(it) }
                 override fun loadMacroSet(id: String): MacroSet? = localStore?.getMacroSetById(id)
                 override fun onActiveMacroSwitched(target: Macro) {
                     selectMacro(target)
                     _currentLoop.value = 0
                     PlayerSafeLogBus.info("Beralih ke '${target.name}'.")
                 }
+
+                override fun onActiveAccountChanged(accountIndex: Int, totalEnabled: Int, account: AccountProfile?) {
+                    if (account == null || totalEnabled <= 0) {
+                        _activeAccountLabel.value = ""
+                    } else {
+                        val badge = "$accountIndex/$totalEnabled • ${account.label}"
+                        if (_activeAccountLabel.value != badge) {
+                            PlayerSafeLogBus.info("Akun aktif ($accountIndex/$totalEnabled): ${account.label}.")
+                        }
+                        _activeAccountLabel.value = badge
+                    }
+                }
+
+                override fun onAccountStateUpdated(
+                    macroId: String,
+                    lastAccountId: String,
+                    completedAccountId: String,
+                    lastUsedAtMs: Long
+                ) {
+                    val targetMacro = localStore?.getMacroById(macroId) ?: _activeMacro.value ?: macro
+                    accountStore?.recordAccountTransition(
+                        macro = targetMacro,
+                        lastAccountId = lastAccountId,
+                        completedAccountId = completedAccountId,
+                        lastUsedAtMs = lastUsedAtMs
+                    )
+                }
+
+                override fun consumeManualSkipAccountRequest(): Boolean =
+                    skipAccountRequested.getAndSet(false)
 
                 override fun onMatchFound(match: MatchResult, label: String) {
                     // Intentionally silent in Wjust Player to keep template locations hidden
@@ -377,7 +453,7 @@ object PlayerCoordinator {
 
             try {
                 cooperativeDelay(140L)
-                MacroRunner(runtime).run(macro)
+                MacroRunner(runtime).run(effectiveMacro)
             } catch (_: CancellationException) {
                 PlayerSafeLogBus.info("Macro dihentikan.")
             } catch (t: Throwable) {
@@ -387,6 +463,8 @@ object PlayerCoordinator {
                 localStore?.flushClockWatermark()
                 PlayerScreenCaptureService.trackingCaptureMode = false
                 PlayerScreenCaptureService.highFrequencyCapture = false
+                _activeAccountLabel.value = ""
+                skipAccountRequested.set(false)
                 val elapsedSec = ((System.currentTimeMillis() - startedAt).coerceAtLeast(0L) / 1000.0)
                 if (_engineState.value != PlayerEngineState.ERROR) {
                     _engineState.value = PlayerEngineState.IDLE

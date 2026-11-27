@@ -1,5 +1,12 @@
 package com.example.automation
 
+import com.example.data.AccountFailBehavior
+import com.example.data.AccountOcrMatchMode
+import com.example.data.AccountProfile
+import com.example.data.AccountRotationMode
+import com.example.data.AccountScrollDirection
+import com.example.data.AccountSwitchMethod
+import com.example.data.AccountTriggerMode
 import com.example.data.Action
 import com.example.data.BannedImageMode
 import com.example.data.BranchConditionType
@@ -29,9 +36,11 @@ import com.example.data.RecordedGesture
 import com.example.data.RecentsSwipeDirection
 import com.example.data.RestartAction
 import com.example.data.RunMacroAction
+import com.example.data.SelectAccountAction
 import com.example.data.StopAction
 import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
+import com.example.data.SwitchAccountAction
 import com.example.data.TextAction
 import com.example.data.TrackInteractionMode
 import com.example.data.TrackObjectAction
@@ -90,6 +99,9 @@ interface MacroRuntime {
     fun loadMacro(id: String): Macro? = null
     fun loadMacroSet(id: String): MacroSet? = null
     fun onActiveMacroSwitched(target: Macro) {}
+    fun onActiveAccountChanged(accountIndex: Int, totalEnabled: Int, account: AccountProfile?) {}
+    fun onAccountStateUpdated(macroId: String, lastAccountId: String, completedAccountId: String, lastUsedAtMs: Long) {}
+    fun consumeManualSkipAccountRequest(): Boolean = false
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
@@ -126,6 +138,7 @@ private data class PendingJump(
  * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
  * - Image (with repeated clicks & banned-image avoidance), OCR Text/Value, and Color detection
  * - Named sequence branches ([Macro.branches]), [BranchRouterAction], and [GoToBranchAction] (Switch & Call-Return)
+ * - Universal Multi-Account rotation ([Macro.accountSwitch], [SwitchAccountAction], [SelectAccountAction]) via OCR + Auto-Scroll and Clone App switching
  * - Nested loop blocks, [JumpAction] forward/backward jumps, & Chained/Linked Macros ([RunMacroAction]) with cycle protection, Passive Mode & [FinishMacroAction]
  * - Expiration deadline & tamper seal enforcement via [MacroSecurity]
  * - Recorded gesture playback with speed multiplier
@@ -142,6 +155,15 @@ class MacroRunner(
     private var pendingJump: PendingJump? = null
     private var pendingSwitchBranchId: String? = null
     private var branchCallDepth: Int = 0
+    /** Live multi-account rotation state for the active root macro. */
+    private var currentAccount: AccountProfile? = null
+    private var previousAccountPackage: String = ""
+    private var accountLoopCounter: Int = 0
+    private var accountStartedAtMs: Long = 0L
+    private var inAccountSwitchFlow: Boolean = false
+    private var lastAccountSelectFailed: Boolean = false
+    private val visitedAccountIdsInCycle = LinkedHashSet<String>()
+    private val runtimeAccountLastUsed = HashMap<String, Long>()
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -162,6 +184,14 @@ class MacroRunner(
         while (!runtime.isStopped()) {
             rootWatchdogMacro = currentMacro
             inStuckRecovery = false
+            inAccountSwitchFlow = false
+            lastAccountSelectFailed = false
+            currentAccount = null
+            previousAccountPackage = ""
+            accountLoopCounter = 0
+            accountStartedAtMs = runtime.nowMs()
+            visitedAccountIdsInCycle.clear()
+            runtimeAccountLastUsed.clear()
             pendingJump = null
             pendingSwitchBranchId = null
             branchCallDepth = 0
@@ -178,6 +208,7 @@ class MacroRunner(
             }
             break
         }
+        runtime.onActiveAccountChanged(0, 0, null)
     }
 
     private suspend fun runInternal(macro: Macro, depth: Int): FlowControl {
@@ -192,6 +223,37 @@ class MacroRunner(
         val startedAt = runtime.nowMs()
         val maxDurationMs = if (macro.maxDurationMin > 0) macro.maxDurationMin * 60_000L else Long.MAX_VALUE
         val maxLoops = if (macro.loopCount <= 0) Int.MAX_VALUE else macro.loopCount
+
+        if (depth == 0 && macro.accountSwitch.enabled) {
+            val enabledAccounts = macro.accountSwitch.accounts.filter { it.enabled }
+            if (enabledAccounts.isEmpty()) {
+                runtime.log(LogLevel.WARN, "👥 Multi-Akun aktif tetapi belum ada profil akun yang aktif. Lanjut tanpa rotasi akun.")
+            } else {
+                val initial = pickInitialAccount(macro, enabledAccounts, startedAt)
+                currentAccount = initial
+                accountLoopCounter = 0
+                accountStartedAtMs = startedAt
+                visitedAccountIdsInCycle.clear()
+                if (initial != null) {
+                    visitedAccountIdsInCycle += initial.id
+                    if (!macro.accountSwitch.switchOnStart && initial.packageName.isNotBlank()) {
+                        previousAccountPackage = initial.packageName
+                    }
+                    notifyActiveAccount(macro, initial)
+                    runtime.log(
+                        LogLevel.INFO,
+                        "👤 Akun aktif awal: '${initial.label}' (${enabledAccounts.indexOfFirst { it.id == initial.id } + 1}/${enabledAccounts.size})."
+                    )
+                    if (macro.accountSwitch.switchOnStart) {
+                        val startSwitchFlow = executeAccountSwitchSequence(macro, initial, startedAt, maxDurationMs, depth)
+                        if (startSwitchFlow == FlowControl.STOP_MACRO) return FlowControl.STOP_MACRO
+                        if (previousAccountPackage.isBlank() && initial.packageName.isNotBlank()) {
+                            previousAccountPackage = initial.packageName
+                        }
+                    }
+                }
+            }
+        }
 
         var iteration = 0
         while (!runtime.isStopped() && iteration < maxLoops) {
@@ -272,7 +334,7 @@ class MacroRunner(
                 }
                 FlowControl.RESTART_ROOT -> {
                     if (depth > 0) return FlowControl.RESTART_ROOT
-                    runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal setelah pemulihan Anti-Macet...")
+                    runtime.log(LogLevel.INFO, "Mengulang '${macro.name}' dari awal...")
                     if (macro.loopDelayMs > 0 && !runtime.isStopped()) runtime.sleep(macro.loopDelayMs)
                     continue
                 }
@@ -282,6 +344,32 @@ class MacroRunner(
                     continue
                 }
                 FlowControl.NEXT, FlowControl.JUMP, FlowControl.SWITCH_BRANCH -> {
+                    if (depth == 0 && !runtime.isStopped() && macro.accountSwitch.enabled && !inAccountSwitchFlow) {
+                        val accCfg = macro.accountSwitch
+                        val hasMultipleAccounts = accCfg.accounts.count { it.enabled } > 0
+                        val loopTrigger = accCfg.triggerMode == AccountTriggerMode.AFTER_LOOPS ||
+                            accCfg.triggerMode == AccountTriggerMode.LOOPS_OR_MINUTES
+                        val minuteTrigger = accCfg.triggerMode == AccountTriggerMode.AFTER_MINUTES ||
+                            accCfg.triggerMode == AccountTriggerMode.LOOPS_OR_MINUTES
+                        accountLoopCounter++
+                        val loopsReached = loopTrigger && accountLoopCounter >= accCfg.loopsPerAccount.coerceAtLeast(1)
+                        val minutesReached = minuteTrigger && accCfg.minutesPerAccount > 0 &&
+                            (runtime.nowMs() - accountStartedAtMs) >= accCfg.minutesPerAccount * 60_000L
+                        val canContinueMoreLoops = iteration < maxLoops
+                        if (hasMultipleAccounts && (loopsReached || minutesReached) && (canContinueMoreLoops || accCfg.rotationMode == AccountRotationMode.ONCE_ALL_ACCOUNTS)) {
+                            val reason = if (loopsReached) "$accountLoopCounter loop selesai" else "${accCfg.minutesPerAccount} menit tercapai"
+                            runtime.log(LogLevel.INFO, "👥 Rotasi akun otomatis ($reason) untuk '${currentAccount?.label.orEmpty()}'...")
+                            val swFlow = performAccountSwitch(
+                                macro = macro,
+                                specificAccountId = "",
+                                restartAfterSwitch = false,
+                                startedAt = startedAt,
+                                maxDurationMs = maxDurationMs,
+                                depth = depth
+                            )
+                            if (swFlow == FlowControl.STOP_MACRO) return FlowControl.STOP_MACRO
+                        }
+                    }
                     if (!runtime.isStopped() && iteration < maxLoops) {
                         val effectiveDelay = if (macro.loopDelayMs > 0) {
                             macro.loopDelayMs
@@ -416,6 +504,7 @@ class MacroRunner(
             if (runtime.isStopped()) return FlowControl.STOP_MACRO
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
+            checkAccountAutoOrManualSwitch(macro, startedAt, maxDurationMs, depth)?.let { return it }
 
             val action = actions[idx]
             if (!action.enabled) {
@@ -822,6 +911,27 @@ class MacroRunner(
                     }
                 }
                 FlowControl.NEXT
+            }
+
+            is SwitchAccountAction -> {
+                performAccountSwitch(
+                    macro = macro,
+                    specificAccountId = action.specificAccountId,
+                    restartAfterSwitch = action.restartAfterSwitch,
+                    startedAt = startedAt,
+                    maxDurationMs = maxDurationMs,
+                    depth = depth
+                )
+            }
+
+            is SelectAccountAction -> {
+                executeSelectAccountAction(
+                    action = action,
+                    macro = macro,
+                    startedAt = startedAt,
+                    maxDurationMs = maxDurationMs,
+                    depth = depth
+                )
             }
 
             is RestartAction -> FlowControl.RESTART_MACRO
@@ -2304,6 +2414,538 @@ class MacroRunner(
             return false
         }
         return runtime.click(x, y, durationMs)
+    }
+
+    // ---- Universal Multi-Account Switcher Engine (OCR + Auto-Scroll & Clone App / Hybrid) ----
+
+    private fun accountEffectiveLastUsed(acc: AccountProfile): Long =
+        max(acc.lastUsedAt, runtimeAccountLastUsed[acc.id] ?: 0L)
+
+    private fun remainingCooldownMs(acc: AccountProfile, nowMs: Long): Long {
+        if (acc.cooldownMinutes <= 0) return 0L
+        val last = accountEffectiveLastUsed(acc)
+        if (last <= 0L) return 0L
+        val rem = (last + acc.cooldownMinutes * 60_000L) - nowMs
+        return rem.coerceAtLeast(0L)
+    }
+
+    private fun notifyActiveAccount(macro: Macro, account: AccountProfile?) {
+        val enabled = macro.accountSwitch.accounts.filter { it.enabled }
+        if (account == null || enabled.isEmpty()) {
+            runtime.onActiveAccountChanged(0, enabled.size, null)
+        } else {
+            val idx = enabled.indexOfFirst { it.id == account.id }.let { if (it >= 0) it + 1 else 1 }
+            runtime.onActiveAccountChanged(idx, enabled.size, account)
+        }
+    }
+
+    private fun pickInitialAccount(
+        macro: Macro,
+        enabledAccounts: List<AccountProfile>,
+        nowMs: Long
+    ): AccountProfile? {
+        if (enabledAccounts.isEmpty()) return null
+        val savedId = macro.accountSwitch.lastAccountId
+        if (savedId.isNotBlank()) {
+            val saved = enabledAccounts.firstOrNull { it.id == savedId }
+            if (saved != null && remainingCooldownMs(saved, nowMs) == 0L) return saved
+        }
+        return enabledAccounts.firstOrNull { remainingCooldownMs(it, nowMs) == 0L }
+            ?: enabledAccounts.minByOrNull { remainingCooldownMs(it, nowMs) }
+    }
+
+    private suspend fun checkAccountAutoOrManualSwitch(
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl? {
+        if (depth != 0 || inAccountSwitchFlow || inStuckRecovery || !macro.accountSwitch.enabled) return null
+        val cfg = macro.accountSwitch
+        val manualSkip = runtime.consumeManualSkipAccountRequest()
+        val minuteTrigger = (cfg.triggerMode == AccountTriggerMode.AFTER_MINUTES ||
+            cfg.triggerMode == AccountTriggerMode.LOOPS_OR_MINUTES) &&
+            cfg.minutesPerAccount > 0 &&
+            (runtime.nowMs() - accountStartedAtMs) >= cfg.minutesPerAccount * 60_000L
+        if (!manualSkip && !minuteTrigger) return null
+        val reason = if (manualSkip) "tombol Skip Akun di overlay" else "batas ${cfg.minutesPerAccount} menit per akun"
+        runtime.log(LogLevel.INFO, "⏭ Pindah akun dipicu ($reason)...")
+        return performAccountSwitch(
+            macro = macro,
+            specificAccountId = "",
+            restartAfterSwitch = cfg.restartMainAfterSwitch,
+            startedAt = startedAt,
+            maxDurationMs = maxDurationMs,
+            depth = depth
+        )
+    }
+
+    private suspend fun performAccountSwitch(
+        macro: Macro,
+        specificAccountId: String,
+        restartAfterSwitch: Boolean,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        if (inAccountSwitchFlow) return FlowControl.NEXT
+        val cfg = macro.accountSwitch
+        val enabledAccounts = cfg.accounts.filter { it.enabled }
+        if (enabledAccounts.isEmpty()) {
+            runtime.log(LogLevel.WARN, "👥 Ganti Akun dilewati: belum ada profil akun yang aktif di Tab Akun.")
+            return FlowControl.NEXT
+        }
+
+        // Mark completed timestamp for previous account
+        val prev = currentAccount
+        val nowStart = runtime.nowMs()
+        if (prev != null) {
+            runtimeAccountLastUsed[prev.id] = nowStart
+        }
+
+        val triedIds = HashSet<String>()
+        val maxAttempts = if (specificAccountId.isNotBlank()) 1 else enabledAccounts.size.coerceAtLeast(1)
+
+        for (attempt in 0 until maxAttempts) {
+            if (runtime.isStopped()) return FlowControl.STOP_MACRO
+            val nowMs = runtime.nowMs()
+            val chosen: AccountProfile? = if (specificAccountId.isNotBlank()) {
+                enabledAccounts.firstOrNull { it.id == specificAccountId }
+            } else {
+                val candidates = enabledAccounts.filter { it.id !in triedIds }
+                if (candidates.isEmpty()) null
+                else when (cfg.rotationMode) {
+                    AccountRotationMode.ONCE_ALL_ACCOUNTS -> {
+                        val unvisited = candidates.filter { it.id !in visitedAccountIdsInCycle }
+                        if (unvisited.isEmpty()) {
+                            runtime.log(LogLevel.INFO, "✅ Semua ${enabledAccounts.size} akun telah selesai 1 putaran penuh — macro berhenti.")
+                            return FlowControl.STOP_MACRO
+                        }
+                        val ready = unvisited.filter { remainingCooldownMs(it, nowMs) == 0L }
+                        ready.firstOrNull() ?: waitUntilEarliestCooldown(unvisited, startedAt, maxDurationMs)
+                    }
+                    AccountRotationMode.RANDOM -> {
+                        val ready = candidates.filter { remainingCooldownMs(it, nowMs) == 0L }
+                        val pool = when {
+                            ready.size > 1 -> ready.filter { it.id != currentAccount?.id }
+                            ready.isNotEmpty() -> ready
+                            else -> listOfNotNull(waitUntilEarliestCooldown(candidates, startedAt, maxDurationMs))
+                        }
+                        if (pool.isEmpty()) null else pool[random.nextInt(pool.size)]
+                    }
+                    AccountRotationMode.SEQUENTIAL_LOOP -> {
+                        val curIdx = enabledAccounts.indexOfFirst { it.id == currentAccount?.id }
+                        val ordered = ArrayList<AccountProfile>(enabledAccounts.size)
+                        val startOffset = if (curIdx >= 0) curIdx + 1 else 0
+                        for (i in enabledAccounts.indices) {
+                            val cand = enabledAccounts[(startOffset + i) % enabledAccounts.size]
+                            if (cand.id !in triedIds) ordered += cand
+                        }
+                        val ready = ordered.firstOrNull { remainingCooldownMs(it, nowMs) == 0L }
+                        ready ?: waitUntilEarliestCooldown(ordered, startedAt, maxDurationMs)
+                    }
+                }
+            }
+
+            if (chosen == null) {
+                if (runtime.isStopped()) return FlowControl.STOP_MACRO
+                runtime.log(LogLevel.WARN, "👥 Tidak ada akun tujuan yang tersedia untuk pindah akun.")
+                return FlowControl.NEXT
+            }
+
+            triedIds += chosen.id
+            currentAccount = chosen
+            visitedAccountIdsInCycle += chosen.id
+            accountLoopCounter = 0
+            accountStartedAtMs = runtime.nowMs()
+            notifyActiveAccount(macro, chosen)
+            runtime.onAccountStateUpdated(
+                macroId = macro.id,
+                lastAccountId = chosen.id,
+                completedAccountId = prev?.id.orEmpty(),
+                lastUsedAtMs = nowStart
+            )
+
+            val idxLabel = "${enabledAccounts.indexOfFirst { it.id == chosen.id } + 1}/${enabledAccounts.size}"
+            runtime.log(LogLevel.INFO, "👥 Beralih ke Akun $idxLabel: '${chosen.label}' (${cfg.method.shortLabel})...")
+
+            lastAccountSelectFailed = false
+            val switchFlow = executeAccountSwitchSequence(macro, chosen, startedAt, maxDurationMs, depth)
+            if (switchFlow == FlowControl.STOP_MACRO || runtime.isStopped()) return FlowControl.STOP_MACRO
+
+            if (!lastAccountSelectFailed) {
+                markProgress()
+                return if (restartAfterSwitch) FlowControl.RESTART_ROOT else FlowControl.NEXT
+            }
+
+            // Switch step failed to locate/open this account -> apply configured failure policy
+            when (cfg.onFail) {
+                AccountFailBehavior.STOP_MACRO -> {
+                    runtime.log(LogLevel.ERROR, "⛔ Gagal pindah ke '${chosen.label}' — macro dihentikan sesuai aturan gagal.")
+                    return FlowControl.STOP_MACRO
+                }
+                AccountFailBehavior.CONTINUE_CURRENT -> {
+                    runtime.log(LogLevel.WARN, "⚠️ Gagal pindah ke '${chosen.label}' — tetap melanjutkan macro.")
+                    return FlowControl.NEXT
+                }
+                AccountFailBehavior.SKIP_TO_NEXT -> {
+                    runtime.log(LogLevel.WARN, "⏭ Gagal pindah ke '${chosen.label}' — melompat ke akun berikutnya...")
+                    continue
+                }
+            }
+        }
+        return if (restartAfterSwitch) FlowControl.RESTART_ROOT else FlowControl.NEXT
+    }
+
+    private suspend fun waitUntilEarliestCooldown(
+        candidates: List<AccountProfile>,
+        startedAt: Long,
+        maxDurationMs: Long
+    ): AccountProfile? {
+        if (candidates.isEmpty()) return null
+        val nowMs = runtime.nowMs()
+        val earliest = candidates.minByOrNull { remainingCooldownMs(it, nowMs) } ?: return null
+        val waitMs = remainingCooldownMs(earliest, nowMs)
+        if (waitMs <= 0L) return earliest
+        val waitMin = ((waitMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        runtime.log(LogLevel.INFO, "⏳ Semua akun sedang cooldown — menunggu ~${waitMin} menit untuk '${earliest.label}'...")
+        var rem = waitMs
+        while (rem > 0L && !runtime.isStopped()) {
+            runtime.waitIfPaused()
+            if (runtime.nowMs() - startedAt >= maxDurationMs) return null
+            if (runtime.consumeManualSkipAccountRequest()) return earliest
+            val slice = minOf(rem, 1000L)
+            runtime.sleep(slice)
+            rem -= slice
+            markProgress()
+        }
+        return if (runtime.isStopped()) null else earliest
+    }
+
+    private suspend fun executeAccountSwitchSequence(
+        macro: Macro,
+        target: AccountProfile,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val steps = macro.accountSwitch.switchActions.ifEmpty {
+            listOf(SelectAccountAction(methodOverride = macro.accountSwitch.method))
+        }
+        inAccountSwitchFlow = true
+        return try {
+            executeList(steps, macro, startedAt, maxDurationMs, depth, isBranch = true)
+        } finally {
+            inAccountSwitchFlow = false
+        }
+    }
+
+    private suspend fun executeSelectAccountAction(
+        action: SelectAccountAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val target = currentAccount ?: macro.accountSwitch.accounts.firstOrNull { it.enabled }
+        if (target == null) {
+            runtime.log(LogLevel.WARN, "Pilih Akun dilewati: belum ada profil akun aktif di Tab Akun.")
+            lastAccountSelectFailed = true
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
+        }
+
+        val effectiveMethod = action.methodOverride ?: macro.accountSwitch.method
+        val liveW = runtime.screenWidth.coerceAtLeast(4)
+        val liveH = runtime.screenHeight.coerceAtLeast(4)
+        val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
+
+        // Step 1: Clone App / Dual App package switching (for CLONE_APP and HYBRID when package differs)
+        val shouldSwitchPackage = when (effectiveMethod) {
+            AccountSwitchMethod.CLONE_APP -> true
+            AccountSwitchMethod.HYBRID -> target.packageName.isNotBlank() && target.packageName != previousAccountPackage
+            AccountSwitchMethod.OCR_LIST -> false
+        }
+
+        if (shouldSwitchPackage) {
+            val pkg = target.packageName.trim()
+            if (pkg.isBlank()) {
+                runtime.log(LogLevel.WARN, "⚠️ Akun '${target.label}' belum memilih aplikasi Clone App.")
+                lastAccountSelectFailed = true
+                return handleBranch(
+                    action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                    targetBranchId = action.notFoundBranchId
+                )
+            }
+            if (action.exitPreviousApp) {
+                runtime.log(LogLevel.ACTION, "🚪 Menutup aplikasi sebelumnya sebelum membuka '${target.appLabel.ifBlank { pkg }}'...")
+                runtime.exitApp(
+                    mode = action.exitMode,
+                    packageName = previousAccountPackage,
+                    recentsSwipeDirection = action.recentsSwipeDirection,
+                    forceStopBackground = action.exitMode == ExitAppMode.CLOSE_RECENT_AND_HOME
+                )
+                if (action.exitWaitMs > 0L && !runtime.isStopped()) {
+                    runtime.sleep(action.exitWaitMs)
+                }
+            }
+            if (runtime.isStopped()) return FlowControl.STOP_MACRO
+            runtime.log(LogLevel.ACTION, "🚀 Membuka Clone App akun '${target.label}': ${target.appLabel.ifBlank { pkg }}")
+            val opened = runtime.launchApp(pkg, freshStart = false)
+            if (!opened) {
+                runtime.log(LogLevel.WARN, "⚠️ Gagal membuka aplikasi Clone '$pkg' untuk akun '${target.label}'.")
+                lastAccountSelectFailed = true
+                return handleBranch(
+                    action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                    targetBranchId = action.notFoundBranchId
+                )
+            }
+            previousAccountPackage = pkg
+            runtime.onActionExecuted()
+            markProgress()
+            if (action.launchWaitMs > 0L && !runtime.isStopped()) {
+                val wFlow = sleepWatchingStuck(action.launchWaitMs, macro, startedAt, maxDurationMs, depth)
+                if (wFlow != FlowControl.NEXT) return wFlow
+            }
+            if (effectiveMethod == AccountSwitchMethod.CLONE_APP) {
+                return if (action.thenActions.isNotEmpty()) {
+                    executeList(action.thenActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
+                } else {
+                    FlowControl.NEXT
+                }
+            }
+        }
+
+        // Step 2: OCR Daftar Akun + Auto-Scroll (+ optional Fallback Image) for OCR_LIST and HYBRID
+        val keyword = target.ocrKeyword.trim()
+        val fallbackImgName = target.fallbackImageName.trim()
+        if (keyword.isBlank() && fallbackImgName.isBlank()) {
+            if (effectiveMethod == AccountSwitchMethod.HYBRID && target.packageName.isNotBlank()) {
+                return if (action.thenActions.isNotEmpty()) {
+                    executeList(action.thenActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
+                } else {
+                    FlowControl.NEXT
+                }
+            }
+            runtime.log(LogLevel.WARN, "⚠️ Akun '${target.label}' belum mengisi Kata Kunci OCR atau Gambar Fallback.")
+            lastAccountSelectFailed = true
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
+        }
+
+        val scaledRegion = action.region?.let { transform.scaleRegion(it) }
+        val offsetX = transform.scaleDistance(action.clickOffsetX)
+        val offsetY = transform.scaleDistance(action.clickOffsetY)
+        val fallbackTemplate = if (fallbackImgName.isNotBlank()) runtime.loadTemplate(fallbackImgName) else null
+
+        val boxL = scaledRegion?.left ?: (liveW * 0.12f).toInt()
+        val boxT = scaledRegion?.top ?: (liveH * 0.18f).toInt()
+        val boxR = scaledRegion?.right ?: (liveW * 0.88f).toInt()
+        val boxB = scaledRegion?.bottom ?: (liveH * 0.82f).toInt()
+        val boxCx = ((boxL + boxR) / 2).coerceIn(2, liveW - 2)
+        val boxCy = ((boxT + boxB) / 2).coerceIn(2, liveH - 2)
+        val boxW = (boxR - boxL).coerceAtLeast(40)
+        val boxH = (boxB - boxT).coerceAtLeast(40)
+        val ratio = action.scrollDistanceRatio.coerceIn(0.15f, 0.85f)
+        val maxScrolls = action.maxScrolls.coerceIn(0, 30)
+
+        var reversed = false
+        var prevSignature = ""
+        var totalPasses = 0
+        val maxTotalPasses = 1 + maxScrolls * (if (action.reverseOnEnd) 2 else 1)
+        var scrollsUsedInCurrentDir = 0
+
+        runtime.log(
+            LogLevel.INFO,
+            "🔍 Mencari akun '${target.label}' di layar (OCR: '${keyword.ifBlank { "-" }}', ${action.scrollDirection.shortLabel}, maks ${maxScrolls}× scroll)..."
+        )
+
+        while (totalPasses < maxTotalPasses && !runtime.isStopped()) {
+            runtime.waitIfPaused()
+            if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
+            totalPasses++
+
+            // 2a. OCR search across individual blocks & same-line merged blocks
+            if (keyword.isNotBlank()) {
+                val blocks = runtime.recognizeText(scaledRegion, enhanced = true)
+                val matched = findMatchingAccountBlock(blocks, keyword, action.matchMode)
+                if (matched != null) {
+                    val tx = (matched.centerX + offsetX).coerceIn(1, liveW - 2)
+                    val ty = (matched.centerY + offsetY).coerceIn(1, liveH - 2)
+                    runtime.log(LogLevel.INFO, "👤 Akun '${target.label}' ditemukan via OCR ('${matched.text}') → klik ($tx, $ty).")
+                    if (guardedClick(macro, tx, ty, 60L)) {
+                        runtime.onActionExecuted()
+                        markProgress()
+                        return if (action.thenActions.isNotEmpty()) {
+                            executeList(action.thenActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
+                        } else {
+                            FlowControl.NEXT
+                        }
+                    }
+                }
+                val sig = blocks.joinToString("|") { it.text.trim().lowercase() }
+                if (prevSignature.isNotEmpty() && sig == prevSignature && scrollsUsedInCurrentDir > 0) {
+                    if (action.reverseOnEnd && !reversed) {
+                        reversed = true
+                        scrollsUsedInCurrentDir = 0
+                        runtime.log(LogLevel.INFO, "🔄 Ujung daftar tercapai — membalik arah scroll untuk mencari '${target.label}'...")
+                    } else {
+                        break
+                    }
+                }
+                prevSignature = sig
+            }
+
+            // 2b. Optional fallback cropped image search (for stylized game fonts)
+            if (fallbackTemplate != null) {
+                val frame = runtime.captureFrame()
+                if (frame != null) {
+                    val m = if (scaledRegion != null) {
+                        TemplateMatcher.findAll(
+                            frame, fallbackTemplate, action.fallbackThreshold.toDouble(), maxResults = 1,
+                            regionLeft = scaledRegion.left, regionTop = scaledRegion.top,
+                            regionRight = scaledRegion.right, regionBottom = scaledRegion.bottom
+                        ).firstOrNull()
+                    } else {
+                        TemplateMatcher.findAll(
+                            frame, fallbackTemplate, action.fallbackThreshold.toDouble(), maxResults = 1
+                        ).firstOrNull()
+                    }
+                    if (m != null) {
+                        val scaleX = liveW.toDouble() / frame.width.coerceAtLeast(1)
+                        val scaleY = liveH.toDouble() / frame.height.coerceAtLeast(1)
+                        val tx = ((m.centerX * scaleX).roundToInt() + offsetX).coerceIn(1, liveW - 2)
+                        val ty = ((m.centerY * scaleY).roundToInt() + offsetY).coerceIn(1, liveH - 2)
+                        runtime.log(LogLevel.INFO, "👤 Akun '${target.label}' ditemukan via gambar cadangan (${(m.score * 100).roundToInt()}%) → klik ($tx, $ty).")
+                        if (guardedClick(macro, tx, ty, 60L)) {
+                            runtime.onActionExecuted()
+                            markProgress()
+                            return if (action.thenActions.isNotEmpty()) {
+                                executeList(action.thenActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
+                            } else {
+                                FlowControl.NEXT
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2c. Auto-scroll to next slice of the account list
+            if (scrollsUsedInCurrentDir >= maxScrolls) {
+                if (action.reverseOnEnd && !reversed && maxScrolls > 0) {
+                    reversed = true
+                    scrollsUsedInCurrentDir = 0
+                    prevSignature = ""
+                    runtime.log(LogLevel.INFO, "🔄 Batas scroll tercapai — membalik arah scroll untuk mencari '${target.label}'...")
+                } else {
+                    break
+                }
+            }
+            if (maxScrolls == 0) break
+
+            val halfSpan = when (action.scrollDirection) {
+                AccountScrollDirection.VERTICAL -> ((boxH * ratio) / 2f).roundToInt().coerceAtLeast(30)
+                AccountScrollDirection.HORIZONTAL -> ((boxW * ratio) / 2f).roundToInt().coerceAtLeast(30)
+            }
+            val (sx1, sy1, sx2, sy2) = when (action.scrollDirection) {
+                AccountScrollDirection.VERTICAL -> {
+                    val lowY = (boxCy + halfSpan).coerceIn(4, liveH - 4)
+                    val highY = (boxCy - halfSpan).coerceIn(4, liveH - 4)
+                    if (!reversed) intArrayOf(boxCx, lowY, boxCx, highY) else intArrayOf(boxCx, highY, boxCx, lowY)
+                }
+                AccountScrollDirection.HORIZONTAL -> {
+                    val rightX = (boxCx + halfSpan).coerceIn(4, liveW - 4)
+                    val leftX = (boxCx - halfSpan).coerceIn(4, liveW - 4)
+                    if (!reversed) intArrayOf(rightX, boxCy, leftX, boxCy) else intArrayOf(leftX, boxCy, rightX, boxCy)
+                }
+            }
+            scrollsUsedInCurrentDir++
+            runtime.log(LogLevel.ACTION, "↕ Auto-Scroll akun #$scrollsUsedInCurrentDir (${if (reversed) "balik" else "maju"}): ($sx1,$sy1) → ($sx2,$sy2)")
+            runtime.swipe(sx1, sy1, sx2, sy2, action.scrollDurationMs.coerceIn(120L, 2000L))
+            markProgress()
+            val settle = action.scrollSettleMs.coerceIn(100L, 5000L)
+            if (settle > 0L && !runtime.isStopped()) {
+                runtime.sleep(settle)
+            }
+        }
+
+        runtime.log(LogLevel.WARN, "⚠️ Akun '${target.label}' tidak ditemukan di layar setelah auto-scroll.")
+        lastAccountSelectFailed = true
+        return handleBranch(
+            action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+            targetBranchId = action.notFoundBranchId
+        )
+    }
+
+    private fun findMatchingAccountBlock(
+        blocks: List<OcrBlock>,
+        keyword: String,
+        mode: AccountOcrMatchMode
+    ): OcrBlock? {
+        if (blocks.isEmpty() || keyword.isBlank()) return null
+        // 1. Direct match on individual OCR blocks
+        blocks.firstOrNull { matchesAccountKeyword(it.text, keyword, mode) }?.let { return it }
+        // 2. Group blocks on the same horizontal line (in case OCR splits "TH15" and "Farm2")
+        val sorted = blocks.sortedWith(compareBy<OcrBlock> { it.top }.thenBy { it.left })
+        val lines = ArrayList<MutableList<OcrBlock>>()
+        for (b in sorted) {
+            val existing = lines.firstOrNull { line ->
+                val ref = line.first()
+                val refH = (ref.bottom - ref.top).coerceAtLeast(16)
+                abs(b.centerY - ref.centerY) <= refH
+            }
+            if (existing != null) existing += b else lines += mutableListOf(b)
+        }
+        for (line in lines) {
+            if (line.size < 2) continue
+            val ordered = line.sortedBy { it.left }
+            val mergedText = ordered.joinToString(" ") { it.text.trim() }
+            if (matchesAccountKeyword(mergedText, keyword, mode)) {
+                return OcrBlock(
+                    text = mergedText,
+                    left = ordered.minOf { it.left },
+                    top = ordered.minOf { it.top },
+                    right = ordered.maxOf { it.right },
+                    bottom = ordered.maxOf { it.bottom }
+                )
+            }
+        }
+        return null
+    }
+
+    private fun matchesAccountKeyword(text: String, keyword: String, mode: AccountOcrMatchMode): Boolean {
+        val normText = text.trim().lowercase().replace(Regex("\\s+"), " ")
+        val normKey = keyword.trim().lowercase().replace(Regex("\\s+"), " ")
+        if (normText.isEmpty() || normKey.isEmpty()) return false
+        val compactText = normText.replace(" ", "")
+        val compactKey = normKey.replace(" ", "")
+        return when (mode) {
+            AccountOcrMatchMode.EXACT -> normText == normKey || compactText == compactKey
+            AccountOcrMatchMode.CONTAINS -> {
+                if (normText.contains(normKey) || compactText.contains(compactKey)) return true
+                // Light OCR lookalike tolerance (0<->o, 1<->l<->i, 5<->s) for game fonts when keyword >= 4 chars
+                if (compactKey.length >= 4) {
+                    ocrFuzzyFold(compactText).contains(ocrFuzzyFold(compactKey))
+                } else false
+            }
+        }
+    }
+
+    private fun ocrFuzzyFold(s: String): String = buildString(s.length) {
+        for (c in s) {
+            append(
+                when (c) {
+                    '0' -> 'o'
+                    '1', 'i' -> 'l'
+                    '5' -> 's'
+                    else -> c
+                }
+            )
+        }
     }
 
     private fun formatPlainNumber(v: Double): String =

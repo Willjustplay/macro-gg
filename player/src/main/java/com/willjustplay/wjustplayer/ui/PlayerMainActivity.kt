@@ -115,6 +115,7 @@ private fun WjustPlayerApp(
 
     val macros by viewModel.macros.collectAsStateWithLifecycle()
     val macroSets by viewModel.macroSets.collectAsStateWithLifecycle()
+    val accountsByKey by viewModel.accountsByKey.collectAsStateWithLifecycle()
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
     val incomingUri by incomingUriFlow.collectAsStateWithLifecycle()
 
@@ -128,6 +129,7 @@ private fun WjustPlayerApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     var showLocalImportDialog by remember { mutableStateOf(false) }
+    var managingAccountsMacro by remember { mutableStateOf<Macro?>(null) }
     var localWjmFiles by remember { mutableStateOf<List<PlayerStorageHelper.LocalWjmEntry>>(emptyList()) }
     var loadingLocalFiles by remember { mutableStateOf(false) }
 
@@ -329,12 +331,14 @@ private fun WjustPlayerApp(
                     PlayerTab.MACROS -> PlayerHomeScreen(
                         macros = macros,
                         macroSets = macroSets,
+                        accountsByKey = accountsByKey,
                         permissions = permissions,
                         engineState = engineState,
                         isOverlayActive = isOverlayActive,
                         activeMacroId = activeMacro?.id.orEmpty(),
                         nowMs = viewModel.effectiveNowMs(),
                         resolveLogoPath = viewModel::macroIconPath,
+                        accountKeyFor = viewModel::accountKeyFor,
                         onOpenAccessibility = {
                             if (permissions.accessibilityEnabled) {
                                 scope.launch { snackbarHostState.showSnackbar("Aksesibilitas sudah aktif.") }
@@ -364,6 +368,7 @@ private fun WjustPlayerApp(
                         onImportWjm = ::pickWjmFile,
                         onScanLocalDownloads = ::openLocalWjmScanner,
                         onPlayMacro = ::launchMacro,
+                        onManageAccounts = { target -> managingAccountsMacro = target },
                         onTogglePassive = viewModel::togglePassive,
                         onDeleteMacro = viewModel::deleteMacro,
                         onDeleteMacroSet = viewModel::deleteMacroSet
@@ -396,6 +401,18 @@ private fun WjustPlayerApp(
                     viewModel.importWjmFromLocalEntry(entry)
                 },
                 onDismiss = { showLocalImportDialog = false }
+            )
+        }
+
+        managingAccountsMacro?.let { targetMacro ->
+            PlayerAccountManagerDialog(
+                macro = targetMacro,
+                initialAccounts = viewModel.accountsFor(targetMacro),
+                onSave = { updatedAccounts ->
+                    viewModel.saveMacroAccounts(targetMacro, updatedAccounts)
+                    managingAccountsMacro = null
+                },
+                onDismiss = { managingAccountsMacro = null }
             )
         }
     }

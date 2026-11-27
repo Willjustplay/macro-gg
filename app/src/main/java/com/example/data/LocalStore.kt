@@ -660,7 +660,15 @@ class LocalStore(context: Context) {
                     actions = rewriteList(m.actions),
                     branches = m.branches.map { b -> b.copy(actions = rewriteList(b.actions)) },
                     stuckActions = rewriteList(m.stuckActions),
-                    bannedImages = m.bannedImages.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it }
+                    bannedImages = m.bannedImages.map { if (normalizeImageName(it) == oldNormalized) newNormalized else it },
+                    accountSwitch = m.accountSwitch.copy(
+                        switchActions = rewriteList(m.accountSwitch.switchActions),
+                        accounts = m.accountSwitch.accounts.map { acc ->
+                            if (normalizeImageName(acc.fallbackImageName) == oldNormalized) {
+                                acc.copy(fallbackImageName = newNormalized)
+                            } else acc
+                        }
+                    )
                 )
                 saveMacro(updated)
             }

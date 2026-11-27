@@ -77,6 +77,8 @@ import androidx.compose.ui.unit.dp
 import com.example.automation.InstalledAppInfo
 import com.example.automation.InstalledAppsHelper
 import com.example.automation.PickedPixel
+import com.example.data.AccountProfile
+import com.example.data.AccountSwitchMethod
 import com.example.data.Action
 import com.example.data.ActionKind
 import com.example.data.BannedImageMode
@@ -107,8 +109,10 @@ import com.example.data.RecordAction
 import com.example.data.Region
 import com.example.data.RestartAction
 import com.example.data.RunMacroAction
+import com.example.data.SelectAccountAction
 import com.example.data.StopAction
 import com.example.data.SwipeAction
+import com.example.data.SwitchAccountAction
 import com.example.data.TextAction
 import com.example.data.TextCompareMode
 import com.example.data.TrackInteractionMode
@@ -131,6 +135,8 @@ fun ActionEditorSheet(
     currentMacroId: String,
     macroActions: List<Action> = emptyList(),
     branches: List<MacroBranch> = emptyList(),
+    accounts: List<AccountProfile> = emptyList(),
+    accountDefaultMethod: AccountSwitchMethod = AccountSwitchMethod.OCR_LIST,
     allMacros: List<Macro>,
     images: List<ImageAsset>,
     imageFolders: List<String>,
@@ -1934,6 +1940,24 @@ fun ActionEditorSheet(
                         branches = branches,
                         images = images,
                         lastPickedPixel = lastPickedPixel,
+                        onUpdate = { draft = it }
+                    )
+                }
+
+                is SwitchAccountAction -> {
+                    SwitchAccountActionEditor(
+                        action = a,
+                        accounts = accounts,
+                        onUpdate = { draft = it }
+                    )
+                }
+
+                is SelectAccountAction -> {
+                    SelectAccountActionEditor(
+                        action = a,
+                        macroDefaultMethod = accountDefaultMethod,
+                        branches = branches,
+                        onPickRegionOnScreen = { onPickRegionOnScreen(a, a.id) },
                         onUpdate = { draft = it }
                     )
                 }

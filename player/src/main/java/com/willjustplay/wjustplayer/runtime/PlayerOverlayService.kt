@@ -51,6 +51,8 @@ class PlayerOverlayService : Service() {
     private var playPauseBtn: TextView? = null
     private var titleLabel: TextView? = null
     private var statusDot: View? = null
+    private var activeAccountRow: LinearLayout? = null
+    private var activeAccountBadgeView: TextView? = null
 
     private var hiddenBubbleView: View? = null
     private var logOverlayView: View? = null
@@ -216,6 +218,53 @@ class PlayerOverlayService : Service() {
         headerRow.addView(dot)
         headerRow.addView(title)
         root.addView(headerRow)
+
+        val accountRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(6), dp(3), dp(4), dp(3))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#11263F"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#0284C7"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(5) }
+        }
+        val accountBadge = TextView(this).apply {
+            text = ""
+            setTextColor(Color.parseColor("#7DD3FC"))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+        }
+        val skipAccBtn = TextView(this).apply {
+            text = "⏭"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0284C7"))
+                cornerRadius = dp(6).toFloat()
+            }
+            setOnClickListener {
+                PlayerCoordinator.requestSkipAccount()
+                Toast.makeText(this@PlayerOverlayService, "Pindah ke akun berikutnya...", Toast.LENGTH_SHORT).show()
+            }
+        }
+        accountRow.addView(accountBadge)
+        accountRow.addView(skipAccBtn)
+        activeAccountRow = accountRow
+        activeAccountBadgeView = accountBadge
+        root.addView(accountRow)
 
         // Single clean playback row: [▶/⏸] [■] [👁] [≡] [⌂] [✕]
         val row = LinearLayout(this).apply {
@@ -515,6 +564,16 @@ class PlayerOverlayService : Service() {
         serviceScope.launch {
             PlayerCoordinator.activeMacro.collectLatest { m ->
                 titleLabel?.text = m?.name?.ifBlank { "Wjust Player" } ?: "Wjust Player"
+            }
+        }
+        serviceScope.launch {
+            PlayerCoordinator.activeAccountLabel.collectLatest { label ->
+                if (label.isBlank()) {
+                    activeAccountRow?.visibility = View.GONE
+                } else {
+                    activeAccountBadgeView?.text = "👤 $label"
+                    activeAccountRow?.visibility = View.VISIBLE
+                }
             }
         }
         serviceScope.launch {

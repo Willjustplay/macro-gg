@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
@@ -86,6 +87,7 @@ import com.example.automation.LogLevel
 import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.MacroSet
+import com.willjustplay.wjustplayer.data.PlayerMacroAccounts
 import com.willjustplay.wjustplayer.data.PlayerStorageHelper
 import com.willjustplay.wjustplayer.runtime.PlayerEngineState
 import com.willjustplay.wjustplayer.runtime.SafeLogEntry
@@ -124,12 +126,14 @@ fun WjustPlayerTheme(content: @Composable () -> Unit) {
 fun PlayerHomeScreen(
     macros: List<Macro>,
     macroSets: List<MacroSet>,
+    accountsByKey: Map<String, PlayerMacroAccounts>,
     permissions: PlayerPermissions,
     engineState: PlayerEngineState,
     isOverlayActive: Boolean,
     activeMacroId: String,
     nowMs: Long,
     resolveLogoPath: (String) -> String?,
+    accountKeyFor: (Macro) -> String,
     onOpenAccessibility: () -> Unit,
     onRequestOverlay: () -> Unit,
     onActivateScreenCapture: () -> Unit,
@@ -139,6 +143,7 @@ fun PlayerHomeScreen(
     onImportWjm: () -> Unit,
     onScanLocalDownloads: () -> Unit,
     onPlayMacro: (Macro) -> Unit,
+    onManageAccounts: (Macro) -> Unit,
     onTogglePassive: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit,
     onDeleteMacroSet: (MacroSet, Boolean) -> Unit
@@ -468,6 +473,8 @@ fun PlayerHomeScreen(
                 PlayerMacroSetCard(
                     set = set,
                     members = members,
+                    accountsByKey = accountsByKey,
+                    accountKeyFor = accountKeyFor,
                     expanded = expanded,
                     activeMacroId = activeMacroId,
                     nowMs = nowMs,
@@ -476,6 +483,7 @@ fun PlayerHomeScreen(
                         expandedSetIds = if (expanded) expandedSetIds - set.id else expandedSetIds + set.id
                     },
                     onPlayMacro = onPlayMacro,
+                    onManageAccounts = onManageAccounts,
                     onTogglePassive = onTogglePassive,
                     onRequestDeleteSet = { confirmDeleteSet = set }
                 )
@@ -493,13 +501,17 @@ fun PlayerHomeScreen(
                 )
             }
             items(standaloneMacros, key = { "macro_${it.id}" }) { macro ->
+                val localAccCount = (accountsByKey[accountKeyFor(macro)] ?: accountsByKey[macro.id])
+                    ?.accounts?.count { it.enabled } ?: 0
                 PlayerMacroCard(
                     macro = macro,
                     parentSet = null,
+                    localAccountCount = localAccCount,
                     isActiveSelected = macro.id == activeMacroId,
                     nowMs = nowMs,
                     logoPath = if (macro.logoImage.isNotBlank()) resolveLogoPath(macro.logoImage) else null,
                     onPlay = { onPlayMacro(macro) },
+                    onManageAccounts = { onManageAccounts(macro) },
                     onTogglePassive = { onTogglePassive(macro) },
                     onDelete = { confirmDeleteMacro = macro }
                 )
@@ -553,12 +565,15 @@ fun PlayerHomeScreen(
 private fun PlayerMacroSetCard(
     set: MacroSet,
     members: List<Macro>,
+    accountsByKey: Map<String, PlayerMacroAccounts>,
+    accountKeyFor: (Macro) -> String,
     expanded: Boolean,
     activeMacroId: String,
     nowMs: Long,
     resolveLogoPath: (String) -> String?,
     onToggleExpand: () -> Unit,
     onPlayMacro: (Macro) -> Unit,
+    onManageAccounts: (Macro) -> Unit,
     onTogglePassive: (Macro) -> Unit,
     onRequestDeleteSet: () -> Unit
 ) {
@@ -622,19 +637,53 @@ private fun PlayerMacroSetCard(
                 )
             }
 
-            // Quick Play button if collapsed and there is an active macro
+            // Quick Play (and optional Atur Akun Saya) when collapsed and there is 1 active macro
             if (!expanded && activeMembers.size == 1) {
                 val primary = activeMembers.first()
-                Button(
-                    onClick = { onPlayMacro(primary) },
-                    enabled = !isExpired,
-                    shape = RoundedCornerShape(12.dp),
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(vertical = 8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isExpired) "Masa Aktif Berakhir" else "Jalankan '${primary.name}'", fontWeight = FontWeight.Bold)
+                    Button(
+                        onClick = { onPlayMacro(primary) },
+                        enabled = !isExpired,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 10.dp)
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (isExpired) "Masa Aktif Berakhir" else "Jalankan '${primary.name}'",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (primary.accountSwitch.enabled) {
+                        val accCnt = (accountsByKey[accountKeyFor(primary)] ?: accountsByKey[primary.id])
+                            ?.accounts?.count { it.enabled } ?: 0
+                        OutlinedButton(
+                            onClick = { onManageAccounts(primary) },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (accCnt == 0) Color(0xFFF59E0B) else Color(0xFF38BDF8)),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Groups,
+                                contentDescription = null,
+                                tint = if (accCnt == 0) Color(0xFFFBBF24) else Color(0xFF38BDF8),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "Akun ($accCnt)",
+                                color = if (accCnt == 0) Color(0xFFFBBF24) else Color(0xFF7DD3FC),
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
                 }
             }
 
@@ -642,14 +691,18 @@ private fun PlayerMacroSetCard(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     members.forEach { member ->
+                        val localAccCount = (accountsByKey[accountKeyFor(member)] ?: accountsByKey[member.id])
+                            ?.accounts?.count { it.enabled } ?: 0
                         PlayerMacroCard(
                             macro = member,
                             parentSet = set,
+                            localAccountCount = localAccCount,
                             isActiveSelected = member.id == activeMacroId,
                             nowMs = nowMs,
                             logoPath = if (member.logoImage.isNotBlank()) resolveLogoPath(member.logoImage) else null,
                             compact = true,
                             onPlay = { onPlayMacro(member) },
+                            onManageAccounts = { onManageAccounts(member) },
                             onTogglePassive = { onTogglePassive(member) },
                             onDelete = null
                         )
@@ -664,11 +717,13 @@ private fun PlayerMacroSetCard(
 private fun PlayerMacroCard(
     macro: Macro,
     parentSet: MacroSet?,
+    localAccountCount: Int,
     isActiveSelected: Boolean,
     nowMs: Long,
     logoPath: String?,
     compact: Boolean = false,
     onPlay: () -> Unit,
+    onManageAccounts: () -> Unit,
     onTogglePassive: () -> Unit,
     onDelete: (() -> Unit)?
 ) {
@@ -694,93 +749,136 @@ private fun PlayerMacroCard(
             }
         )
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Optional custom logo bundled inside .wjm
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF0E1B33)),
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                if (logoBmp != null) {
-                    Image(
-                        bitmap = logoBmp,
-                        contentDescription = macro.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                // Optional custom logo bundled inside .wjm
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF0E1B33)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (logoBmp != null) {
+                        Image(
+                            bitmap = logoBmp,
+                            contentDescription = macro.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (macro.isPassive) Icons.Filled.Layers else Icons.Filled.PlayArrow,
+                            contentDescription = null,
+                            tint = if (macro.isPassive) Color(0xFFA78BFA) else Color(0xFF10B981),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = macro.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    val subtitle = buildList {
+                        add(if (macro.isPassive) (if (macro.passiveEnabled) "Sub-Macro • ON" else "Sub-Macro • OFF") else "Siap Dijalankan")
+                        if (!macro.isPassive && macro.accountSwitch.enabled) {
+                            add("👥 $localAccountCount Akun")
+                        }
+                        if (remaining != null) add(remaining)
+                    }.joinToString(" • ")
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            isExpired -> Color(0xFFFCA5A5)
+                            macro.isPassive && macro.passiveEnabled -> Color(0xFF34D399)
+                            !macro.isPassive && macro.accountSwitch.enabled && localAccountCount == 0 -> Color(0xFFFBBF24)
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                if (macro.isPassive) {
+                    Switch(
+                        checked = macro.passiveEnabled,
+                        enabled = !isExpired,
+                        onCheckedChange = { onTogglePassive() }
                     )
                 } else {
-                    Icon(
-                        imageVector = if (macro.isPassive) Icons.Filled.Layers else Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        tint = if (macro.isPassive) Color(0xFFA78BFA) else Color(0xFF10B981),
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Button(
+                        onClick = onPlay,
+                        enabled = !isExpired,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF10B981),
+                            contentColor = Color(0xFF042018)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text(if (isExpired) "Habis" else "Play", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+
+                if (onDelete != null) {
+                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            imageVector = Icons.Filled.DeleteOutline,
+                            contentDescription = "Hapus",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = macro.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                val subtitle = buildList {
-                    add(if (macro.isPassive) (if (macro.passiveEnabled) "Sub-Macro • ON" else "Sub-Macro • OFF") else "Siap Dijalankan")
-                    if (remaining != null) add(remaining)
-                }.joinToString(" • ")
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = when {
-                        isExpired -> Color(0xFFFCA5A5)
-                        macro.isPassive && macro.passiveEnabled -> Color(0xFF34D399)
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (macro.isPassive) {
-                Switch(
-                    checked = macro.passiveEnabled,
-                    enabled = !isExpired,
-                    onCheckedChange = { onTogglePassive() }
-                )
-            } else {
-                Button(
-                    onClick = onPlay,
-                    enabled = !isExpired,
+            if (!macro.isPassive && macro.accountSwitch.enabled) {
+                val needsSetup = localAccountCount == 0
+                OutlinedButton(
+                    onClick = onManageAccounts,
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF10B981),
-                        contentColor = Color(0xFF042018)
+                    border = BorderStroke(
+                        1.dp,
+                        if (needsSetup) Color(0xFFF59E0B).copy(alpha = 0.8f) else Color(0xFF38BDF8).copy(alpha = 0.65f)
                     ),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(3.dp))
-                    Text(if (isExpired) "Habis" else "Play", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.labelMedium)
-                }
-            }
-
-            if (onDelete != null) {
-                IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
                     Icon(
-                        imageVector = Icons.Filled.DeleteOutline,
-                        contentDescription = "Hapus",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                        imageVector = Icons.Filled.Groups,
+                        contentDescription = null,
+                        tint = if (needsSetup) Color(0xFFFBBF24) else Color(0xFF38BDF8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (needsSetup) {
+                            "Atur Akun Saya — Isi Daftar Akun (${macro.accountSwitch.method.shortLabel})"
+                        } else {
+                            "Atur Akun Saya ($localAccountCount Aktif • ${macro.accountSwitch.method.shortLabel})"
+                        },
+                        color = if (needsSetup) Color(0xFFFDE68A) else Color(0xFF7DD3FC),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }

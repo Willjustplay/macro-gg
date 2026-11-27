@@ -185,7 +185,7 @@ fun MacroEditorScreen(
     onLaunchRecorderOverlay: (Macro) -> Unit,
     onBack: () -> Unit
 ) {
-    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Alur/Aksi, 1 = Anti-Macet (Watchdog), 2 = Banned Guard
+    var editorTab by remember(macro.id) { mutableIntStateOf(0) } // 0 = Alur/Aksi, 1 = Anti-Macet, 2 = Banned Guard, 3 = Ganti Akun
     var selectedBranchId by remember(macro.id) { mutableStateOf("") } // "" = Jalur Utama
     var showCreateBranchDialog by remember { mutableStateOf(false) }
     var editingBranch by remember { mutableStateOf<MacroBranch?>(null) }
@@ -214,6 +214,7 @@ fun MacroEditorScreen(
     val activeSourceList = when (editorTab) {
         0 -> macro.actionsForBranch(selectedBranchId)
         1 -> macro.stuckActions
+        3 -> macro.accountSwitch.switchActions
         else -> emptyList()
     }
     val displayedActions = dragPreviewActions ?: activeSourceList
@@ -234,18 +235,31 @@ fun MacroEditorScreen(
     fun mutateActions(block: (List<Action>) -> List<Action>) {
         dragPreviewActions = null
         val cur = latestMacro
-        if (latestEditorTab == 0) {
-            latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId, block))
-        } else if (latestEditorTab == 1) {
-            val wasEmpty = cur.stuckActions.isEmpty()
-            val nextStuck = block(cur.stuckActions)
-            latestOnUpdateMacro(
-                cur.copy(
-                    stuckActions = nextStuck,
-                    stuckRecoveryMode = if (wasEmpty && nextStuck.isNotEmpty()) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else cur.stuckRecoveryMode,
-                    autoRecoverStuckSec = if (wasEmpty && nextStuck.isNotEmpty() && cur.autoRecoverStuckSec <= 0) 60 else cur.autoRecoverStuckSec
+        when (latestEditorTab) {
+            0 -> latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId, block))
+            1 -> {
+                val wasEmpty = cur.stuckActions.isEmpty()
+                val nextStuck = block(cur.stuckActions)
+                latestOnUpdateMacro(
+                    cur.copy(
+                        stuckActions = nextStuck,
+                        stuckRecoveryMode = if (wasEmpty && nextStuck.isNotEmpty()) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else cur.stuckRecoveryMode,
+                        autoRecoverStuckSec = if (wasEmpty && nextStuck.isNotEmpty() && cur.autoRecoverStuckSec <= 0) 60 else cur.autoRecoverStuckSec
+                    )
                 )
-            )
+            }
+            3 -> {
+                val wasEmpty = cur.accountSwitch.switchActions.isEmpty()
+                val nextSwitch = block(cur.accountSwitch.switchActions)
+                latestOnUpdateMacro(
+                    cur.copy(
+                        accountSwitch = cur.accountSwitch.copy(
+                            enabled = if (wasEmpty && nextSwitch.isNotEmpty()) true else cur.accountSwitch.enabled,
+                            switchActions = nextSwitch
+                        )
+                    )
+                )
+            }
         }
     }
 
@@ -253,6 +267,7 @@ fun MacroEditorScreen(
         val current = dragPreviewActions ?: when (latestEditorTab) {
             0 -> latestMacro.actionsForBranch(latestSelectedBranchId)
             1 -> latestMacro.stuckActions
+            3 -> latestMacro.accountSwitch.switchActions
             else -> emptyList()
         }
         val reordered = current.reorderInContainer(ref, fromIndex, toIndex)
@@ -265,14 +280,22 @@ fun MacroEditorScreen(
         val pending = dragPreviewActions
         dragPreviewActions = null
         val cur = latestMacro
-        if (latestEditorTab == 0) {
-            val curList = cur.actionsForBranch(latestSelectedBranchId)
-            if (pending != null && pending != curList) {
-                latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId) { pending })
+        when (latestEditorTab) {
+            0 -> {
+                val curList = cur.actionsForBranch(latestSelectedBranchId)
+                if (pending != null && pending != curList) {
+                    latestOnUpdateMacro(cur.updateBranchActions(latestSelectedBranchId) { pending })
+                }
             }
-        } else if (latestEditorTab == 1) {
-            if (pending != null && pending != cur.stuckActions) {
-                latestOnUpdateMacro(cur.copy(stuckActions = pending))
+            1 -> {
+                if (pending != null && pending != cur.stuckActions) {
+                    latestOnUpdateMacro(cur.copy(stuckActions = pending))
+                }
+            }
+            3 -> {
+                if (pending != null && pending != cur.accountSwitch.switchActions) {
+                    latestOnUpdateMacro(cur.copy(accountSwitch = cur.accountSwitch.copy(switchActions = pending)))
+                }
             }
         }
     }
@@ -281,6 +304,7 @@ fun MacroEditorScreen(
         val actionsList = dragPreviewActions ?: when (latestEditorTab) {
             0 -> latestMacro.actionsForBranch(latestSelectedBranchId)
             1 -> latestMacro.stuckActions
+            3 -> latestMacro.accountSwitch.switchActions
             else -> emptyList()
         }
         val fromIdx = actionsList.indexOfFirst { it.id == actionId }
@@ -436,6 +460,7 @@ fun MacroEditorScreen(
                         Text(
                             when {
                                 editorTab == 1 -> "Tambah Aksi Anti-Macet"
+                                editorTab == 3 -> "Tambah Aksi Ganti Akun"
                                 selectedBranch != null -> "Tambah ke ${selectedBranch.name}"
                                 else -> "Tambah Aksi"
                             },
@@ -456,7 +481,7 @@ fun MacroEditorScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Mode Switcher: Aksi/Alur vs Anti-Macet (Watchdog) vs Banned Guard (Selalu Aktif)
+            // Mode Switcher: Aksi/Alur | Anti-Macet | Banned Guard | Ganti Akun
             item(key = "editor_tab_switcher") {
                 val mainTabLabel = if (macro.branches.isEmpty()) {
                     "Aksi (${macro.actions.size})"
@@ -466,7 +491,8 @@ fun MacroEditorScreen(
                 val tabLabels = listOf(
                     mainTabLabel,
                     "Macet (${macro.stuckActions.size})",
-                    "⛔ Ban (${macro.bannedImages.size})"
+                    "⛔ Ban (${macro.bannedImages.size})",
+                    "👥 Akun (${macro.accountSwitch.accounts.size})"
                 )
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     tabLabels.forEachIndexed { idx, label ->
@@ -478,7 +504,7 @@ fun MacroEditorScreen(
                             },
                             shape = SegmentedButtonDefaults.itemShape(index = idx, count = tabLabels.size)
                         ) {
-                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
@@ -809,7 +835,7 @@ fun MacroEditorScreen(
                         }
                     }
                 }
-            } else {
+            } else if (editorTab == 2) {
                 // Always-Active Banned Image Guard (Watchdog-style click blocker)
                 item(key = "banned_guard_tab") {
                     MacroBannedGuardCard(
@@ -820,6 +846,16 @@ fun MacroEditorScreen(
                         onCropNewBannedImage = {
                             onLaunchCropOverlay(macro, FloatingOverlayService.TARGET_ADD_BANNED_IMAGE)
                         }
+                    )
+                }
+            } else {
+                // Universal Multi-Account Switcher Tab (OCR + Auto-Scroll / Clone App / Hybrid)
+                item(key = "account_switch_tab") {
+                    MacroAccountSwitchCard(
+                        macro = macro,
+                        images = images,
+                        onUpdateMacro = onUpdateMacro,
+                        onEditCreatedAction = { created -> editingAction = created }
                     )
                 }
             }
@@ -867,7 +903,8 @@ fun MacroEditorScreen(
                         ) {
                             Text(
                                 when {
-                                    editorTab != 0 -> "Belum ada aksi Anti-Macet"
+                                    editorTab == 1 -> "Belum ada aksi Anti-Macet"
+                                    editorTab == 3 -> "Alur Ganti Akun memakai langkah otomatis"
                                     selectedBranch != null -> "Belum ada aksi di cabang '${selectedBranch.name}'"
                                     else -> "Belum ada aksi utama"
                                 },
@@ -876,9 +913,10 @@ fun MacroEditorScreen(
                             )
                             Text(
                                 when {
-                                    editorTab != 0 -> "Aksi di sini terpisah dari aksi utama dan otomatis aktif saat aksi utama macet. Ketuk 'Tambah Template' di atas atau '+ Tambah Aksi Anti-Macet' di bawah."
+                                    editorTab == 1 -> "Aksi di sini terpisah dari aksi utama dan otomatis aktif saat aksi utama macet. Ketuk 'Tambah Template' di atas atau '+ Tambah Aksi Anti-Macet' di bawah."
+                                    editorTab == 3 -> "Jika dibiarkan kosong, engine otomatis menjalankan 'Pilih / Buka Akun Giliran'. Ketuk tombol Template di atas atau '+ Tambah Aksi Ganti Akun' untuk menyusun tombol Setting/Switch khusus game Anda."
                                     selectedBranch != null -> "Tambahkan langkah alternatif yang ingin dijalankan ketika macro berbelok ke cabang ini. Setelah selesai, Anda bisa menambahkan 'Pindah Cabang' kembali ke Jalur Utama."
-                                    else -> "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Cek Hasil & Pilih Arah, Pindah Cabang, Deteksi Teks/Nilai, Deteksi Warna, Keluar/Masuk Aplikasi, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan'."
+                                    else -> "Ketuk 'Tambah Aksi' di bawah untuk menambah Klik, Deteksi Gambar, Cek Hasil & Pilih Arah, Pindah Cabang, Ganti Akun, Deteksi Teks/Nilai, Deteksi Warna, Keluar/Masuk Aplikasi, Swipe, atau pakai 'Crop Gambar' / 'Rekam Sentuhan'."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -941,12 +979,16 @@ fun MacroEditorScreen(
                         onPickRegionOnScreen = { id -> onLaunchRegionPickerOverlay(macro, id) },
                         onAddBranchClickTarget = { parentId, slot ->
                             val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
-                            val updatedMacro = if (editorTab == 0) {
-                                macro.updateBranchActions(selectedBranchId) { list ->
+                            val updatedMacro = when (editorTab) {
+                                0 -> macro.updateBranchActions(selectedBranchId) { list ->
                                     list.insertInto(ContainerRef(parentId, slot), newClick)
                                 }
-                            } else {
-                                macro.copy(stuckActions = macro.stuckActions.insertInto(ContainerRef(parentId, slot), newClick))
+                                3 -> macro.copy(
+                                    accountSwitch = macro.accountSwitch.copy(
+                                        switchActions = macro.accountSwitch.switchActions.insertInto(ContainerRef(parentId, slot), newClick)
+                                    )
+                                )
+                                else -> macro.copy(stuckActions = macro.stuckActions.insertInto(ContainerRef(parentId, slot), newClick))
                             }
                             onUpdateMacro(updatedMacro)
                             onLaunchTargetPickerOverlay(updatedMacro, newClick.id)
@@ -1032,6 +1074,8 @@ fun MacroEditorScreen(
             currentMacroId = macro.id,
             macroActions = ownerActions,
             branches = macro.branches,
+            accounts = macro.accountSwitch.accounts,
+            accountDefaultMethod = macro.accountSwitch.method,
             allMacros = allMacros,
             images = images,
             imageFolders = imageFolders,
@@ -1337,7 +1381,7 @@ private fun ActionNodeCard(
                             )
                         }
                     }
-                    action is TextAction || (action is TrackObjectAction && action.trackAnyMotion) -> {
+                    action is TextAction || action is com.example.data.SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion) -> {
                         IconButton(onClick = { onPickRegionOnScreen(action.id) }, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.CropFree,
@@ -1371,7 +1415,7 @@ private fun ActionNodeCard(
                                 onClick = { menuExpanded = false; onQuickSwapImage(action) }
                             )
                         }
-                        if (action is TextAction || (action is TrackObjectAction && action.trackAnyMotion)) {
+                        if (action is TextAction || action is com.example.data.SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion)) {
                             DropdownMenuItem(
                                 text = { Text("Pilih Area di Layar") },
                                 leadingIcon = { Icon(Icons.Filled.CropFree, null) },
@@ -1749,6 +1793,7 @@ private fun AddActionPickerSheet(
     val groups = listOf(
         "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
         "Cabang & Arah Urutan" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
+        "Ganti Akun Game (Semua Game)" to listOf(ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT),
         "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
         "Aplikasi (Keluar / Masuk)" to listOf(ActionKind.EXIT_APP, ActionKind.LAUNCH_APP),
         "Alur & Hubungkan Macro" to listOf(ActionKind.LOOP, ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP)

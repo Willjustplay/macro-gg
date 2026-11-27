@@ -15,7 +15,7 @@ data class ContainerRef(val parentId: String? = null, val slot: Slot? = null) {
 }
 
 fun Action.slots(): List<Slot> = when (this) {
-    is ImageAction, is TrackObjectAction, is TextAction, is ColorAction -> listOf(Slot.THEN, Slot.ELSE)
+    is ImageAction, is TrackObjectAction, is TextAction, is ColorAction, is SelectAccountAction -> listOf(Slot.THEN, Slot.ELSE)
     is LoopAction -> listOf(Slot.BODY)
     else -> emptyList()
 }
@@ -25,6 +25,7 @@ fun Action.childList(slot: Slot): List<Action> = when (this) {
     is TrackObjectAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is TextAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is ColorAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is SelectAccountAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is LoopAction -> if (slot == Slot.BODY) actions else emptyList()
     else -> emptyList()
 }
@@ -46,6 +47,11 @@ fun Action.withChildList(slot: Slot, list: List<Action>): Action = when (this) {
         else -> this
     }
     is ColorAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is SelectAccountAction -> when (slot) {
         Slot.THEN -> copy(thenActions = list)
         Slot.ELSE -> copy(elseActions = list)
         else -> this
@@ -174,27 +180,33 @@ fun Macro.updateBranchActions(branchId: String, transform: (List<Action>) -> Lis
         copy(branches = branches.map { b -> if (b.id == branchId) b.copy(actions = transform(b.actions)) else b })
     }
 
-/** Depth-first walk over main [Macro.actions], all named [Macro.branches], and out-of-band [Macro.stuckActions]. */
+/** Depth-first walk over main [Macro.actions], all named [Macro.branches], [Macro.stuckActions], and [Macro.accountSwitch] switchActions. */
 fun Macro.allActionsSequence(): Sequence<Action> = sequence {
     yieldAll(actions.walk())
     for (b in branches) {
         yieldAll(b.actions.walk())
     }
     yieldAll(stuckActions.walk())
+    yieldAll(accountSwitch.switchActions.walk())
 }
 
 fun Macro.findAnyAction(id: String): Action? =
     actions.findAction(id)
         ?: branches.firstNotNullOfOrNull { it.actions.findAction(id) }
         ?: stuckActions.findAction(id)
+        ?: accountSwitch.switchActions.findAction(id)
 
 fun Macro.isStuckAction(id: String): Boolean =
     stuckActions.findAction(id) != null
 
-/** Returns the top-level action list that owns [actionId] (main, a named branch, or stuckActions). */
+fun Macro.isSwitchAccountAction(id: String): Boolean =
+    accountSwitch.switchActions.findAction(id) != null
+
+/** Returns the top-level action list that owns [actionId] (main, a named branch, stuckActions, or switchActions). */
 fun Macro.ownerListForAction(actionId: String): List<Action> = when {
     actions.findAction(actionId) != null -> actions
     stuckActions.findAction(actionId) != null -> stuckActions
+    accountSwitch.switchActions.findAction(actionId) != null -> accountSwitch.switchActions
     else -> branches.firstOrNull { it.actions.findAction(actionId) != null }?.actions ?: actions
 }
 
@@ -206,6 +218,9 @@ fun Macro.updateAnyAction(id: String, transform: (Action) -> Action): Macro = wh
         }
     )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.updateAction(id, transform))
+    accountSwitch.switchActions.findAction(id) != null -> copy(
+        accountSwitch = accountSwitch.copy(switchActions = accountSwitch.switchActions.updateAction(id, transform))
+    )
     else -> this
 }
 
@@ -217,6 +232,9 @@ fun Macro.removeAnyAction(id: String): Macro = when {
         }
     )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.removeAction(id))
+    accountSwitch.switchActions.findAction(id) != null -> copy(
+        accountSwitch = accountSwitch.copy(switchActions = accountSwitch.switchActions.removeAction(id))
+    )
     else -> this
 }
 
@@ -228,10 +246,13 @@ fun Macro.moveAnyAction(id: String, delta: Int): Macro = when {
         }
     )
     stuckActions.findAction(id) != null -> copy(stuckActions = stuckActions.moveAction(id, delta))
+    accountSwitch.switchActions.findAction(id) != null -> copy(
+        accountSwitch = accountSwitch.copy(switchActions = accountSwitch.switchActions.moveAction(id, delta))
+    )
     else -> this
 }
 
-/** Returns "" if [actionId] belongs to Jalur Utama, the [MacroBranch.id] if in a branch, or null if in stuckActions / not found. */
+/** Returns "" if [actionId] belongs to Jalur Utama, the [MacroBranch.id] if in a branch, or null if in stuckActions / switchActions / not found. */
 fun Macro.branchIdOfAction(actionId: String): String? = when {
     actions.findAction(actionId) != null -> ""
     else -> branches.firstOrNull { it.actions.findAction(actionId) != null }?.id
@@ -254,6 +275,9 @@ fun Macro.moveActionToBranch(actionId: String, targetBranchId: String): Macro {
 
 fun Macro.imageNames(): Set<String> = buildSet {
     bannedImages.filter { it.isNotBlank() }.forEach { add(it) }
+    accountSwitch.accounts.forEach { acc ->
+        if (acc.fallbackImageName.isNotBlank()) add(acc.fallbackImageName)
+    }
     for (a in allActionsSequence()) {
         when (a) {
             is ImageAction -> {
@@ -276,3 +300,5 @@ fun Macro.imageNames(): Set<String> = buildSet {
 fun Macro.countActions(): Int = actions.walk().count() + branches.sumOf { it.actions.walk().count() }
 
 fun Macro.countStuckActions(): Int = stuckActions.walk().count()
+
+fun Macro.countSwitchActions(): Int = accountSwitch.switchActions.walk().count()
