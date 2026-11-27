@@ -14,9 +14,11 @@ import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.ManageAccounts
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Swipe
+import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
@@ -50,6 +52,8 @@ fun ActionKind.icon(): ImageVector = when (this) {
     ActionKind.LOOP -> Icons.Filled.Loop
     ActionKind.BRANCH_ROUTER -> Icons.AutoMirrored.Filled.AltRoute
     ActionKind.GOTO_BRANCH -> Icons.AutoMirrored.Filled.CallSplit
+    ActionKind.SWITCH_ACCOUNT -> Icons.Filled.SwitchAccount
+    ActionKind.SELECT_ACCOUNT -> Icons.Filled.ManageAccounts
     ActionKind.RUN_MACRO -> Icons.Filled.Link
     ActionKind.FINISH_MACRO -> Icons.Filled.TaskAlt
     ActionKind.JUMP -> Icons.Filled.DoubleArrow
@@ -73,6 +77,8 @@ fun ActionKind.accentColor(): Color = when (this) {
     ActionKind.LOOP -> Color(0xFFF59E0B)
     ActionKind.BRANCH_ROUTER -> Color(0xFF06B6D4)
     ActionKind.GOTO_BRANCH -> Color(0xFFF59E0B)
+    ActionKind.SWITCH_ACCOUNT -> Color(0xFF38BDF8)
+    ActionKind.SELECT_ACCOUNT -> Color(0xFF06B6D4)
     ActionKind.RUN_MACRO -> Color(0xFFEC4899)
     ActionKind.FINISH_MACRO -> Color(0xFF059669)
     ActionKind.JUMP -> Color(0xFF7C3AED)

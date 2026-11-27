@@ -79,6 +79,21 @@ object MacroBundleCodec {
     }
 
     /**
+     * Strips user-specific multi-account credentials (account keywords, emails, personal clone
+     * package selections, and last active account ID) while keeping reusable account-switching
+     * configuration & steps intact so shared `.zip` bundles never leak private accounts.
+     */
+    private fun Macro.sanitizedForPortableExport(): Macro {
+        if (accountSwitch.accounts.isEmpty() && accountSwitch.lastAccountId.isBlank()) return this
+        return copy(
+            accountSwitch = accountSwitch.copy(
+                accounts = emptyList(),
+                lastAccountId = ""
+            )
+        )
+    }
+
+    /**
      * Writes a portable .zip containing:
      * - `macro.json` (root macro)
      * - `bundle_meta.json` (when [singleUseImport] is enabled, carrying signed 1× import token)
@@ -96,7 +111,7 @@ object MacroBundleCodec {
         exportedAtEpochMs: Long = System.currentTimeMillis()
     ): ExportResult {
         val stableOrigin = root.originId.ifBlank { root.id }
-        val baseRoot = root.copy(originId = stableOrigin)
+        val baseRoot = root.copy(originId = stableOrigin).sanitizedForPortableExport()
         val generatedToken = if (singleUseImport) MacroSecurity.generateSalt() else ""
         val exportRoot = if (singleUseImport) {
             MacroSecurity.attachOneTimeExportToken(baseRoot, generatedToken)
@@ -104,7 +119,9 @@ object MacroBundleCodec {
             baseRoot
         }
 
-        val bundle = collectMacroBundle(exportRoot, lookupMacro)
+        val bundle = collectMacroBundle(exportRoot, lookupMacro).mapIndexed { idx, m ->
+            if (idx == 0) m else m.sanitizedForPortableExport()
+        }
         val referencedImages = LinkedHashSet<String>()
         val referencedIcons = LinkedHashSet<String>()
         bundle.forEach { m ->
@@ -201,7 +218,7 @@ object MacroBundleCodec {
             val withOriginAndSet = rawMember.copy(
                 originId = rawMember.originId.ifBlank { rawMember.id },
                 setId = exportSet.id
-            )
+            ).sanitizedForPortableExport()
             if (singleUseImport) {
                 MacroSecurity.attachOneTimeExportToken(withOriginAndSet, generatedToken)
             } else {
@@ -218,7 +235,7 @@ object MacroBundleCodec {
                     val prepared = linked.copy(
                         originId = linked.originId.ifBlank { linked.id },
                         setId = ""
-                    )
+                    ).sanitizedForPortableExport()
                     externalLinked += if (singleUseImport) {
                         MacroSecurity.attachOneTimeExportToken(prepared, generatedToken)
                     } else {
@@ -321,7 +338,11 @@ object MacroBundleCodec {
                 originId = macro.originId.ifBlank { macro.id },
                 setId = "",
                 actions = macro.actions.cloneWithRemappedIds(),
-                stuckActions = macro.stuckActions.cloneWithRemappedIds()
+                branches = macro.branches.map { b -> b.copy(actions = b.actions.cloneWithRemappedIds()) },
+                stuckActions = macro.stuckActions.cloneWithRemappedIds(),
+                accountSwitch = macro.accountSwitch.copy(
+                    switchActions = macro.accountSwitch.switchActions.cloneWithRemappedIds()
+                )
             )
             return DecodedBundle(macros = listOf(cloned), scripts = emptyList(), images = emptyMap())
         }
@@ -421,7 +442,10 @@ object MacroBundleCodec {
                 setId = if (m.setId.isNotBlank()) setIdRemap[m.setId].orEmpty() else "",
                 actions = remapList(m.actions),
                 branches = m.branches.map { b -> b.copy(actions = remapList(b.actions)) },
-                stuckActions = remapList(m.stuckActions)
+                stuckActions = remapList(m.stuckActions),
+                accountSwitch = m.accountSwitch.copy(
+                    switchActions = remapList(m.accountSwitch.switchActions)
+                )
             )
         }
 

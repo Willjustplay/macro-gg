@@ -236,7 +236,8 @@ fun PremiumPaywallSheet(
                     )
                     val benefits = listOf(
                         "Macro tanpa batas (Gratis dibatasi maks. 3 macro)",
-                        "Semua 18 aksi: Tunggu, Loop, Teks OCR, Warna, Kejar Objek, Rekam Sentuhan, Keluar/Masuk Aplikasi, Loncat & Hubungkan Macro",
+                        "Rotasi Multi-Akun tanpa batas untuk semua game — OCR + Auto-Scroll, Clone App & Hybrid (Gratis maks. 2 akun)",
+                        "Semua 22 aksi: Cabang Urutan, Tunggu, Loop, Teks OCR, Warna, Kejar Objek, Rekam Sentuhan, Keluar/Masuk Aplikasi & Hubungkan Macro",
                         "Ekspor & Impor Macro (.zip), Macro Set, dan Backup Penuh",
                         "Kunci Sandi, Batas Waktu (Tenggat), Mode Pasif & Logo Kustom",
                         "Auto-Scale Resolusi Lintas Layar & Watchdog Anti-Macet",

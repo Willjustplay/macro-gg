@@ -72,6 +72,81 @@ enum class BranchOutcomeAction(val label: String, val shortLabel: String) {
     STOP_MACRO("Hentikan macro", "Stop")
 }
 
+/** Universal game account switching method supported without root. */
+@Serializable
+enum class AccountSwitchMethod(val label: String, val shortLabel: String, val description: String) {
+    OCR_LIST(
+        "OCR Daftar Akun + Auto-Scroll",
+        "OCR + Scroll",
+        "Cari nama/email akun di layar via OCR dengan auto-scroll lalu klik (tanpa perlu password)."
+    ),
+    CLONE_APP(
+        "Ganti Clone App / Dual App",
+        "Clone App",
+        "Tutup aplikasi akun sebelumnya lalu buka aplikasi clone / dual app milik akun giliran."
+    ),
+    HYBRID(
+        "Hybrid (Clone App + OCR)",
+        "Hybrid",
+        "Otomatis pindah clone app jika paket berbeda, lalu pilih akun di dalam game via OCR + Auto-Scroll."
+    )
+}
+
+/** Order in which enabled accounts are cycled. */
+@Serializable
+enum class AccountRotationMode(val label: String, val shortLabel: String) {
+    SEQUENTIAL_LOOP("Berurutan Berulang (1→2→3→1)", "Berulang"),
+    ONCE_ALL_ACCOUNTS("1× Semua Akun lalu Stop", "1× Putaran"),
+    RANDOM("Acak (Tanpa Ulang Langsung)", "Acak")
+}
+
+/** When automatic account rotation triggers during macro execution. */
+@Serializable
+enum class AccountTriggerMode(val label: String, val shortLabel: String, val description: String) {
+    AFTER_LOOPS(
+        "Setiap N Loop",
+        "N Loop",
+        "Otomatis pindah ke akun berikutnya setelah N putaran jalur utama selesai."
+    ),
+    AFTER_MINUTES(
+        "Setiap X Menit",
+        "X Menit",
+        "Otomatis pindah ke akun berikutnya setelah durasi X menit berjalan pada akun saat ini."
+    ),
+    LOOPS_OR_MINUTES(
+        "N Loop atau X Menit",
+        "Loop / Menit",
+        "Pindah akun otomatis mana saja yang lebih dulu tercapai."
+    ),
+    MANUAL_ACTION_ONLY(
+        "Manual via Aksi",
+        "Manual Aksi",
+        "Hanya pindah akun saat aksi 'Ganti Akun Berikutnya' dijalankan (mis. dari Cek Hasil & Pilih Arah)."
+    )
+}
+
+/** Auto-scroll direction when scanning an account list via OCR. */
+@Serializable
+enum class AccountScrollDirection(val label: String, val shortLabel: String) {
+    VERTICAL("Vertikal (Atas/Bawah)", "Vertikal"),
+    HORIZONTAL("Horizontal (Kiri/Kanan)", "Horizontal")
+}
+
+/** Text matching strategy when locating an account keyword on screen via OCR. */
+@Serializable
+enum class AccountOcrMatchMode(val label: String, val shortLabel: String) {
+    CONTAINS("Mengandung Teks (Rekomendasi)", "Mengandung"),
+    EXACT("Persis Sama", "Persis")
+}
+
+/** Behavior when an account cannot be located/opened during switching. */
+@Serializable
+enum class AccountFailBehavior(val label: String, val shortLabel: String) {
+    SKIP_TO_NEXT("Lompat ke Akun Berikutnya", "Lompat Akun"),
+    CONTINUE_CURRENT("Lanjut Tanpa Pindah", "Lanjut"),
+    STOP_MACRO("Hentikan Macro", "Stop")
+}
+
 /** How [FinishMacroAction] hands control back to an active macro without stopping the running engine. */
 @Serializable
 enum class FinishMacroMode(val label: String, val shortLabel: String, val description: String) {
@@ -772,6 +847,118 @@ data class BranchRouterAction(
     override fun withNewIds() = copy(id = newId(), rules = rules.map { it.withNewId() })
 }
 
+/**
+ * Triggers advancing to the next ready account in [Macro.accountSwitch] (or [specificAccountId])
+ * and executes [AccountSwitchConfig.switchActions].
+ */
+@Serializable
+@SerialName("switch_account")
+data class SwitchAccountAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 500,
+    override val chancePercent: Int = 100,
+    /** Empty = advance to next ready account in rotation; non-blank = switch to specific [AccountProfile.id]. */
+    val specificAccountId: String = "",
+    val specificAccountLabel: String = "",
+    /** True = restart Jalur Utama from step 1 after switching account; false = continue next action. */
+    val restartAfterSwitch: Boolean = true
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/**
+ * Universal game account selector used inside [AccountSwitchConfig.switchActions] (or directly in a macro):
+ * - OCR_LIST: scans screen/[region] for the active account's [AccountProfile.ocrKeyword] with automatic
+ *   vertical/horizontal scrolling (plus optional [AccountProfile.fallbackImageName]) and taps it.
+ * - CLONE_APP: exits the previous app and launches [AccountProfile.packageName].
+ * - HYBRID: switches clone app if the target account's package differs, then runs OCR + Auto-Scroll.
+ */
+@Serializable
+@SerialName("select_account")
+data class SelectAccountAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 1000,
+    override val chancePercent: Int = 100,
+    /** Null = inherit [AccountSwitchConfig.method]; non-null = override method for this action. */
+    val methodOverride: AccountSwitchMethod? = null,
+    /** Optional restricted scan/scroll box on screen (null = full screen). */
+    val region: Region? = null,
+    val matchMode: AccountOcrMatchMode = AccountOcrMatchMode.CONTAINS,
+    val scrollDirection: AccountScrollDirection = AccountScrollDirection.VERTICAL,
+    val maxScrolls: Int = 6,
+    /** Fraction (0.15..0.85) of region/screen height (or width) swiped per auto-scroll step. */
+    val scrollDistanceRatio: Float = 0.45f,
+    val scrollDurationMs: Long = 380L,
+    val scrollSettleMs: Long = 550L,
+    /** Automatically reverse scroll direction when reaching the end of the account list. */
+    val reverseOnEnd: Boolean = true,
+    val clickOffsetX: Int = 0,
+    val clickOffsetY: Int = 0,
+    /** Threshold for optional [AccountProfile.fallbackImageName] template match. */
+    val fallbackThreshold: Float = 0.80f,
+    /** Whether to close the previous app before opening the target clone package. */
+    val exitPreviousApp: Boolean = true,
+    val exitMode: ExitAppMode = ExitAppMode.CLOSE_RECENT_AND_HOME,
+    val recentsSwipeDirection: RecentsSwipeDirection = RecentsSwipeDirection.AUTO,
+    val exitWaitMs: Long = 1200L,
+    val launchWaitMs: Long = 5000L,
+    val thenActions: List<Action> = emptyList(),
+    val elseActions: List<Action> = emptyList(),
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    val notFoundBranchId: String = ""
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
+    )
+}
+
+/** Single account entry in a macro's multi-account rotation queue (stripped on export for privacy). */
+@Serializable
+data class AccountProfile(
+    val id: String = newId(),
+    val label: String = "Akun 1",
+    /** Text/email/nickname displayed on screen for OCR + Auto-Scroll matching. */
+    val ocrKeyword: String = "",
+    /** Optional cropped image filename fallback when a game uses stylized fonts that OCR cannot read. */
+    val fallbackImageName: String = "",
+    /** Optional cloned/dual app package name for Clone App or Hybrid switching. */
+    val packageName: String = "",
+    val appLabel: String = "",
+    val enabled: Boolean = true,
+    /** Cooldown in minutes after finishing this account before rotating back to it (0 = none). */
+    val cooldownMinutes: Int = 0,
+    /** Epoch ms when this account was last used/completed (0 = never). */
+    val lastUsedAt: Long = 0L
+)
+
+/** Macro-level multi-account switching configuration (works alongside Watchdog & Banned Guard). */
+@Serializable
+data class AccountSwitchConfig(
+    val enabled: Boolean = false,
+    val method: AccountSwitchMethod = AccountSwitchMethod.OCR_LIST,
+    val rotationMode: AccountRotationMode = AccountRotationMode.SEQUENTIAL_LOOP,
+    val triggerMode: AccountTriggerMode = AccountTriggerMode.AFTER_LOOPS,
+    val loopsPerAccount: Int = 1,
+    val minutesPerAccount: Int = 15,
+    val accounts: List<AccountProfile> = emptyList(),
+    /** Reusable account-switching step list (runs whenever switching to the next account). */
+    val switchActions: List<Action> = emptyList(),
+    /** Persisted ID of the last active account so restarting resumes cleanly without starting over. */
+    val lastAccountId: String = "",
+    val restartMainAfterSwitch: Boolean = true,
+    val onFail: AccountFailBehavior = AccountFailBehavior.SKIP_TO_NEXT,
+    /** When true, runs [switchActions] once right at macro start to ensure the active account is selected. */
+    val switchOnStart: Boolean = false
+)
+
 /** Named sequence branch stored inside a [Macro] alongside its main [Macro.actions] list. */
 @Serializable
 data class MacroBranch(
@@ -814,6 +1001,8 @@ data class Macro(
     val bannedMode: BannedImageMode = BannedImageMode.AVOID_MATCH_AREA,
     /** Safety blocked radius (authoring px) around each global banned image in AVOID_MATCH_AREA mode. */
     val bannedAvoidRadiusPx: Int = 60,
+    /** Universal multi-account rotation & switching configuration (OCR + Auto-Scroll / Clone App / Hybrid). */
+    val accountSwitch: AccountSwitchConfig = AccountSwitchConfig(),
     /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
     val logoImage: String = "",
     /** Optional [MacroSet.id] grouping this macro into a Macro Set (empty = ungrouped). */
@@ -912,6 +1101,8 @@ enum class ActionKind(val label: String, val description: String) {
     COLOR("Deteksi Warna", "Cek warna piksel + aksi If/Else"),
     BRANCH_ROUTER("Cek Hasil & Pilih Arah", "Cek banyak kondisi sekaligus lalu ubah arah jalur jika hasil tidak sesuai"),
     GOTO_BRANCH("Pindah Jalur Cabang", "Pindah permanen atau singgah ke jalur cabang lalu kembali"),
+    SWITCH_ACCOUNT("Ganti Akun Berikutnya", "Pindah ke akun giliran berikutnya & jalankan Alur Ganti Akun"),
+    SELECT_ACCOUNT("Pilih / Buka Akun Giliran", "Cari & klik akun via OCR + Auto-Scroll dan/atau buka Clone App akun giliran"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
     FINISH_MACRO("Selesaikan Macro", "Selesaikan macro pasif/sub-macro lalu switch ke macro aktif tanpa berhenti"),
@@ -936,6 +1127,8 @@ val Action.kind: ActionKind
         is ColorAction -> ActionKind.COLOR
         is BranchRouterAction -> ActionKind.BRANCH_ROUTER
         is GoToBranchAction -> ActionKind.GOTO_BRANCH
+        is SwitchAccountAction -> ActionKind.SWITCH_ACCOUNT
+        is SelectAccountAction -> ActionKind.SELECT_ACCOUNT
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
         is FinishMacroAction -> ActionKind.FINISH_MACRO
@@ -1005,6 +1198,18 @@ fun Action.summary(): String {
             val dest = targetBranchName.ifBlank { if (targetBranchId.isBlank()) "Jalur Utama" else "Cabang" }
             "${mode.shortLabel} → $dest"
         }
+        is SwitchAccountAction -> {
+            val target = if (specificAccountId.isBlank()) "Akun Berikutnya" else specificAccountLabel.ifBlank { "Akun Khusus" }
+            "$target • " + if (restartAfterSwitch) "ulang awal" else "lanjut"
+        }
+        is SelectAccountAction -> {
+            val methodLabel = methodOverride?.shortLabel ?: "Ikuti Setelan Akun"
+            val scrollPart = if (methodOverride != AccountSwitchMethod.CLONE_APP) {
+                " • ${scrollDirection.shortLabel} maks ${maxScrolls}×"
+            } else ""
+            val area = if (region != null && methodOverride != AccountSwitchMethod.CLONE_APP) " • area" else ""
+            "$methodLabel$scrollPart$area"
+        }
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
         is FinishMacroAction -> when (mode) {
@@ -1070,6 +1275,8 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
             )
         )
         ActionKind.GOTO_BRANCH -> GoToBranchAction()
+        ActionKind.SWITCH_ACCOUNT -> SwitchAccountAction()
+        ActionKind.SELECT_ACCOUNT -> SelectAccountAction()
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
         ActionKind.FINISH_MACRO -> FinishMacroAction()
@@ -1116,6 +1323,12 @@ internal fun Action.withMappedIds(idMap: Map<String, String>): Action {
             rules = rules.map { it.withNewId() }
         )
         is GoToBranchAction -> copy(id = mappedId)
+        is SwitchAccountAction -> copy(id = mappedId)
+        is SelectAccountAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
         is LoopAction -> copy(
             id = mappedId,
             actions = actions.map { it.withMappedIds(idMap) }

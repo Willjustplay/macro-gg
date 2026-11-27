@@ -18,6 +18,13 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.example.data.AccountFailBehavior
+import com.example.data.AccountOcrMatchMode
+import com.example.data.AccountProfile
+import com.example.data.AccountRotationMode
+import com.example.data.AccountScrollDirection
+import com.example.data.AccountSwitchMethod
+import com.example.data.AccountTriggerMode
 import com.example.data.Action
 import com.example.data.ActionKind
 import com.example.data.BannedImageMode
@@ -50,10 +57,12 @@ import com.example.data.ResolutionScaleMode
 import com.example.data.ResolutionScaler
 import com.example.data.RestartAction
 import com.example.data.RunMacroAction
+import com.example.data.SelectAccountAction
 import com.example.data.Slot
 import com.example.data.StopAction
 import com.example.data.StuckRecoveryMode
 import com.example.data.SwipeAction
+import com.example.data.SwitchAccountAction
 import com.example.data.TextAction
 import com.example.data.TextCompareMode
 import com.example.data.TrackInteractionMode
@@ -68,6 +77,7 @@ import com.example.data.create
 import com.example.data.findAction
 import com.example.data.findAnyAction
 import com.example.data.isStuckAction
+import com.example.data.isSwitchAccountAction
 import com.example.data.kind
 import com.example.data.moveActionToBranch
 import com.example.data.newId
@@ -82,6 +92,7 @@ import kotlin.math.roundToInt
  * - Tab "Aksi": full main & branch action tree (with branch switcher & move-action-to-branch), add any action kind.
  * - Tab "Anti-Macet": out-of-band Watchdog actions triggered automatically when main macro gets stuck.
  * - Tab "Banned": always-active Banned Image Guard (like Watchdog) blocking clicks onto forbidden images.
+ * - Tab "Akun": universal multi-account rotation (OCR Daftar Akun + Auto-Scroll, Clone App, Hybrid).
  */
 @SuppressLint("ViewConstructor")
 class OverlayMacroSettingsView(
@@ -93,12 +104,15 @@ class OverlayMacroSettingsView(
     private var showAllMarkersPreview: Boolean,
     initialTab: Int = 0,
     initialEditActionId: String? = null,
+    private val maxFreeAccounts: Int? = null,
+    private val isPremium: Boolean = true,
     private val onSwitchMacro: (Macro) -> Unit,
     private val onToggleShowAllMarkers: (Boolean) -> Unit,
     private val onUpdateMacro: (Macro) -> Unit,
     private val onUpdateAutoScale: (enabled: Boolean, srcW: Int, srcH: Int, mode: ResolutionScaleMode) -> Unit,
     private val onAddAction: (ContainerRef, Action, Boolean, String) -> Unit,
     private val onMoveActionToBranch: (actionId: String, targetBranchId: String) -> Unit = { _, _ -> },
+    private val onAddSwitchAccountAction: (ContainerRef, Action) -> Unit = { _, _ -> },
     private val onUpdateAction: (String, (Action) -> Action) -> Unit,
     private val onMoveAction: (String, Int) -> Unit,
     private val onDeleteAction: (String) -> Unit,
@@ -116,15 +130,17 @@ class OverlayMacroSettingsView(
     private val d = resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * d).toInt()
 
-    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi, 2 = Anti-Macet, 3 = Banned
+    private var activeTab = initialTab // 0 = Setelan, 1 = Aksi, 2 = Anti-Macet, 3 = Banned, 4 = Akun
     private var selectedBranchId: String = "" // "" = Jalur Utama
     private var showCreateBranchInline: Boolean = false
     private var moveBranchActionId: String? = null
     private var editingActionId: String? = initialEditActionId
     private var quickImageSwapActionId: String? = null
     private var appPickerActionId: String? = null
+    private var cloneAppPickerAccountId: String? = null
     private var addPickerRef: ContainerRef? = null
     private var addPickerForStuck: Boolean = false
+    private var addPickerForSwitchAccount: Boolean = false
     private var selectedOverlaySetFilter: String =
         if (macro.setId.isNotBlank() && store.getMacroSetById(macro.setId) != null) macro.setId else "__ALL__"
 
@@ -133,6 +149,7 @@ class OverlayMacroSettingsView(
     private val tabActionsBtn: TextView
     private val tabWatchdogBtn: TextView
     private val tabBannedBtn: TextView
+    private val tabAccountBtn: TextView
     private val titleView: TextView
     private val subtitleView: TextView
 
@@ -176,14 +193,14 @@ class OverlayMacroSettingsView(
         header.addView(makeBtn("✕", "#334155") { onClose() })
         addView(header)
 
-        // 4-Tab switcher row: Setelan | Aksi | Macet | Banned
+        // 5-Tab switcher row: Setel | Aksi | Macet | Ban | Akun
         val tabsRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(8)
             }
         }
-        tabSettingsBtn = makeTabBtn("Setelan") {
+        tabSettingsBtn = makeTabBtn("Setel") {
             activeTab = 0
             clearSubScreens()
             rebuildBody()
@@ -202,15 +219,21 @@ class OverlayMacroSettingsView(
             clearSubScreens()
             rebuildBody()
         }
-        tabBannedBtn = makeTabBtn("⛔ Ban") {
+        tabBannedBtn = makeTabBtn("⛔") {
             activeTab = 3
             clearSubScreens()
             rebuildBody()
         }
+        tabAccountBtn = makeTabBtn("👥") {
+            activeTab = 4
+            clearSubScreens()
+            rebuildBody()
+        }
         tabsRow.addView(tabSettingsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
-        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
-        tabsRow.addView(tabWatchdogBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(3) })
-        tabsRow.addView(tabBannedBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        tabsRow.addView(tabActionsBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.05f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabWatchdogBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.05f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabBannedBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.9f).apply { marginEnd = dp(3) })
+        tabsRow.addView(tabAccountBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.95f))
         addView(tabsRow)
 
         bodyContainer.setPadding(0, 0, 0, dp(14))
@@ -229,7 +252,10 @@ class OverlayMacroSettingsView(
         editingActionId = null
         quickImageSwapActionId = null
         appPickerActionId = null
+        cloneAppPickerAccountId = null
         addPickerRef = null
+        addPickerForStuck = false
+        addPickerForSwitchAccount = false
         moveBranchActionId = null
         showCreateBranchInline = false
     }
@@ -255,6 +281,7 @@ class OverlayMacroSettingsView(
         val loopStr = if (macro.loopCount <= 0) "Loop ∞" else "Loop ${macro.loopCount}×"
         val recStr = if (macro.autoRecoverStuckSec > 0) " • Macet ${macro.autoRecoverStuckSec}d" else ""
         val banStr = if (macro.bannedGuardEnabled && macro.bannedImages.isNotEmpty()) " • ⛔ ${macro.bannedImages.size}" else ""
+        val accStr = if (macro.accountSwitch.enabled) " • 👥 ${macro.accountSwitch.accounts.count { it.enabled }}" else ""
         val extra = buildList {
             if (parentSet != null) add("📦 ${parentSet.name}")
             if (macro.isPassive) add(if (macro.passiveEnabled) "Pasif ON" else "Pasif OFF")
@@ -262,15 +289,17 @@ class OverlayMacroSettingsView(
             (MacroSecurity.remainingTimeLabel(macro, now) ?: parentSet?.let { MacroSecurity.remainingSetTimeLabel(it, now) })
                 ?.let { add(it) }
         }.joinToString(" • ").let { if (it.isNotBlank()) " • $it" else "" }
-        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$banStr$extra"
-        tabActionsBtn.text = if (effectivelyLocked) "🔒 Aksi" else "Aksi (${macro.actions.size})"
-        tabWatchdogBtn.text = if (effectivelyLocked) "🔒 Macet" else "Macet (${macro.stuckActions.size})"
-        tabBannedBtn.text = if (effectivelyLocked) "🔒 Ban" else "⛔ (${macro.bannedImages.size})"
+        subtitleView.text = "$loopStr • ${macro.actions.size} aksi$recStr$banStr$accStr$extra"
+        tabActionsBtn.text = if (effectivelyLocked) "🔒Aksi" else "Aksi(${macro.actions.size})"
+        tabWatchdogBtn.text = if (effectivelyLocked) "🔒Mct" else "Mct(${macro.stuckActions.size})"
+        tabBannedBtn.text = if (effectivelyLocked) "🔒Ban" else "⛔${macro.bannedImages.size}"
+        tabAccountBtn.text = if (effectivelyLocked) "🔒Akn" else "👥${macro.accountSwitch.accounts.size}"
 
         styleTab(tabSettingsBtn, activeTab == 0)
         styleTab(tabActionsBtn, activeTab == 1)
         styleTab(tabWatchdogBtn, activeTab == 2, selectedHex = "#C2410C")
         styleTab(tabBannedBtn, activeTab == 3, selectedHex = "#DC2626")
+        styleTab(tabAccountBtn, activeTab == 4, selectedHex = "#0284C7")
     }
 
     private fun styleTab(tv: TextView, selected: Boolean, selectedHex: String = "#0891B2") {
@@ -297,15 +326,28 @@ class OverlayMacroSettingsView(
         val pickerRef = addPickerRef
         val swapId = quickImageSwapActionId
         val appPickId = appPickerActionId
+        val cloneAccId = cloneAppPickerAccountId
         val editId = editingActionId
         val moveId = moveBranchActionId
         when {
-            pickerRef != null -> buildAddActionPicker(pickerRef, forStuck = addPickerForStuck)
+            pickerRef != null -> buildAddActionPicker(
+                pickerRef,
+                forStuck = addPickerForStuck,
+                forSwitchAccount = addPickerForSwitchAccount
+            )
             moveId != null -> {
                 val target = macro.findAnyAction(moveId)
                 if (target != null) buildMoveActionToBranchView(target)
                 else {
                     moveBranchActionId = null
+                    rebuildBody()
+                }
+            }
+            cloneAccId != null -> {
+                val acc = macro.accountSwitch.accounts.firstOrNull { it.id == cloneAccId }
+                if (acc != null) buildAccountCloneAppPickerView(acc)
+                else {
+                    cloneAppPickerAccountId = null
                     rebuildBody()
                 }
             }
@@ -337,7 +379,8 @@ class OverlayMacroSettingsView(
             activeTab == 0 -> buildMacroSettingsForm()
             activeTab == 1 -> buildActionList()
             activeTab == 2 -> buildWatchdogTab()
-            else -> buildBannedGuardTab()
+            activeTab == 3 -> buildBannedGuardTab()
+            else -> buildAccountSwitchTab()
         }
     }
 
@@ -871,6 +914,7 @@ class OverlayMacroSettingsView(
             marginEndDp = 6
         ) {
             addPickerForStuck = false
+            addPickerForSwitchAccount = false
             addPickerRef = ContainerRef.ROOT
             rebuildBody()
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
@@ -959,6 +1003,7 @@ class OverlayMacroSettingsView(
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(5) })
         cfgBtns.addView(makeBtn("+ Aksi Anti-Macet", "#1D4ED8", marginEndDp = 0) {
             addPickerForStuck = true
+            addPickerForSwitchAccount = false
             addPickerRef = ContainerRef.ROOT
             rebuildBody()
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
@@ -1221,12 +1266,422 @@ class OverlayMacroSettingsView(
         }
     }
 
+    // ---- TAB 5: Universal Multi-Account Switcher (OCR + Auto-Scroll / Clone App / Hybrid) ----
+
+    private fun buildAccountSwitchTab() {
+        val cfg = macro.accountSwitch
+        val infoBox = TextView(context).apply {
+            text = "👥 Ganti Akun Universal (Semua Game, Tanpa Root). Mendukung OCR Daftar Akun + Auto-Scroll, Ganti Clone App / Dual App, atau Hybrid."
+            setTextColor(Color.parseColor("#7DD3FC"))
+            textSize = 10.5f
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0B2038"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#0284C7"))
+            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            }
+        }
+        bodyContainer.addView(infoBox)
+
+        val enableCheck = CheckBox(context).apply {
+            text = "Aktifkan Rotasi Multi-Akun"
+            isChecked = cfg.enabled
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+            setOnCheckedChangeListener { _, checked ->
+                val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(enabled = checked))
+                macro = updated
+                onUpdateMacro(updated)
+                updateHeader()
+            }
+        }
+        bodyContainer.addView(enableCheck)
+
+        // Method selector
+        var chosenMethod = cfg.method
+        bodyContainer.addView(sectionLabel("Metode Ganti Akun"))
+        val methodRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+        }
+        val methodBtns = mutableListOf<Pair<AccountSwitchMethod, TextView>>()
+        AccountSwitchMethod.entries.forEachIndexed { idx, m ->
+            val tv = makeBtn(m.shortLabel, if (m == chosenMethod) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                chosenMethod = m
+                methodBtns.forEach { (item, v) ->
+                    (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == chosenMethod) "#0284C7" else "#1E293B"))
+                }
+            }
+            methodBtns += m to tv
+            methodRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = if (idx < AccountSwitchMethod.entries.lastIndex) dp(4) else 0
+            })
+        }
+        bodyContainer.addView(methodRow)
+
+        // Trigger selector
+        var chosenTrigger = cfg.triggerMode
+        bodyContainer.addView(sectionLabel("Kapan Pindah Akun"))
+        val trigBtns = mutableListOf<Pair<AccountTriggerMode, TextView>>()
+        AccountTriggerMode.entries.chunked(2).forEach { pair ->
+            val r = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+            }
+            pair.forEachIndexed { idx, t ->
+                val tv = makeBtn(t.shortLabel, if (t == chosenTrigger) "#0891B2" else "#1E293B", marginEndDp = 0) {
+                    chosenTrigger = t
+                    trigBtns.forEach { (item, v) ->
+                        (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == chosenTrigger) "#0891B2" else "#1E293B"))
+                    }
+                }
+                trigBtns += t to tv
+                r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                })
+            }
+            bodyContainer.addView(r)
+        }
+
+        val loopsF = addNumberRow(bodyContainer, "Loop per akun", cfg.loopsPerAccount.toString())
+        val minsF = addNumberRow(bodyContainer, "Menit per akun", cfg.minutesPerAccount.toString())
+        val switchStartCheck = CheckBox(context).apply {
+            text = "Pilih akun pertama saat macro mulai"
+            isChecked = cfg.switchOnStart
+            setTextColor(Color.parseColor("#E2E8F0"))
+            textSize = 11f
+        }
+        bodyContainer.addView(switchStartCheck)
+
+        bodyContainer.addView(makeBtn("Simpan Setelan Akun", "#0284C7", marginEndDp = 0) {
+            val updated = macro.copy(
+                accountSwitch = macro.accountSwitch.copy(
+                    enabled = enableCheck.isChecked,
+                    method = chosenMethod,
+                    triggerMode = chosenTrigger,
+                    loopsPerAccount = (loopsF.text.toString().toIntOrNull() ?: cfg.loopsPerAccount).coerceIn(1, 9999),
+                    minutesPerAccount = (minsF.text.toString().toIntOrNull() ?: cfg.minutesPerAccount).coerceIn(1, 1440),
+                    switchOnStart = switchStartCheck.isChecked
+                )
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            updateHeader()
+            Toast.makeText(context, "Setelan Multi-Akun disimpan.", Toast.LENGTH_SHORT).show()
+        }.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(2)
+                bottomMargin = dp(8)
+            }
+        })
+
+        // Account Profiles List + Quick Add
+        bodyContainer.addView(dividerLine())
+        val freeLimitNote = if (maxFreeAccounts != null && !isPremium) " (Gratis maks $maxFreeAccounts)" else ""
+        bodyContainer.addView(sectionLabel("Daftar Akun (${cfg.accounts.size})$freeLimitNote"))
+
+        val quickLabelEt = addTextRow(bodyContainer, "Nama akun baru (mis. Farm 1)", "")
+        val quickKwEt = addTextRow(bodyContainer, "Kata kunci OCR di layar (nama/email/server)", "")
+        bodyContainer.addView(makeBtn("+ Tambah Akun", "#059669", marginEndDp = 0) {
+            if (maxFreeAccounts != null && !isPremium && macro.accountSwitch.accounts.size >= maxFreeAccounts) {
+                Toast.makeText(
+                    context,
+                    "Versi gratis mendukung hingga $maxFreeAccounts akun. Upgrade ke PRO di aplikasi utama untuk akun tanpa batas.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@makeBtn
+            }
+            val nextNum = macro.accountSwitch.accounts.size + 1
+            val lbl = quickLabelEt.text.toString().trim().ifBlank { "Akun $nextNum" }.take(32)
+            val kw = quickKwEt.text.toString().trim()
+            val added = AccountProfile(label = lbl, ocrKeyword = kw)
+            val updated = macro.copy(
+                accountSwitch = macro.accountSwitch.copy(
+                    enabled = true,
+                    accounts = macro.accountSwitch.accounts + added
+                )
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            rebuildBody()
+        }.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        })
+
+        if (cfg.accounts.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Belum ada akun. Tambahkan minimal 2 akun di atas (atau kelola lengkap dengan gambar fallback & cooldown di Editor Aplikasi)."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 10.5f
+                setPadding(dp(2), dp(2), dp(2), dp(6))
+            })
+        } else {
+            cfg.accounts.forEachIndexed { idx, acc ->
+                val accRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(8), dp(6), dp(8), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                        setStroke(dp(1), Color.parseColor(if (acc.enabled) "#0284C7" else "#334155"))
+                    }
+                    alpha = if (acc.enabled) 1f else 0.55f
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                        bottomMargin = dp(4)
+                    }
+                }
+                val infoCol = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }
+                }
+                infoCol.addView(TextView(context).apply {
+                    text = "${idx + 1}. ${acc.label}"
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                val sub = buildList {
+                    if (acc.ocrKeyword.isNotBlank()) add("OCR: \"${acc.ocrKeyword}\"")
+                    if (acc.packageName.isNotBlank()) add("App: ${acc.appLabel.ifBlank { acc.packageName }}")
+                    if (acc.cooldownMinutes > 0) add("CD ${acc.cooldownMinutes}m")
+                }.joinToString(" • ").ifBlank { "Ketuk 📱 untuk pilih Clone App" }
+                infoCol.addView(TextView(context).apply {
+                    text = sub
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 9.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                accRow.addView(infoCol)
+                accRow.addView(makeSmallIconBtn("📱", "#0369A1") {
+                    cloneAppPickerAccountId = acc.id
+                    rebuildBody()
+                })
+                accRow.addView(makeSmallIconBtn(if (acc.enabled) "ON" else "OFF", if (acc.enabled) "#059669" else "#475569") {
+                    val updatedList = macro.accountSwitch.accounts.map {
+                        if (it.id == acc.id) it.copy(enabled = !it.enabled) else it
+                    }
+                    val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
+                    macro = updated
+                    onUpdateMacro(updated)
+                    rebuildBody()
+                })
+                accRow.addView(makeSmallIconBtn("✕", "#991B1B", marginEndDp = 0) {
+                    val updatedList = macro.accountSwitch.accounts.filterNot { it.id == acc.id }
+                    val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
+                    macro = updated
+                    onUpdateMacro(updated)
+                    rebuildBody()
+                })
+                bodyContainer.addView(accRow)
+            }
+        }
+
+        // Switch Actions Steps + Templates
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("Urutan Aksi Ganti Akun (${cfg.switchActions.size})"))
+
+        val tplRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+        }
+        tplRow.addView(makeBtn("⚡ Template OCR", "#0F766E", marginEndDp = 4) {
+            val selectAct = SelectAccountAction(
+                methodOverride = AccountSwitchMethod.OCR_LIST,
+                maxScrolls = 6,
+                reverseOnEnd = true,
+                delayAfterMs = if (isPremium) 2000L else 5000L
+            )
+            val tplActions = if (isPremium) {
+                listOf(selectAct, WaitAction(durationMs = 4000L, delayAfterMs = 0L))
+            } else {
+                listOf(selectAct)
+            }
+            val updated = macro.copy(
+                accountSwitch = macro.accountSwitch.copy(
+                    enabled = true,
+                    method = AccountSwitchMethod.OCR_LIST,
+                    switchActions = macro.accountSwitch.switchActions + tplActions
+                )
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            editingActionId = selectAct.id
+            rebuildBody()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
+        tplRow.addView(makeBtn("⚡ Template Clone", "#7C3AED", marginEndDp = 0) {
+            val selectAct = SelectAccountAction(
+                methodOverride = AccountSwitchMethod.CLONE_APP,
+                exitPreviousApp = true,
+                exitWaitMs = 1500L,
+                launchWaitMs = 7000L,
+                delayAfterMs = 1000L
+            )
+            val updated = macro.copy(
+                accountSwitch = macro.accountSwitch.copy(
+                    enabled = true,
+                    method = AccountSwitchMethod.CLONE_APP,
+                    switchActions = macro.accountSwitch.switchActions + listOf(selectAct)
+                )
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            editingActionId = selectAct.id
+            rebuildBody()
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        bodyContainer.addView(tplRow)
+
+        bodyContainer.addView(makeBtn("+ Tambah Aksi Ganti Akun", "#1D4ED8", marginEndDp = 0) {
+            addPickerForStuck = false
+            addPickerForSwitchAccount = true
+            addPickerRef = ContainerRef.ROOT
+            rebuildBody()
+        }.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        })
+
+        if (cfg.switchActions.isEmpty()) {
+            bodyContainer.addView(TextView(context).apply {
+                text = "Belum ada aksi ganti akun. Gunakan tombol Template di atas atau tambahkan langkah navigasi ke daftar akun + aksi 'Pilih Akun Giliran'."
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 10.5f
+                setPadding(dp(2), dp(4), dp(2), dp(8))
+            })
+        } else {
+            cfg.switchActions.forEachIndexed { idx, action ->
+                bodyContainer.addView(
+                    buildActionCard(
+                        idx,
+                        cfg.switchActions.size,
+                        action,
+                        depth = 0,
+                        isStuckTree = false,
+                        isSwitchAccountTree = true
+                    )
+                )
+            }
+        }
+    }
+
+    private fun buildAccountCloneAppPickerView(account: AccountProfile) {
+        val bar = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }
+        }
+        bar.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
+            cloneAppPickerAccountId = null
+            rebuildBody()
+        })
+        bar.addView(TextView(context).apply {
+            text = "Clone App: ${account.label}"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        bodyContainer.addView(bar)
+
+        val searchF = addTextRow(bodyContainer, "Cari nama game / clone app", "")
+        val listHolder = LinearLayout(context).apply { orientation = VERTICAL }
+        bodyContainer.addView(listHolder)
+
+        val allApps = InstalledAppsHelper.loadLaunchableApps(context)
+
+        fun renderFiltered(queryRaw: String) {
+            listHolder.removeAllViews()
+            val q = queryRaw.trim().lowercase()
+            if (account.packageName.isNotBlank()) {
+                listHolder.addView(makeBtn("Kosongkan Clone App (hanya pakai OCR)", "#475569", marginEndDp = 0) {
+                    val updatedList = macro.accountSwitch.accounts.map {
+                        if (it.id == account.id) it.copy(packageName = "", appLabel = "") else it
+                    }
+                    val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
+                    macro = updated
+                    onUpdateMacro(updated)
+                    cloneAppPickerAccountId = null
+                    rebuildBody()
+                }.apply {
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+            }
+            val matched = if (q.isEmpty()) allApps else allApps.filter {
+                it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q)
+            }
+            if (matched.isEmpty()) {
+                listHolder.addView(TextView(context).apply {
+                    text = "Tidak ada aplikasi cocok."
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 11f
+                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                })
+                return
+            }
+            for (info in matched.take(60)) {
+                val item = LinearLayout(context).apply {
+                    orientation = VERTICAL
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1E293B"))
+                        cornerRadius = dp(9).toFloat()
+                    }
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    setOnClickListener {
+                        val updatedList = macro.accountSwitch.accounts.map {
+                            if (it.id == account.id) it.copy(packageName = info.packageName, appLabel = info.label) else it
+                        }
+                        val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
+                        macro = updated
+                        onUpdateMacro(updated)
+                        cloneAppPickerAccountId = null
+                        rebuildBody()
+                    }
+                }
+                item.addView(TextView(context).apply {
+                    text = info.label
+                    setTextColor(Color.WHITE)
+                    textSize = 11.5f
+                    typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                item.addView(TextView(context).apply {
+                    text = info.packageName
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    textSize = 9.5f
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                listHolder.addView(item)
+            }
+        }
+
+        searchF.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                renderFiltered(s?.toString().orEmpty())
+            }
+        })
+        renderFiltered("")
+    }
+
     private fun buildActionCard(
         idx: Int,
         siblingCount: Int,
         action: Action,
         depth: Int,
-        isStuckTree: Boolean = false
+        isStuckTree: Boolean = false,
+        isSwitchAccountTree: Boolean = false
     ): LinearLayout {
         val card = LinearLayout(context).apply {
             orientation = VERTICAL
@@ -1308,7 +1763,7 @@ class OverlayMacroSettingsView(
                 quickImageSwapActionId = action.id
                 rebuildBody()
             })
-        } else if (action is TextAction || (action is TrackObjectAction && action.trackAnyMotion)) {
+        } else if (action is TextAction || action is SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion)) {
             row.addView(makeSmallIconBtn("📐", "#0369A1") {
                 onPickRegionOnScreen(action.id)
             })
@@ -1317,7 +1772,7 @@ class OverlayMacroSettingsView(
                 onPickTargetOnScreen(action.id)
             })
         }
-        if (!isStuckTree && depth == 0) {
+        if (!isStuckTree && !isSwitchAccountTree && depth == 0) {
             row.addView(makeSmallIconBtn("⇄", "#D97706") {
                 if (!com.example.billing.PremiumStateHolder.isPremium.value) {
                     Toast.makeText(context, "🔒 Pindah Cabang khusus Wjust macro PRO", Toast.LENGTH_SHORT).show()
@@ -1377,12 +1832,22 @@ class OverlayMacroSettingsView(
                 })
                 bHeader.addView(makeSmallIconBtn("+ Aksi", "#1E293B", marginEndDp = 0) {
                     addPickerForStuck = isStuckTree
+                    addPickerForSwitchAccount = isSwitchAccountTree
                     addPickerRef = ContainerRef(action.id, slot)
                     rebuildBody()
                 })
                 box.addView(bHeader)
                 children.forEachIndexed { cIdx, child ->
-                    box.addView(buildActionCard(cIdx, children.size, child, depth + 1, isStuckTree = isStuckTree))
+                    box.addView(
+                        buildActionCard(
+                            cIdx,
+                            children.size,
+                            child,
+                            depth + 1,
+                            isStuckTree = isStuckTree,
+                            isSwitchAccountTree = isSwitchAccountTree
+                        )
+                    )
                 }
                 card.addView(box)
             }
@@ -1493,7 +1958,7 @@ class OverlayMacroSettingsView(
 
     // ---- Add Action Picker inside Overlay ----
 
-    private fun buildAddActionPicker(ref: ContainerRef, forStuck: Boolean) {
+    private fun buildAddActionPicker(ref: ContainerRef, forStuck: Boolean, forSwitchAccount: Boolean = false) {
         val bar = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1501,12 +1966,14 @@ class OverlayMacroSettingsView(
         }
         bar.addView(makeBtn("← Kembali", "#334155", marginEndDp = 8) {
             addPickerRef = null
+            addPickerForSwitchAccount = false
             rebuildBody()
         })
         bar.addView(TextView(context).apply {
             val slot = ref.slot
             text = when {
                 slot != null -> "Tambah ke: ${slot.label}"
+                forSwitchAccount -> "Tambah Aksi Ganti Akun"
                 forStuck -> "Tambah Aksi Anti-Macet"
                 selectedBranchId.isNotBlank() -> "Tambah ke: ${macro.branchDisplayName(selectedBranchId)}"
                 else -> "Pilih Jenis Aksi"
@@ -1517,17 +1984,28 @@ class OverlayMacroSettingsView(
         })
         bodyContainer.addView(bar)
 
-        val isPremium = com.example.billing.PremiumStateHolder.isPremium.value
-        val kinds = listOf(
-            ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE,
-            ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
-            ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
-            ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
-            ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
-            ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
-        )
+        val isPremiumPlan = com.example.billing.PremiumStateHolder.isPremium.value
+        val kinds = if (forSwitchAccount) {
+            listOf(
+                ActionKind.SELECT_ACCOUNT, ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE,
+                ActionKind.SWITCH_ACCOUNT,
+                ActionKind.TEXT, ActionKind.COLOR, ActionKind.LONG_PRESS, ActionKind.WAIT,
+                ActionKind.EXIT_APP, ActionKind.LAUNCH_APP, ActionKind.LOOP, ActionKind.TRACK_OBJECT,
+                ActionKind.ZOOM, ActionKind.STOP
+            )
+        } else {
+            listOf(
+                ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE,
+                ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT,
+                ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
+                ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
+                ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
+                ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT, ActionKind.LOOP,
+                ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
+            )
+        }
         for (k in kinds) {
-            val isLockedByPlan = !isPremium && !com.example.billing.PremiumFeatureGate.isActionKindFree(k)
+            val isLockedByPlan = !isPremiumPlan && !com.example.billing.PremiumFeatureGate.isActionKindFree(k)
             val item = LinearLayout(context).apply {
                 orientation = VERTICAL
                 setPadding(dp(10), dp(7), dp(10), dp(7))
@@ -1545,7 +2023,7 @@ class OverlayMacroSettingsView(
                     if (isLockedByPlan) {
                         Toast.makeText(
                             context,
-                            "🔒 Aksi '${k.label}' khusus Wjust macro PRO. Versi gratis: Klik, Swipe & Deteksi Gambar.",
+                            "🔒 Aksi '${k.label}' khusus Wjust macro PRO. Versi gratis: Klik, Swipe, Deteksi Gambar & Ganti Akun (maks 2 akun).",
                             Toast.LENGTH_LONG
                         ).show()
                         return@setOnClickListener
@@ -1557,8 +2035,13 @@ class OverlayMacroSettingsView(
                         if (suggested != null) rawCreated.copy(targetBranchId = suggested.id, targetBranchName = suggested.name)
                         else rawCreated
                     } else rawCreated
-                    onAddAction(ref, created, forStuck, selectedBranchId)
+                    if (forSwitchAccount) {
+                        onAddSwitchAccountAction(ref, created)
+                    } else {
+                        onAddAction(ref, created, forStuck, selectedBranchId)
+                    }
                     addPickerRef = null
+                    addPickerForSwitchAccount = false
                     editingActionId = if (k == ActionKind.STOP || k == ActionKind.RESTART) null else created.id
                 }
             }
@@ -2905,6 +3388,211 @@ class OverlayMacroSettingsView(
                 }
             }
 
+            is SwitchAccountAction -> {
+                var specId = action.specificAccountId
+                var specLabel = action.specificAccountLabel
+                bodyContainer.addView(TextView(context).apply {
+                    text = "Memicu perpindahan ke akun giliran berikutnya (menjalankan urutan aksi di tab 👥 Akun)."
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11f
+                    setPadding(0, 0, 0, dp(6))
+                })
+
+                bodyContainer.addView(sectionLabel("Target Akun"))
+                val accChoices = listOf("" to "Akun Giliran Berikutnya (Otomatis)") +
+                    macro.accountSwitch.accounts.map { it.id to it.label }
+                val accBtns = mutableListOf<Pair<String, TextView>>()
+                accChoices.forEach { (aid, albl) ->
+                    val tv = makeBtn(albl, if (aid == specId) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                        specId = aid
+                        specLabel = if (aid.isBlank()) "" else albl
+                        accBtns.forEach { (idItem, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (idItem == specId) "#0284C7" else "#1E293B"))
+                        }
+                    }.apply {
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    accBtns += aid to tv
+                    bodyContainer.addView(tv)
+                }
+
+                val restartCheck = CheckBox(context).apply {
+                    text = "Ulangi Jalur Utama dari langkah 1 setelah pindah"
+                    isChecked = action.restartAfterSwitch
+                    setTextColor(Color.WHITE)
+                    textSize = 11.2f
+                }
+                bodyContainer.addView(restartCheck)
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    saveEdited {
+                        action.copy(
+                            specificAccountId = specId,
+                            specificAccountLabel = specLabel,
+                            restartAfterSwitch = restartCheck.isChecked,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: action.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is SelectAccountAction -> {
+                var methodOverride = action.methodOverride
+                var matchMode = action.matchMode
+                var scrollDir = action.scrollDirection
+                var notFoundMode = action.notFound
+                var useRegion = action.region != null
+
+                addPickTargetBtn("📐 Pilih Area Daftar Akun di Layar (Opsional)") {
+                    onPickRegionOnScreen(action.id)
+                }
+
+                bodyContainer.addView(sectionLabel("Metode Pilih Akun"))
+                val methodOptions = listOf<Pair<AccountSwitchMethod?, String>>(
+                    null to "Ikuti Macro (${macro.accountSwitch.method.shortLabel})",
+                    AccountSwitchMethod.OCR_LIST to AccountSwitchMethod.OCR_LIST.shortLabel,
+                    AccountSwitchMethod.CLONE_APP to AccountSwitchMethod.CLONE_APP.shortLabel,
+                    AccountSwitchMethod.HYBRID to AccountSwitchMethod.HYBRID.shortLabel
+                )
+                val mBtns = mutableListOf<Pair<AccountSwitchMethod?, TextView>>()
+                methodOptions.chunked(2).forEach { pair ->
+                    val r = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    pair.forEachIndexed { idx, (mOpt, lbl) ->
+                        val tv = makeBtn(lbl, if (mOpt == methodOverride) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                            methodOverride = mOpt
+                            mBtns.forEach { (item, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == methodOverride) "#0284C7" else "#1E293B"))
+                            }
+                        }
+                        mBtns += mOpt to tv
+                        r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(r)
+                }
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("OCR Daftar Akun + Auto-Scroll"))
+                val matchBtns = mutableListOf<Pair<AccountOcrMatchMode, TextView>>()
+                val matchRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                AccountOcrMatchMode.entries.forEachIndexed { idx, mm ->
+                    val tv = makeBtn(mm.shortLabel, if (mm == matchMode) "#0891B2" else "#1E293B", marginEndDp = 0) {
+                        matchMode = mm
+                        matchBtns.forEach { (item, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == matchMode) "#0891B2" else "#1E293B"))
+                        }
+                    }
+                    matchBtns += mm to tv
+                    matchRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < AccountOcrMatchMode.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(matchRow)
+
+                val dirBtns = mutableListOf<Pair<AccountScrollDirection, TextView>>()
+                val dirRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                AccountScrollDirection.entries.forEachIndexed { idx, sd ->
+                    val tv = makeBtn(sd.shortLabel, if (sd == scrollDir) "#0891B2" else "#1E293B", marginEndDp = 0) {
+                        scrollDir = sd
+                        dirBtns.forEach { (item, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == scrollDir) "#0891B2" else "#1E293B"))
+                        }
+                    }
+                    dirBtns += sd to tv
+                    dirRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < AccountScrollDirection.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(dirRow)
+
+                val maxScrF = addNumberRow(bodyContainer, "Maks auto-scroll (0-30)", action.maxScrolls.toString())
+                val settleF = addNumberRow(bodyContainer, "Jeda setelah scroll (ms)", action.scrollSettleMs.toString())
+                val reverseCheck = CheckBox(context).apply {
+                    text = "Balik arah scroll otomatis di ujung daftar"
+                    isChecked = action.reverseOnEnd
+                    setTextColor(Color.WHITE)
+                    textSize = 11f
+                }
+                bodyContainer.addView(reverseCheck)
+                val oxF = addSignedNumberRow(bodyContainer, "Offset klik X (px)", action.clickOffsetX.toString())
+                val oyF = addSignedNumberRow(bodyContainer, "Offset klik Y (px)", action.clickOffsetY.toString())
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Clone App / Dual App"))
+                val exitPrevCheck = CheckBox(context).apply {
+                    text = "Tutup aplikasi sebelumnya sebelum buka clone"
+                    isChecked = action.exitPreviousApp
+                    setTextColor(Color.WHITE)
+                    textSize = 11f
+                }
+                bodyContainer.addView(exitPrevCheck)
+                val exitWaitF = addNumberRow(bodyContainer, "Jeda tutup app lama (ms)", action.exitWaitMs.toString())
+                val launchWaitF = addNumberRow(bodyContainer, "Jeda loading clone app (ms)", action.launchWaitMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda sesudah aksi (ms)", action.delayAfterMs.toString())
+
+                bodyContainer.addView(dividerLine())
+                val regCheck = CheckBox(context).apply {
+                    text = "Batasi area daftar akun (Region)"
+                    isChecked = useRegion
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    textSize = 11.2f
+                    setOnCheckedChangeListener { _, checked -> useRegion = checked }
+                }
+                bodyContainer.addView(regCheck)
+                val reg = action.region ?: Region(0, 0, screenW, screenH)
+                val rL = addNumberRow(bodyContainer, "Area Kiri", reg.left.toString())
+                val rT = addNumberRow(bodyContainer, "Area Atas", reg.top.toString())
+                val rR = addNumberRow(bodyContainer, "Area Kanan", reg.right.toString())
+                val rB = addNumberRow(bodyContainer, "Area Bawah", reg.bottom.toString())
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("Jika Akun Dipilih (Then)"))
+                addBranchActionsControls(action.id, Slot.THEN, action.thenActions, "#065F46")
+                bodyContainer.addView(sectionLabel("Jika Akun Gagal Ditemukan (Else)"))
+                addBranchModePicker("Setelah cabang Gagal:", notFoundMode) { notFoundMode = it }
+                addBranchActionsControls(action.id, Slot.ELSE, action.elseActions, "#92400E")
+
+                addSaveActionBtn {
+                    val newRegion = if (useRegion) {
+                        Region(
+                            rL.text.toString().toIntOrNull() ?: reg.left,
+                            rT.text.toString().toIntOrNull() ?: reg.top,
+                            rR.text.toString().toIntOrNull() ?: reg.right,
+                            rB.text.toString().toIntOrNull() ?: reg.bottom
+                        )
+                    } else null
+                    saveEdited { cur ->
+                        val sa = (cur as? SelectAccountAction) ?: action
+                        sa.copy(
+                            methodOverride = methodOverride,
+                            region = newRegion,
+                            matchMode = matchMode,
+                            scrollDirection = scrollDir,
+                            maxScrolls = (maxScrF.text.toString().toIntOrNull() ?: sa.maxScrolls).coerceIn(0, 30),
+                            scrollSettleMs = (settleF.text.toString().toLongOrNull() ?: sa.scrollSettleMs).coerceIn(100L, 5000L),
+                            reverseOnEnd = reverseCheck.isChecked,
+                            clickOffsetX = oxF.text.toString().toIntOrNull() ?: sa.clickOffsetX,
+                            clickOffsetY = oyF.text.toString().toIntOrNull() ?: sa.clickOffsetY,
+                            exitPreviousApp = exitPrevCheck.isChecked,
+                            exitWaitMs = (exitWaitF.text.toString().toLongOrNull() ?: sa.exitWaitMs).coerceIn(0L, 15_000L),
+                            launchWaitMs = (launchWaitF.text.toString().toLongOrNull() ?: sa.launchWaitMs).coerceIn(0L, 60_000L),
+                            notFound = notFoundMode,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: sa.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
             is RestartAction, is StopAction -> {
                 bodyContainer.addView(TextView(context).apply {
                     text = "Aksi kontrol alur (dapat diatur peluang Random Event di atas)."
@@ -3037,6 +3725,7 @@ class OverlayMacroSettingsView(
         accentBgHex: String
     ) {
         val isStuckParent = macro.isStuckAction(parentId)
+        val isSwitchParent = macro.isSwitchAccountAction(parentId)
         // Show existing branch actions with 1-tap 🎯 target positioning & ✎ edit
         if (children.isNotEmpty()) {
             children.forEachIndexed { idx, child ->
@@ -3087,6 +3776,7 @@ class OverlayMacroSettingsView(
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.15f).apply { marginEnd = dp(5) })
         btnRow.addView(makeBtn("+ Aksi Lain (${children.size})", accentBgHex) {
             addPickerForStuck = isStuckParent
+            addPickerForSwitchAccount = isSwitchParent
             addPickerRef = ContainerRef(parentId, slot)
             rebuildBody()
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
@@ -3409,10 +4099,12 @@ class OverlayMacroSettingsView(
     private fun makeTabBtn(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
         text = label
         setTextColor(Color.WHITE)
-        textSize = 11.5f
+        textSize = 10.2f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
-        setPadding(dp(8), dp(6), dp(8), dp(6))
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        setPadding(dp(4), dp(6), dp(4), dp(6))
         background = GradientDrawable().apply {
             setColor(Color.parseColor("#1E293B"))
             cornerRadius = dp(10).toFloat()

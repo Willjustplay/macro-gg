@@ -21,9 +21,20 @@ import org.junit.Test
 class PremiumFeatureGateTest {
 
     @Test
-    fun onlyClickSwipeAndImageAreFree() {
-        val expectedFree = setOf(ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE)
+    fun onlyFreeActionsIncludingAccountSwitchAreFree() {
+        val expectedFree = setOf(
+            ActionKind.CLICK,
+            ActionKind.SWIPE,
+            ActionKind.IMAGE,
+            ActionKind.SWITCH_ACCOUNT,
+            ActionKind.SELECT_ACCOUNT
+        )
         assertEquals(expectedFree, PremiumFeatureGate.FREE_ACTION_KINDS)
+        assertEquals(2, PremiumFeatureGate.FREE_MAX_ACCOUNTS)
+        assertTrue(PremiumFeatureGate.canAddAccount(0, isPremium = false))
+        assertTrue(PremiumFeatureGate.canAddAccount(1, isPremium = false))
+        assertFalse(PremiumFeatureGate.canAddAccount(2, isPremium = false))
+        assertTrue(PremiumFeatureGate.canAddAccount(2, isPremium = true))
 
         for (kind in ActionKind.entries) {
             if (kind in expectedFree) {

@@ -29,7 +29,7 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
     ),
     ACTION_LOCKED(
         title = "Aksi Khusus Wjust macro PRO",
-        subtitle = "Versi gratis hanya mendukung Klik, Swipe, dan Deteksi Gambar. Upgrade ke PRO untuk membuka semua 18 aksi (Tunggu, Loop, Teks, Warna, Rekam, dll)."
+        subtitle = "Versi gratis mendukung Klik, Swipe, Deteksi Gambar, dan Ganti Akun (maks 2 akun). Upgrade ke PRO untuk membuka semua 22 aksi."
     ),
     MACRO_SET(
         title = "Macro Set Khusus PRO",
@@ -71,9 +71,13 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
         title = "Cabang Urutan & Cek Arah (PRO)",
         subtitle = "Buat jalur cabang alternatif, Cek Hasil & Pilih Arah otomatis, dan Pindah/Singgah cabang dengan Wjust macro PRO."
     ),
+    MULTI_ACCOUNT(
+        title = "Multi-Akun Tanpa Batas (PRO)",
+        subtitle = "Versi gratis mendukung hingga 2 akun per macro. Upgrade ke Wjust macro PRO untuk rotasi akun tanpa batas."
+    ),
     UPGRADE_GENERAL(
         title = "Wjust macro PRO",
-        subtitle = "Buka semua 20 jenis aksi (termasuk Cabang Urutan), macro tanpa batas, Macro Set, Ekspor/Impor, Anti-Macet, dan Lua Studio."
+        subtitle = "Buka semua 22 jenis aksi (termasuk Cabang Urutan), macro & multi-akun tanpa batas, Macro Set, Ekspor/Impor, Anti-Macet, dan Lua Studio."
     )
 }
 
@@ -85,11 +89,14 @@ data class MacroRunDenial(
 
 object PremiumFeatureGate {
     const val FREE_MAX_MACROS = 3
+    const val FREE_MAX_ACCOUNTS = 2
 
     val FREE_ACTION_KINDS: Set<ActionKind> = setOf(
         ActionKind.CLICK,
         ActionKind.SWIPE,
-        ActionKind.IMAGE
+        ActionKind.IMAGE,
+        ActionKind.SWITCH_ACCOUNT,
+        ActionKind.SELECT_ACCOUNT
     )
 
     fun isActionKindFree(kind: ActionKind): Boolean = kind in FREE_ACTION_KINDS
@@ -98,6 +105,9 @@ object PremiumFeatureGate {
 
     fun canCreateMacro(currentMacroCount: Int, isPremium: Boolean): Boolean =
         isPremium || currentMacroCount < FREE_MAX_MACROS
+
+    fun canAddAccount(currentAccountCount: Int, isPremium: Boolean): Boolean =
+        isPremium || currentAccountCount < FREE_MAX_ACCOUNTS
 
     fun remainingFreeMacroSlots(currentMacroCount: Int): Int =
         (FREE_MAX_MACROS - currentMacroCount).coerceAtLeast(0)
@@ -125,11 +135,19 @@ object PremiumFeatureGate {
         if (isPremium) return null
 
         val blocked = findFirstBlockedAction(macro.actions)
+            ?: if (macro.accountSwitch.enabled) findFirstBlockedAction(macro.accountSwitch.switchActions) else null
         if (blocked != null) {
             return MacroRunDenial(
                 feature = PremiumFeature.ACTION_LOCKED,
-                reason = "Aksi '${blocked.kind.label}' khusus Wjust macro PRO. Versi gratis mendukung Klik, Swipe, dan Deteksi Gambar.",
+                reason = "Aksi '${blocked.kind.label}' khusus Wjust macro PRO. Versi gratis mendukung Klik, Swipe, Deteksi Gambar, dan Ganti Akun (maks $FREE_MAX_ACCOUNTS akun).",
                 blockedKind = blocked.kind
+            )
+        }
+
+        if (macro.accountSwitch.enabled && macro.accountSwitch.accounts.count { it.enabled } > FREE_MAX_ACCOUNTS) {
+            return MacroRunDenial(
+                feature = PremiumFeature.MULTI_ACCOUNT,
+                reason = "Versi gratis mendukung maksimal $FREE_MAX_ACCOUNTS akun aktif per macro. Upgrade ke PRO untuk akun tanpa batas."
             )
         }
 

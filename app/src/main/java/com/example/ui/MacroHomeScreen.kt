@@ -1627,6 +1627,7 @@ private fun MacroListCard(
     val stuckActionCount = remember(macro) { macro.countStuckActions() }
     val hasWatchdog = macro.autoRecoverStuckSec > 0 && stuckActionCount > 0
     val hasBannedGuard = macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }
+    val hasMultiAccount = macro.accountSwitch.enabled
     val scaleTransform = remember(macro.sourceWidth, macro.sourceHeight, macro.autoScaleResolution, macro.scaleMode, screenW, screenH) {
         ResolutionScaler.forMacro(macro, screenW, screenH)
     }
@@ -1800,8 +1801,8 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard badges row
-            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard) {
+            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard / Multi-Account badges row
+            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard || hasMultiAccount) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (effectivelyLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -1834,6 +1835,9 @@ private fun MacroListCard(
                     }
                     if (hasBannedGuard) {
                         FeatureTag("⛔ Banned ${macro.bannedImages.size}", Color(0xFFEF4444))
+                    }
+                    if (hasMultiAccount) {
+                        FeatureTag("👥 ${macro.accountSwitch.accounts.size} Akun", Color(0xFF0EA5E9))
                     }
                     if (remainingLabel != null) {
                         val expColor = if (isExpired) Color(0xFFEF4444) else Color(0xFFF59E0B)

@@ -95,6 +95,7 @@ object AutomationCoordinator {
     private var activeJob: Job? = null
     private val stopRequested = AtomicBoolean(false)
     private val pausedFlag = AtomicBoolean(false)
+    private val skipAccountRequested = AtomicBoolean(false)
 
     @Volatile
     private var store: LocalStore? = null
@@ -127,6 +128,16 @@ object AutomationCoordinator {
 
     private val _actionsExecuted = MutableStateFlow(0)
     val actionsExecuted: StateFlow<Int> = _actionsExecuted.asStateFlow()
+
+    private val _activeAccountLabel = MutableStateFlow("")
+    val activeAccountLabel: StateFlow<String> = _activeAccountLabel.asStateFlow()
+
+    fun requestSkipAccount() {
+        if (_engineState.value == EngineState.RUNNING || _engineState.value == EngineState.PAUSED) {
+            skipAccountRequested.set(true)
+            ExecutionLogBus.info("⏭ Permintaan lompat ke akun berikutnya diterima...")
+        }
+    }
 
     fun attachStore(context: Context) {
         appCtx = context.applicationContext
@@ -334,6 +345,7 @@ object AutomationCoordinator {
                     is TextAction -> a.copy(region = storedRegion)
                     is ImageAction -> a.copy(region = storedRegion)
                     is TrackObjectAction -> a.copy(region = storedRegion)
+                    is com.example.data.SelectAccountAction -> a.copy(region = storedRegion)
                     else -> a
                 }
             }
@@ -444,6 +456,23 @@ object AutomationCoordinator {
                 stuckActions = base.stuckActions.insertInto(ref, storedAction),
                 stuckRecoveryMode = if (wasEmpty) StuckRecoveryMode.RUN_WATCHDOG_ACTIONS else base.stuckRecoveryMode,
                 autoRecoverStuckSec = if (wasEmpty && base.autoRecoverStuckSec <= 0) 60 else base.autoRecoverStuckSec
+            )
+        }
+    }
+
+    fun addSwitchAccountActionFromOverlay(ref: ContainerRef, action: Action, screenW: Int = 0, screenH: Int = 0) {
+        if (rejectIfActiveMacroLocked()) return
+        val (sw, sh) = resolveScreenSize(screenW, screenH)
+        _activeMode.value = AutomationMode.MACRO
+        updateActiveMacro(persist = true) { macro ->
+            val base = ResolutionScaler.ensureAuthoringResolution(macro, sw, sh)
+            val t = ResolutionScaler.forMacro(base, sw, sh)
+            val storedAction = unscaleActionForStorage(t, action)
+            base.copy(
+                accountSwitch = base.accountSwitch.copy(
+                    enabled = true,
+                    switchActions = base.accountSwitch.switchActions.insertInto(ref, storedAction)
+                )
             )
         }
     }
@@ -568,8 +597,11 @@ object AutomationCoordinator {
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
             if (m.bannedGuardEnabled && m.bannedImages.any { it.isNotBlank() }) return true
+            if (m.accountSwitch.enabled && m.accountSwitch.method != com.example.data.AccountSwitchMethod.CLONE_APP && m.accountSwitch.accounts.any { it.enabled }) return true
             for (a in m.allActionsSequence()) {
-                if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction) return true
+                if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction ||
+                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP)
+                ) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
                     val linkedSet = if (linked != null) localStore.getMacroSetById(linked.setId) else null
@@ -648,8 +680,10 @@ object AutomationCoordinator {
         selectMacro(macro)
         stopRequested.set(false)
         pausedFlag.set(false)
+        skipAccountRequested.set(false)
         _currentLoop.value = 0
         _actionsExecuted.value = 0
+        _activeAccountLabel.value = ""
         _engineState.value = EngineState.RUNNING
         ScreenCaptureService.highFrequencyCapture = true
 
@@ -850,6 +884,36 @@ object AutomationCoordinator {
                     selectMacro(target)
                     _currentLoop.value = 0
                 }
+                override fun onActiveAccountChanged(accountIndex: Int, totalEnabled: Int, account: com.example.data.AccountProfile?) {
+                    _activeAccountLabel.value = if (account != null && totalEnabled > 0) {
+                        "👤 $accountIndex/$totalEnabled • ${account.label.ifBlank { "Akun $accountIndex" }}"
+                    } else ""
+                }
+                override fun onAccountStateUpdated(
+                    macroId: String,
+                    lastAccountId: String,
+                    completedAccountId: String,
+                    lastUsedAtMs: Long
+                ) {
+                    val s = localStore ?: return
+                    val cur = s.getMacroById(macroId) ?: return
+                    val nextAccounts = if (completedAccountId.isNotBlank()) {
+                        cur.accountSwitch.accounts.map { acc ->
+                            if (acc.id == completedAccountId) acc.copy(lastUsedAt = lastUsedAtMs) else acc
+                        }
+                    } else cur.accountSwitch.accounts
+                    val updated = cur.copy(
+                        accountSwitch = cur.accountSwitch.copy(
+                            lastAccountId = lastAccountId,
+                            accounts = nextAccounts
+                        )
+                    )
+                    s.saveMacro(updated)
+                    if (_activeMacro.value.id == updated.id) {
+                        _activeMacro.value = updated
+                    }
+                }
+                override fun consumeManualSkipAccountRequest(): Boolean = skipAccountRequested.getAndSet(false)
                 override fun onMatchFound(match: MatchResult, label: String) {
                     if (localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)
@@ -1072,6 +1136,8 @@ object AutomationCoordinator {
     fun stop() {
         stopRequested.set(true)
         pausedFlag.set(false)
+        skipAccountRequested.set(false)
+        _activeAccountLabel.value = ""
         ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null
