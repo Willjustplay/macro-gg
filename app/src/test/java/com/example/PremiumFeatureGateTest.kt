@@ -149,4 +149,44 @@ class PremiumFeatureGateTest {
         assertEquals("monthly", SubscriptionPlan.MONTHLY.basePlanId)
         assertEquals("yearly", SubscriptionPlan.YEARLY.basePlanId)
     }
+
+    @Test
+    fun phase1To3FreeVsProGatesEnforceApprovedTierRules() {
+        // 1. Humanizer: OFF & NATURAL are FREE; STEALTH & CUSTOM require PRO
+        assertTrue(PremiumFeatureGate.isHumanizerConfigFree(com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.OFF)))
+        assertTrue(PremiumFeatureGate.isHumanizerConfigFree(com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.NATURAL)))
+        assertFalse(PremiumFeatureGate.isHumanizerConfigFree(com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.STEALTH)))
+        assertFalse(PremiumFeatureGate.isHumanizerConfigFree(com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.CUSTOM)))
+
+        val naturalMacro = Macro(
+            name = "Natural OK",
+            humanizer = com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.NATURAL),
+            actions = listOf(ClickAction(x = 100, y = 200))
+        )
+        assertNull(PremiumFeatureGate.checkMacroRun(naturalMacro, isPremium = false))
+
+        val stealthMacro = naturalMacro.copy(
+            humanizer = com.example.data.HumanizerConfig(preset = com.example.data.HumanizerPreset.STEALTH)
+        )
+        val stealthDenial = PremiumFeatureGate.checkMacroRun(stealthMacro, isPremium = false)
+        assertNotNull(stealthDenial)
+        assertEquals(PremiumFeature.HUMANIZER_PRO, stealthDenial!!.feature)
+        assertNull(PremiumFeatureGate.checkMacroRun(stealthMacro, isPremium = true))
+
+        // 2. Visual Variables & NotifyAction are PRO-gated
+        val varMacro = Macro(name = "Var", actions = listOf(com.example.data.VariableAction()))
+        assertEquals(PremiumFeature.VISUAL_VARIABLES, PremiumFeatureGate.checkMacroRun(varMacro, isPremium = false)?.feature)
+        assertNull(PremiumFeatureGate.checkMacroRun(varMacro, isPremium = true))
+
+        val notifyMacro = Macro(name = "Notif", actions = listOf(com.example.data.NotifyAction()))
+        assertEquals(PremiumFeature.REMOTE_NOTIFICATIONS, PremiumFeatureGate.checkMacroRun(notifyMacro, isPremium = false)?.feature)
+        assertNull(PremiumFeatureGate.checkMacroRun(notifyMacro, isPremium = true))
+
+        // 3. Auto-Scheduler: max 1 FREE, unlimited PRO
+        assertEquals(1, PremiumFeatureGate.FREE_MAX_SCHEDULES)
+        assertTrue(PremiumFeatureGate.canAddSchedule(0, isPremium = false))
+        assertFalse(PremiumFeatureGate.canAddSchedule(1, isPremium = false))
+        assertTrue(PremiumFeatureGate.canAddSchedule(1, isPremium = true))
+        assertTrue(PremiumFeatureGate.canAddSchedule(25, isPremium = true))
+    }
 }

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AdsClick
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -55,6 +56,7 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.WarningAmber
@@ -153,7 +155,9 @@ fun MacroHomeScreen(
     onDeleteMacro: (Macro) -> Unit,
     isPremium: Boolean = false,
     activePlanLabel: String = "Gratis",
-    onOpenPaywall: (com.example.billing.PremiumFeature) -> Unit = {}
+    onOpenPaywall: (com.example.billing.PremiumFeature) -> Unit = {},
+    onOpenStatsAndNotify: () -> Unit = {},
+    onOpenAfkAndSchedule: () -> Unit = {}
 ) {
     var exportDialogMacro by remember { mutableStateOf<Macro?>(null) }
     var exportDialogPreferDownloads by remember { mutableStateOf(false) }
@@ -262,7 +266,47 @@ fun MacroHomeScreen(
                     }
                 }
 
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF6366F1).copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Color(0xFF6366F1).copy(alpha = 0.35f))
+                ) {
+                    IconButton(
+                        onClick = onOpenAfkAndSchedule,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Bedtime,
+                            contentDescription = "AFK, Guard & Jadwal",
+                            tint = Color(0xFF818CF8),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(5.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFF59E0B).copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.35f))
+                ) {
+                    IconButton(
+                        onClick = onOpenStatsAndNotify,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.QueryStats,
+                            contentDescription = "Statistik & Notifikasi",
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(6.dp))
 
                 if (engineState == EngineState.RUNNING || engineState == EngineState.PAUSED) {
                     Button(

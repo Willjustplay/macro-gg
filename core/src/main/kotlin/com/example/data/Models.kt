@@ -59,7 +59,83 @@ enum class BranchNavigationMode(val label: String, val shortLabel: String, val d
 enum class BranchConditionType(val label: String) {
     IMAGE("Gambar"),
     TEXT("Teks / Nilai"),
-    COLOR("Warna Piksel")
+    COLOR("Warna Piksel"),
+    VARIABLE("Variabel / Hitungan")
+}
+
+/** Anti-detection Humanizer preset levels for natural human-like touch & timing behavior. */
+@Serializable
+enum class HumanizerPreset(val label: String, val shortLabel: String, val description: String) {
+    OFF(
+        "Mati (Presisi Penuh)",
+        "Mati",
+        "Klik lurus tepat di titik target & jeda tetap (paling cepat)."
+    ),
+    NATURAL(
+        "Natural (Ringan & Aman)",
+        "Natural",
+        "Sebaran klik Gaussian halus, kurva swipe Bezier tipis, dan variasi jeda ±15%."
+    ),
+    STEALTH(
+        "Stealth (Anti-Deteksi Ketat)",
+        "Stealth",
+        "Gaussian + kurva Bezier dinamis + mikro-hesitasi + Istirahat Alami (Human Break) berkala."
+    ),
+    CUSTOM(
+        "Kustom (Atur Sendiri)",
+        "Kustom",
+        "Sesuaikan radius Gaussian, lengkungan swipe, variasi jeda, dan Human Break secara manual."
+    )
+}
+
+/** Operation performed by [VariableAction] without writing code/Lua. */
+@Serializable
+enum class VariableOperation(val label: String, val shortLabel: String) {
+    SET("Atur Nilai (=)", "="),
+    ADD("Tambah (+)", "+"),
+    SUBTRACT("Kurangi (−)", "−"),
+    MULTIPLY("Kali (×)", "×"),
+    READ_OCR_NUMBER("Baca Angka OCR ke Variabel", "OCR→Var"),
+    RESET_ALL("Reset Semua Variabel", "Reset")
+}
+
+/** Lifetime & isolation scope for visual macro variables. */
+@Serializable
+enum class VariableScope(val label: String, val shortLabel: String) {
+    SESSION("Global Sesi (Semua Akun)", "Sesi"),
+    PER_ACCOUNT("Per Akun (Terpisah Tiap Akun)", "Per Akun")
+}
+
+/** Numeric comparison operators for [CheckVariableAction] and variable [BranchRouteRule]. */
+@Serializable
+enum class VariableCompareOp(val label: String, val symbol: String) {
+    EQUALS("Sama dengan (=)", "="),
+    NOT_EQUALS("Tidak sama (≠)", "≠"),
+    LESS_THAN("Lebih kecil (<)", "<"),
+    LESS_OR_EQUAL("Kecil / sama (≤)", "≤"),
+    GREATER_THAN("Lebih besar (>)", ">"),
+    GREATER_OR_EQUAL("Besar / sama (≥)", "≥");
+
+    fun evaluate(actual: Double, expected: Double): Boolean {
+        val eps = 1e-6
+        return when (this) {
+            EQUALS -> kotlin.math.abs(actual - expected) <= eps
+            NOT_EQUALS -> kotlin.math.abs(actual - expected) > eps
+            LESS_THAN -> actual < expected - eps
+            LESS_OR_EQUAL -> actual <= expected + eps
+            GREATER_THAN -> actual > expected + eps
+            GREATER_OR_EQUAL -> actual >= expected - eps
+        }
+    }
+}
+
+/** Severity level for [NotifyAction] and remote Telegram/Discord notifications. */
+@Serializable
+enum class NotifyLevel(val label: String, val icon: String) {
+    INFO("Info", "ℹ️"),
+    SUCCESS("Sukses", "✅"),
+    WARNING("Peringatan", "⚠️"),
+    CRITICAL("Darurat / Alarm", "🚨")
 }
 
 /** Action taken when a [BranchRouteRule] matches (or when no rule matches as fallback). */
@@ -815,6 +891,12 @@ data class BranchRouteRule(
     val tolerance: Int = 15,
     /** Optional restricted scan region (null = full screen). */
     val region: Region? = null,
+    /** Variable condition fields when [conditionType] == VARIABLE. */
+    val variableName: String = "",
+    val variableOp: VariableCompareOp = VariableCompareOp.GREATER_OR_EQUAL,
+    val variableTargetValue: Double = 1.0,
+    /** Optional second variable name; when non-blank compares [variableName] against [variableCompareToVar]. */
+    val variableCompareToVar: String = "",
     val outcome: BranchOutcomeAction = BranchOutcomeAction.SWITCH_BRANCH,
     /** Target [MacroBranch.id] (empty = Jalur Utama) when [outcome] is SWITCH_BRANCH or CALL_BRANCH_RETURN. */
     val targetBranchId: String = "",
@@ -920,6 +1002,161 @@ data class SelectAccountAction(
     )
 }
 
+/**
+ * Modifies a named numeric variable (set, add, subtract, multiply, reset, or capture an OCR number
+ * from screen) without writing any Lua code.
+ */
+@Serializable
+@SerialName("variable")
+data class VariableAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 100,
+    override val chancePercent: Int = 100,
+    val variableName: String = "hitung",
+    val operation: VariableOperation = VariableOperation.ADD,
+    val value: Double = 1.0,
+    val scope: VariableScope = VariableScope.SESSION,
+    /** Optional scan region when [operation] == READ_OCR_NUMBER (null = full screen). */
+    val region: Region? = null,
+    val ocrTimeoutMs: Long = 2000L,
+    /** When true and OCR fails to read a number, stores [fallbackValue]; when false keeps previous value. */
+    val useFallbackOnOcrFail: Boolean = false,
+    val fallbackValue: Double = 0.0
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/**
+ * Evaluates a numeric condition on a visual macro variable (against a fixed number or another variable)
+ * and branches execution cleanly into [thenActions] / [elseActions] or named macro branches.
+ */
+@Serializable
+@SerialName("check_variable")
+data class CheckVariableAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 100,
+    override val chancePercent: Int = 100,
+    val variableName: String = "hitung",
+    val operator: VariableCompareOp = VariableCompareOp.GREATER_OR_EQUAL,
+    val targetValue: Double = 3.0,
+    /** When non-blank, compares [variableName] against the live value of [compareToVariable] instead of [targetValue]. */
+    val compareToVariable: String = "",
+    val scope: VariableScope = VariableScope.SESSION,
+    val thenActions: List<Action> = emptyList(),
+    val elseActions: List<Action> = emptyList(),
+    val foundMode: NotFoundMode = NotFoundMode.CONTINUE,
+    val foundBranchId: String = "",
+    val notFound: NotFoundMode = NotFoundMode.CONTINUE,
+    val notFoundBranchId: String = ""
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(
+        id = newId(),
+        thenActions = thenActions.map { it.withNewIds() },
+        elseActions = elseActions.map { it.withNewIds() }
+    )
+}
+
+/**
+ * Dispatches a notification to the user's locally configured Telegram Bot / Discord Webhook
+ * (never embedding credentials in the macro!) and/or rings the local Phone Alarm (sound + vibrate).
+ * Supports dynamic placeholders: `{macro}`, `{loop}`, `{actions}`, `{account}`, `{var:name}`.
+ */
+@Serializable
+@SerialName("notify")
+data class NotifyAction(
+    override val id: String = newId(),
+    override val enabled: Boolean = true,
+    override val delayAfterMs: Long = 200,
+    override val chancePercent: Int = 100,
+    val title: String = "Notifikasi Macro",
+    val message: String = "Kondisi tercapai di {macro} (Loop #{loop})!",
+    val level: NotifyLevel = NotifyLevel.INFO,
+    val sendRemote: Boolean = true,
+    val includeScreenshot: Boolean = false,
+    val triggerPhoneAlarm: Boolean = false
+) : Action() {
+    override fun withEnabled(value: Boolean) = copy(enabled = value)
+    override fun withChancePercent(value: Int) = copy(chancePercent = value.coerceIn(0, 100))
+    override fun withNewIds() = copy(id = newId())
+}
+
+/**
+ * Humanizer Engine configuration: makes taps, swipes, timing, and periodic AFK pauses look natural
+ * like a real human hand while staying within safe target bounds.
+ */
+@Serializable
+data class HumanizerConfig(
+    val preset: HumanizerPreset = HumanizerPreset.OFF,
+    /** Max Gaussian click offset radius in authoring px (sigma ≈ radius / 2.2). */
+    val gaussianClickRadiusPx: Int = 8,
+    /** Minimum randomized tap hold duration (ms) for single clicks. */
+    val tapDurationMinMs: Long = 45L,
+    /** Maximum randomized tap hold duration (ms) for single clicks. */
+    val tapDurationMaxMs: Long = 95L,
+    /** Use quadratic Bezier curves for swipes & auto-scrolls instead of perfectly straight lines. */
+    val bezierSwipeEnabled: Boolean = true,
+    /** Lateral Bezier deflection as fraction of swipe length (0.04..0.35). */
+    val bezierCurveFactor: Float = 0.14f,
+    /** Percentage (±%) natural timing variance applied to action delays. */
+    val delayVariancePercent: Int = 15,
+    /** Probability (0..40%) of brief natural micro-hesitation (140..380ms) before an action. */
+    val microHesitationChancePercent: Int = 6,
+    /** Enable periodic natural AFK rests ("Human Break"). */
+    val humanBreakEnabled: Boolean = false,
+    val breakEveryMinMinutes: Int = 25,
+    val breakEveryMaxMinutes: Int = 45,
+    val breakDurationMinSec: Int = 90,
+    val breakDurationMaxSec: Int = 240
+) {
+    /** Resolves concrete runtime parameters from [preset] (or raw custom values when [HumanizerPreset.CUSTOM]). */
+    fun effective(): HumanizerConfig = when (preset) {
+        HumanizerPreset.OFF -> HumanizerConfig(
+            preset = HumanizerPreset.OFF,
+            gaussianClickRadiusPx = 0,
+            tapDurationMinMs = 0L,
+            tapDurationMaxMs = 0L,
+            bezierSwipeEnabled = false,
+            bezierCurveFactor = 0f,
+            delayVariancePercent = 0,
+            microHesitationChancePercent = 0,
+            humanBreakEnabled = false
+        )
+        HumanizerPreset.NATURAL -> HumanizerConfig(
+            preset = HumanizerPreset.NATURAL,
+            gaussianClickRadiusPx = 7,
+            tapDurationMinMs = 45L,
+            tapDurationMaxMs = 95L,
+            bezierSwipeEnabled = true,
+            bezierCurveFactor = 0.12f,
+            delayVariancePercent = 15,
+            microHesitationChancePercent = 5,
+            humanBreakEnabled = false
+        )
+        HumanizerPreset.STEALTH -> HumanizerConfig(
+            preset = HumanizerPreset.STEALTH,
+            gaussianClickRadiusPx = 11,
+            tapDurationMinMs = 50L,
+            tapDurationMaxMs = 130L,
+            bezierSwipeEnabled = true,
+            bezierCurveFactor = 0.19f,
+            delayVariancePercent = 25,
+            microHesitationChancePercent = 12,
+            humanBreakEnabled = true,
+            breakEveryMinMinutes = breakEveryMinMinutes.coerceIn(5, 240),
+            breakEveryMaxMinutes = breakEveryMaxMinutes.coerceIn(breakEveryMinMinutes.coerceIn(5, 240), 360),
+            breakDurationMinSec = breakDurationMinSec.coerceIn(15, 1800),
+            breakDurationMaxSec = breakDurationMaxSec.coerceIn(breakDurationMinSec.coerceIn(15, 1800), 3600)
+        )
+        HumanizerPreset.CUSTOM -> this
+    }
+}
+
 /** Single account entry in a macro's multi-account rotation queue (stripped on export for privacy). */
 @Serializable
 data class AccountProfile(
@@ -1003,6 +1240,8 @@ data class Macro(
     val bannedAvoidRadiusPx: Int = 60,
     /** Universal multi-account rotation & switching configuration (OCR + Auto-Scroll / Clone App / Hybrid). */
     val accountSwitch: AccountSwitchConfig = AccountSwitchConfig(),
+    /** Anti-detection Humanizer Engine configuration (Gaussian taps, Bezier swipes, timing variance, Human Break). */
+    val humanizer: HumanizerConfig = HumanizerConfig(),
     /** Custom logo photo filename stored in macro_icons/ (empty = default icon). */
     val logoImage: String = "",
     /** Optional [MacroSet.id] grouping this macro into a Macro Set (empty = ungrouped). */
@@ -1103,6 +1342,9 @@ enum class ActionKind(val label: String, val description: String) {
     GOTO_BRANCH("Pindah Jalur Cabang", "Pindah permanen atau singgah ke jalur cabang lalu kembali"),
     SWITCH_ACCOUNT("Ganti Akun Berikutnya", "Pindah ke akun giliran berikutnya & jalankan Alur Ganti Akun"),
     SELECT_ACCOUNT("Pilih / Buka Akun Giliran", "Cari & klik akun via OCR + Auto-Scroll dan/atau buka Clone App akun giliran"),
+    VARIABLE("Atur Variabel / Hitungan", "Simpan angka, tambah/kurang counter, atau baca angka OCR ke variabel tanpa coding"),
+    CHECK_VARIABLE("Cek Variabel / Hitungan", "Bandingkan nilai variabel (=, <, >, dll) lalu jalankan cabang If/Else atau pindah arah"),
+    NOTIFY("Kirim Notifikasi / Alarm", "Kirim pesan & screenshot ke Telegram/Discord atau bunyikan alarm HP"),
     LOOP("Ulangi Blok", "Ulangi beberapa aksi N kali"),
     RUN_MACRO("Hubungkan Macro", "Jalankan atau pindah ke macro lain"),
     FINISH_MACRO("Selesaikan Macro", "Selesaikan macro pasif/sub-macro lalu switch ke macro aktif tanpa berhenti"),
@@ -1129,6 +1371,9 @@ val Action.kind: ActionKind
         is GoToBranchAction -> ActionKind.GOTO_BRANCH
         is SwitchAccountAction -> ActionKind.SWITCH_ACCOUNT
         is SelectAccountAction -> ActionKind.SELECT_ACCOUNT
+        is VariableAction -> ActionKind.VARIABLE
+        is CheckVariableAction -> ActionKind.CHECK_VARIABLE
+        is NotifyAction -> ActionKind.NOTIFY
         is LoopAction -> ActionKind.LOOP
         is RunMacroAction -> ActionKind.RUN_MACRO
         is FinishMacroAction -> ActionKind.FINISH_MACRO
@@ -1210,6 +1455,26 @@ fun Action.summary(): String {
             val area = if (region != null && methodOverride != AccountSwitchMethod.CLONE_APP) " • area" else ""
             "$methodLabel$scrollPart$area"
         }
+        is VariableAction -> {
+            val vName = variableName.trim().ifBlank { "hitung" }
+            val scopeTag = if (scope == VariableScope.PER_ACCOUNT) " [Akun]" else ""
+            when (operation) {
+                VariableOperation.RESET_ALL -> "Reset semua variabel$scopeTag"
+                VariableOperation.READ_OCR_NUMBER -> "$vName ← OCR Angka" + (if (region != null) " (area)" else "") + scopeTag
+                else -> "$vName ${operation.shortLabel} ${formatTargetNum(value)}$scopeTag"
+            }
+        }
+        is CheckVariableAction -> {
+            val vName = variableName.trim().ifBlank { "hitung" }
+            val rhs = compareToVariable.trim().ifBlank { formatTargetNum(targetValue) }
+            val scopeTag = if (scope == VariableScope.PER_ACCOUNT) " [Akun]" else ""
+            "$vName ${operator.symbol} $rhs$scopeTag"
+        }
+        is NotifyAction -> buildString {
+            append("${level.icon} ${title.ifBlank { message }.take(28)}")
+            if (includeScreenshot) append(" • 📷")
+            if (triggerPhoneAlarm) append(" • 🔊")
+        }
         is LoopAction -> "${count}× (${actions.size} aksi)"
         is RunMacroAction -> "${targetMacroName.ifBlank { "(pilih macro)" }} • " + if (returnAfter) "panggil" else "pindah"
         is FinishMacroAction -> when (mode) {
@@ -1277,6 +1542,9 @@ fun ActionKind.create(screenW: Int, screenH: Int, imageName: String = ""): Actio
         ActionKind.GOTO_BRANCH -> GoToBranchAction()
         ActionKind.SWITCH_ACCOUNT -> SwitchAccountAction()
         ActionKind.SELECT_ACCOUNT -> SelectAccountAction()
+        ActionKind.VARIABLE -> VariableAction()
+        ActionKind.CHECK_VARIABLE -> CheckVariableAction()
+        ActionKind.NOTIFY -> NotifyAction()
         ActionKind.LOOP -> LoopAction()
         ActionKind.RUN_MACRO -> RunMacroAction()
         ActionKind.FINISH_MACRO -> FinishMacroAction()
@@ -1329,6 +1597,13 @@ internal fun Action.withMappedIds(idMap: Map<String, String>): Action {
             thenActions = thenActions.map { it.withMappedIds(idMap) },
             elseActions = elseActions.map { it.withMappedIds(idMap) }
         )
+        is VariableAction -> copy(id = mappedId)
+        is CheckVariableAction -> copy(
+            id = mappedId,
+            thenActions = thenActions.map { it.withMappedIds(idMap) },
+            elseActions = elseActions.map { it.withMappedIds(idMap) }
+        )
+        is NotifyAction -> copy(id = mappedId)
         is LoopAction -> copy(
             id = mappedId,
             actions = actions.map { it.withMappedIds(idMap) }

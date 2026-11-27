@@ -14,13 +14,16 @@ import com.example.data.BranchNavigationMode
 import com.example.data.BranchOutcomeAction
 import com.example.data.BranchRouteRule
 import com.example.data.BranchRouterAction
+import com.example.data.CheckVariableAction
 import com.example.data.ClickAction
 import com.example.data.ColorAction
 import com.example.data.ExitAppAction
 import com.example.data.ExitAppMode
+import com.example.data.FarmingStatsCalculator
 import com.example.data.FinishMacroAction
 import com.example.data.FinishMacroMode
 import com.example.data.GoToBranchAction
+import com.example.data.HumanizerPreset
 import com.example.data.ImageAction
 import com.example.data.JumpAction
 import com.example.data.JumpMode
@@ -31,6 +34,8 @@ import com.example.data.Macro
 import com.example.data.MacroSecurity
 import com.example.data.MacroSet
 import com.example.data.NotFoundMode
+import com.example.data.NotifyAction
+import com.example.data.NotifyLevel
 import com.example.data.RecordAction
 import com.example.data.RecordedGesture
 import com.example.data.RecentsSwipeDirection
@@ -44,6 +49,9 @@ import com.example.data.SwitchAccountAction
 import com.example.data.TextAction
 import com.example.data.TrackInteractionMode
 import com.example.data.TrackObjectAction
+import com.example.data.VariableAction
+import com.example.data.VariableOperation
+import com.example.data.VariableScope
 import com.example.data.WaitAction
 import com.example.data.ZoomAction
 import com.example.data.Region
@@ -75,6 +83,15 @@ interface MacroRuntime {
     suspend fun sleep(ms: Long)
     suspend fun click(x: Int, y: Int, durationMs: Long): Boolean
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean
+    suspend fun swipeCurved(
+        x1: Int,
+        y1: Int,
+        cx: Int,
+        cy: Int,
+        x2: Int,
+        y2: Int,
+        durationMs: Long
+    ): Boolean = swipe(x1, y1, x2, y2, durationMs)
     suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean = true
     suspend fun playRecordedGesture(gesture: RecordedGesture, speed: Float): Boolean
     suspend fun exitApp(mode: ExitAppMode, packageName: String = ""): Boolean = true
@@ -102,6 +119,22 @@ interface MacroRuntime {
     fun onActiveAccountChanged(accountIndex: Int, totalEnabled: Int, account: AccountProfile?) {}
     fun onAccountStateUpdated(macroId: String, lastAccountId: String, completedAccountId: String, lastUsedAtMs: Long) {}
     fun consumeManualSkipAccountRequest(): Boolean = false
+    fun isVisualDebugEnabled(): Boolean = false
+    fun onVisualDebug(event: VisualDebugEvent) {}
+    fun onVariablesChanged(variables: Map<String, Double>) {}
+    fun onHumanBreakChanged(remainingSec: Int) {}
+    fun onWatchdogTriggered(modeLabel: String) {}
+    fun onBannedBlocked(imageName: String) {}
+    fun onAccountSwitched(accountLabel: String) {}
+    fun onHumanBreakStarted(durationSec: Int) {}
+    suspend fun sendNotification(
+        title: String,
+        message: String,
+        level: NotifyLevel,
+        sendRemote: Boolean,
+        includeScreenshot: Boolean,
+        triggerPhoneAlarm: Boolean
+    ) {}
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
@@ -131,12 +164,14 @@ private data class PendingJump(
 
 /**
  * Recursive Macrorify-style macro executor supporting:
- * - Multi-point clicks with burst repeat & jitter
+ * - Multi-point clicks with burst repeat, jitter & Humanizer Engine (Gaussian clicks, Bezier swipes, Human Break)
  * - Long press, swipe, 2-finger pinch Zoom In/Out, wait with random jitter
  * - Exit App & Launch App actions for app lifecycle automation & stuck recovery
  * - Per-action success probability ([Action.chancePercent]) for random events
  * - Automatic screen resolution scaling ([ResolutionScaler]) across all devices
- * - Image (with repeated clicks & banned-image avoidance), OCR Text/Value, and Color detection
+ * - Image (with repeated clicks & banned-image avoidance), OCR Text/Value, Color detection & Live Visual Debugger
+ * - Visual Variables & Counters ([VariableAction], [CheckVariableAction], and VARIABLE rules in [BranchRouterAction])
+ * - Remote Notifications (Telegram/Discord + Screenshot) & Local Phone Alarm ([NotifyAction])
  * - Named sequence branches ([Macro.branches]), [BranchRouterAction], and [GoToBranchAction] (Switch & Call-Return)
  * - Universal Multi-Account rotation ([Macro.accountSwitch], [SwitchAccountAction], [SelectAccountAction]) via OCR + Auto-Scroll and Clone App switching
  * - Nested loop blocks, [JumpAction] forward/backward jumps, & Chained/Linked Macros ([RunMacroAction]) with cycle protection, Passive Mode & [FinishMacroAction]
@@ -148,6 +183,7 @@ class MacroRunner(
     private val runtime: MacroRuntime,
     private val random: Random = Random.Default
 ) {
+    private val humanizer = HumanizerEngine(random)
     private var lastProgressMs: Long = 0L
     private var rootWatchdogMacro: Macro? = null
     private var inStuckRecovery: Boolean = false
@@ -164,6 +200,14 @@ class MacroRunner(
     private var lastAccountSelectFailed: Boolean = false
     private val visitedAccountIdsInCycle = LinkedHashSet<String>()
     private val runtimeAccountLastUsed = HashMap<String, Long>()
+    /** Visual variables stored per session and per active account. */
+    private val sessionVariables = LinkedHashMap<String, Double>()
+    private val accountVariables = HashMap<String, LinkedHashMap<String, Double>>()
+    /** Scheduled epoch ms for the next Humanizer "Human Break" pause (0 = disabled). */
+    private var nextHumanBreakAtMs: Long = 0L
+    /** Live counters for notification template expansion (`{loop}`, `{actions}`). */
+    private var rootLoopNumber: Int = 0
+    private var sessionActionsCounter: Int = 0
     /** Caches discovered winning template scale per (imageName@frameWxH) for instant single-pass re-detection. */
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
@@ -190,8 +234,16 @@ class MacroRunner(
             previousAccountPackage = ""
             accountLoopCounter = 0
             accountStartedAtMs = runtime.nowMs()
+            rootLoopNumber = 0
+            sessionActionsCounter = 0
             visitedAccountIdsInCycle.clear()
             runtimeAccountLastUsed.clear()
+            sessionVariables.clear()
+            accountVariables.clear()
+            runtime.onVariablesChanged(emptyMap())
+            runtime.onHumanBreakChanged(0)
+            val breakInterval = humanizer.nextBreakIntervalMs(currentMacro.humanizer)
+            nextHumanBreakAtMs = if (breakInterval > 0L) runtime.nowMs() + breakInterval else 0L
             pendingJump = null
             pendingSwitchBranchId = null
             branchCallDepth = 0
@@ -208,6 +260,8 @@ class MacroRunner(
             }
             break
         }
+        runtime.onHumanBreakChanged(0)
+        runtime.onVariablesChanged(emptyMap())
         runtime.onActiveAccountChanged(0, 0, null)
     }
 
@@ -279,7 +333,10 @@ class MacroRunner(
                 break
             }
             iteration++
-            if (depth == 0) runtime.onLoopChanged(iteration)
+            if (depth == 0) {
+                rootLoopNumber = iteration
+                runtime.onLoopChanged(iteration)
+            }
             runtime.log(LogLevel.INFO, if (depth == 0) "Loop #$iteration dimulai." else "Sub-macro '${macro.name}' loop #$iteration.")
 
             pendingJump = null
@@ -451,6 +508,7 @@ class MacroRunner(
         }
 
         runtime.log(LogLevel.WARN, "Anti-Macet (Watchdog): Aksi utama macet > ${sec}d — mengaktifkan '${effectiveMode.label}'.")
+        runtime.onWatchdogTriggered(effectiveMode.label)
         lastProgressMs = runtime.nowMs()
 
         return when (effectiveMode) {
@@ -505,6 +563,7 @@ class MacroRunner(
             if (runtime.nowMs() - startedAt >= maxDurationMs) return FlowControl.STOP_MACRO
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             checkAccountAutoOrManualSwitch(macro, startedAt, maxDurationMs, depth)?.let { return it }
+            checkHumanBreak(macro, startedAt, maxDurationMs, depth)?.let { return it }
 
             val action = actions[idx]
             if (!action.enabled) {
@@ -632,8 +691,7 @@ class MacroRunner(
 
             if (flow != FlowControl.NEXT) return flow
 
-            val extraRandom = if (macro.randomDelayMs > 0) random.nextLong(0, macro.randomDelayMs + 1) else 0L
-            val totalDelay = action.delayAfterMs + extraRandom
+            val totalDelay = humanizer.humanizeDelay(action.delayAfterMs, macro.randomDelayMs, macro.humanizer)
             if (totalDelay > 0 && !runtime.isStopped()) {
                 val delayFlow = sleepWatchingStuck(totalDelay, macro, startedAt, maxDurationMs, depth)
                 if (delayFlow != FlowControl.NEXT) return delayFlow
@@ -653,7 +711,6 @@ class MacroRunner(
         val liveW = runtime.screenWidth.coerceAtLeast(4)
         val liveH = runtime.screenHeight.coerceAtLeast(4)
         val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
-        val scaledJitter = transform.scaleDistance(macro.jitterPx)
         return when (action) {
             is ClickAction -> {
                 val (sx, sy) = transform.scalePoint(action.x, action.y)
@@ -661,16 +718,14 @@ class MacroRunner(
                 for (i in 0 until times) {
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     runtime.waitIfPaused()
-                    val (rawTx, rawTy) = applyJitter(sx, sy, scaledJitter)
-                    val tx = rawTx.coerceIn(1, liveW - 2)
-                    val ty = rawTy.coerceIn(1, liveH - 2)
-                    runtime.log(LogLevel.ACTION, "Klik ($tx, $ty) ${action.durationMs}ms" + if (times > 1) " [${i + 1}/$times]" else "")
-                    if (guardedClick(macro, tx, ty, action.durationMs)) {
+                    val label = if (times > 1) "Klik ${i + 1}/$times" else "Klik"
+                    if (guardedClick(macro, sx, sy, action.durationMs, label = label)) {
                         runtime.onActionExecuted()
                         markProgress()
                     }
                     if (i + 1 < times && action.repeatIntervalMs > 0) {
-                        runtime.sleep(action.repeatIntervalMs)
+                        val intv = humanizer.humanizeDelay(action.repeatIntervalMs, 0L, macro.humanizer)
+                        if (intv > 0L) runtime.sleep(intv)
                     }
                 }
                 FlowControl.NEXT
@@ -678,12 +733,8 @@ class MacroRunner(
 
             is LongPressAction -> {
                 val (sx, sy) = transform.scalePoint(action.x, action.y)
-                val (rawTx, rawTy) = applyJitter(sx, sy, scaledJitter)
-                val tx = rawTx.coerceIn(1, liveW - 2)
-                val ty = rawTy.coerceIn(1, liveH - 2)
                 val dur = action.durationMs.coerceAtLeast(250L)
-                runtime.log(LogLevel.ACTION, "Tahan ($tx, $ty) ${dur}ms")
-                if (guardedClick(macro, tx, ty, dur)) {
+                if (guardedClick(macro, sx, sy, dur, isLongPress = true, label = "Tahan")) {
                     runtime.onActionExecuted()
                     markProgress()
                 }
@@ -693,8 +744,7 @@ class MacroRunner(
             is SwipeAction -> {
                 val (sx1, sy1) = transform.scalePoint(action.x1, action.y1)
                 val (sx2, sy2) = transform.scalePoint(action.x2, action.y2)
-                runtime.log(LogLevel.ACTION, "Swipe ($sx1,$sy1) → ($sx2,$sy2) ${action.durationMs}ms")
-                if (runtime.swipe(sx1, sy1, sx2, sy2, action.durationMs)) {
+                if (humanizedSwipe(macro, sx1, sy1, sx2, sy2, action.durationMs, label = "Swipe")) {
                     runtime.onActionExecuted()
                     markProgress()
                 }
@@ -714,8 +764,7 @@ class MacroRunner(
             }
 
             is WaitAction -> {
-                val extra = if (action.randomMs > 0) random.nextLong(0, action.randomMs + 1) else 0L
-                val total = (action.durationMs + extra).coerceAtLeast(0L)
+                val total = humanizer.humanizeDelay(action.durationMs, action.randomMs, macro.humanizer)
                 runtime.log(LogLevel.INFO, "Tunggu ${total}ms")
                 if (total > 0) {
                     sleepWatchingStuck(total, macro, startedAt, maxDurationMs, depth)
@@ -759,6 +808,44 @@ class MacroRunner(
             is BranchRouterAction -> executeBranchRouterAction(action, macro, startedAt, maxDurationMs, depth)
 
             is GoToBranchAction -> executeGoToBranchAction(action, macro, startedAt, maxDurationMs, depth)
+
+            is VariableAction -> executeVariableAction(action, macro, startedAt, maxDurationMs, depth)
+
+            is CheckVariableAction -> executeCheckVariableAction(action, macro, startedAt, maxDurationMs, depth)
+
+            is NotifyAction -> {
+                val vars = mergedVariablesSnapshot()
+                val accName = currentAccount?.label.orEmpty()
+                val expandedTitle = FarmingStatsCalculator.expandNotifyTemplate(
+                    template = action.title.ifBlank { "Notifikasi Macro" },
+                    macroName = macro.name,
+                    loop = rootLoopNumber,
+                    actionsExecuted = sessionActionsCounter,
+                    accountLabel = accName,
+                    variables = vars
+                )
+                val expandedMessage = FarmingStatsCalculator.expandNotifyTemplate(
+                    template = action.message,
+                    macroName = macro.name,
+                    loop = rootLoopNumber,
+                    actionsExecuted = sessionActionsCounter,
+                    accountLabel = accName,
+                    variables = vars
+                )
+                runtime.log(LogLevel.INFO, "🔔 Notifikasi [${action.level.label}]: $expandedTitle — ${expandedMessage.take(80)}")
+                runtime.sendNotification(
+                    title = expandedTitle,
+                    message = expandedMessage,
+                    level = action.level,
+                    sendRemote = action.sendRemote,
+                    includeScreenshot = action.includeScreenshot,
+                    triggerPhoneAlarm = action.triggerPhoneAlarm
+                )
+                sessionActionsCounter++
+                runtime.onActionExecuted()
+                markProgress()
+                FlowControl.NEXT
+            }
 
             is LoopAction -> {
                 val times = action.count.coerceAtLeast(1)
@@ -894,15 +981,32 @@ class MacroRunner(
                     if (waitMs > 0) runtime.sleep(waitMs)
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     val scaledGesture = transform.scaleRecordedGesture(g)
-                    val blockedBy = if (activeBannedGuardMacro(macro) != null) {
+                    val blockedHit = if (activeBannedGuardMacro(macro) != null) {
                         scaledGesture.strokes.firstNotNullOfOrNull { stroke ->
                             if (stroke.points.size >= 2) {
-                                findBlockingBannedImage(macro, stroke.points[0], stroke.points[1])
+                                findBlockingBannedHit(macro, stroke.points[0], stroke.points[1])?.let { hit ->
+                                    Triple(hit, stroke.points[0], stroke.points[1])
+                                }
                             } else null
                         }
                     } else null
-                    if (blockedBy != null) {
-                        runtime.log(LogLevel.WARN, "⛔ Gestur rekaman DIBLOKIR oleh Guard Banned Gambar ('$blockedBy')!")
+                    if (blockedHit != null) {
+                        val (hit, bx, by) = blockedHit
+                        if (runtime.isVisualDebugEnabled()) {
+                            runtime.onVisualDebug(
+                                VisualDebugEvent.BannedBlocked(
+                                    x = bx,
+                                    y = by,
+                                    imageName = hit.imageName,
+                                    left = hit.box.x,
+                                    top = hit.box.y,
+                                    right = hit.box.x + hit.box.width,
+                                    bottom = hit.box.y + hit.box.height
+                                )
+                            )
+                        }
+                        runtime.log(LogLevel.WARN, "⛔ Gestur rekaman DIBLOKIR oleh Guard Banned Gambar ('${hit.imageName}')!")
+                        runtime.onBannedBlocked(hit.imageName)
                         continue
                     }
                     if (runtime.playRecordedGesture(scaledGesture, speed)) {
@@ -1194,11 +1298,26 @@ class MacroRunner(
             val scaleSuffix = if (abs(usedScale - 1.0) >= 0.02) " (skala ${(usedScale * 100).toInt()}%)" else ""
             runtime.log(LogLevel.IMAGE, "Ditemukan '${action.imageName}' di (${matched.centerX},${matched.centerY}) $pct%$scaleSuffix")
             runtime.onMatchFound(matched, "${action.imageName} $pct%")
+            if (runtime.isVisualDebugEnabled()) {
+                val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+                runtime.onVisualDebug(
+                    VisualDebugEvent.ImageCheck(
+                        label = action.imageName.substringAfterLast('/').removeSuffix(".png"),
+                        found = true,
+                        score = matched.score.toFloat(),
+                        threshold = action.threshold,
+                        left = matched.x,
+                        top = matched.y,
+                        right = matched.x + matched.width,
+                        bottom = matched.y + matched.height,
+                        scanRegion = action.region?.let { clickTransform.scaleRegion(it) }
+                    )
+                )
+            }
             markProgress()
             if (action.clickOnFound) {
                 val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
                 val (ox, oy) = clickTransform.scaleDelta(action.offsetX, action.offsetY)
-                val jitterScaled = clickTransform.scaleDistance(macro.jitterPx)
                 val taps = action.clickCount.coerceIn(1, 50)
                 val intervalMs = action.clickIntervalMs.coerceIn(0L, 5000L)
                 val durationMs = action.clickDurationMs.coerceIn(10L, 2000L)
@@ -1208,13 +1327,13 @@ class MacroRunner(
                 for (t in 0 until taps) {
                     if (runtime.isStopped()) return FlowControl.STOP_MACRO
                     runtime.waitIfPaused()
-                    val (tx, ty) = applyJitter(matched.centerX + ox, matched.centerY + oy, jitterScaled)
-                    if (guardedClick(macro, tx, ty, durationMs)) {
+                    if (guardedClick(macro, matched.centerX + ox, matched.centerY + oy, durationMs, label = action.imageName.substringAfterLast('/').removeSuffix(".png"))) {
                         runtime.onActionExecuted()
                         markProgress()
                     }
                     if (t < taps - 1 && intervalMs > 0L) {
-                        val waitFlow = sleepWatchingStuck(intervalMs, macro, startedAt, maxDurationMs, depth)
+                        val intv = humanizer.humanizeDelay(intervalMs, 0L, macro.humanizer)
+                        val waitFlow = sleepWatchingStuck(intv, macro, startedAt, maxDurationMs, depth)
                         if (waitFlow != FlowControl.NEXT) return waitFlow
                     }
                 }
@@ -1226,6 +1345,24 @@ class MacroRunner(
         } else {
             val reqPct = (action.threshold * 100).toInt()
             val maxPct = (bestScore * 100).toInt()
+            if (runtime.isVisualDebugEnabled() && sawFrame) {
+                val dbgTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
+                val scanBox = action.region?.let { dbgTransform.scaleRegion(it) }
+                    ?: Region(24, 120, (runtime.screenWidth - 24).coerceAtLeast(100), (runtime.screenHeight - 120).coerceAtLeast(100))
+                runtime.onVisualDebug(
+                    VisualDebugEvent.ImageCheck(
+                        label = action.imageName.substringAfterLast('/').removeSuffix(".png"),
+                        found = false,
+                        score = bestScore.toFloat().coerceIn(0f, 1f),
+                        threshold = action.threshold,
+                        left = scanBox.left,
+                        top = scanBox.top,
+                        right = scanBox.right,
+                        bottom = scanBox.bottom,
+                        scanRegion = action.region?.let { dbgTransform.scaleRegion(it) }
+                    )
+                )
+            }
             if (!sawFrame) {
                 runtime.log(LogLevel.WARN, "Deteksi '${action.imageName}' gagal: Tangkap Layar belum aktif / belum ada frame.")
             } else if (avoidedByBanCount > 0) {
@@ -1378,6 +1515,19 @@ class MacroRunner(
                             break
                         }
                     }
+                    BranchConditionType.VARIABLE -> {
+                        val vName = normalizeVarName(rule.variableName)
+                        if (vName.isBlank()) continue
+                        val actual = readAnyVariable(vName)
+                        val rhsName = normalizeVarName(rule.variableCompareToVar)
+                        val expected = if (rhsName.isNotBlank()) readAnyVariable(rhsName) else rule.variableTargetValue
+                        if (rule.variableOp.evaluate(actual, expected)) {
+                            matchedRule = rule
+                            matchedPoint = null
+                            matchedDesc = "$rLabel (var $vName=${formatPlainNumber(actual)} ${rule.variableOp.symbol} ${formatPlainNumber(expected)})"
+                            break
+                        }
+                    }
                 }
             }
 
@@ -1390,13 +1540,9 @@ class MacroRunner(
             runtime.log(LogLevel.INFO, "✅ Cek Arah cocok: $matchedDesc")
             markProgress()
             if (matchedRule.clickOnFound && matchedPoint != null) {
-                val clickTransform = ResolutionScaler.forMacro(macro, runtime.screenWidth, runtime.screenHeight)
-                val (tx, ty) = applyJitter(
-                    matchedPoint.first,
-                    matchedPoint.second,
-                    clickTransform.scaleDistance(macro.jitterPx)
-                )
-                if (guardedClick(macro, tx, ty, 60L)) runtime.onActionExecuted()
+                if (guardedClick(macro, matchedPoint.first, matchedPoint.second, 60L, label = matchedRule.label.ifBlank { "Rute" })) {
+                    runtime.onActionExecuted()
+                }
             }
             return applyBranchOutcome(
                 outcome = matchedRule.outcome,
@@ -1929,13 +2075,8 @@ class MacroRunner(
         suspend fun performInteraction(aimX: Int, aimY: Int, sw: Int, sh: Int, hit: TrackHit): Boolean {
             val clickTransform = ResolutionScaler.forMacro(macro, sw, sh)
             val (ox, oy) = clickTransform.scaleDelta(action.offsetX, action.offsetY)
-            val (rawGx, rawGy) = applyJitter(
-                (aimX + ox).coerceIn(1, (sw - 2).coerceAtLeast(1)),
-                (aimY + oy).coerceIn(1, (sh - 2).coerceAtLeast(1)),
-                clickTransform.scaleDistance(macro.jitterPx)
-            )
-            val gx = rawGx.coerceIn(1, (sw - 2).coerceAtLeast(1))
-            val gy = rawGy.coerceIn(1, (sh - 2).coerceAtLeast(1))
+            val gx = (aimX + ox).coerceIn(1, (sw - 2).coerceAtLeast(1))
+            val gy = (aimY + oy).coerceIn(1, (sh - 2).coerceAtLeast(1))
             val pct = (hit.match.score * 100).toInt()
             val modeTag = when {
                 action.trackAnyMotion -> " [bebas warna]"
@@ -1948,7 +2089,7 @@ class MacroRunner(
                 TrackInteractionMode.TAP_CONTINUOUS -> {
                     val tapDur = action.tapDurationMs.coerceIn(20L, 400L)
                     runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Tap ($gx,$gy)$leadTag")
-                    guardedClick(macro, gx, gy, tapDur)
+                    guardedClick(macro, gx, gy, tapDur, label = hit.label)
                 }
                 TrackInteractionMode.DRAG_TO_POINT -> {
                     val (destX, destY) = clickTransform.scalePoint(action.targetX, action.targetY)
@@ -1956,7 +2097,7 @@ class MacroRunner(
                     val cy = destY.coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
                     runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
-                    runtime.swipe(gx, gy, cx, cy, dur)
+                    humanizedSwipe(macro, gx, gy, cx, cy, dur, label = hit.label)
                 }
                 TrackInteractionMode.DRAG_BY_OFFSET -> {
                     val (ddx, ddy) = clickTransform.scaleDelta(action.dragOffsetX, action.dragOffsetY)
@@ -1964,7 +2105,7 @@ class MacroRunner(
                     val cy = (gy + ddy).coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
                     runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($gx,$gy)→($cx,$cy) ${dur}ms$leadTag")
-                    runtime.swipe(gx, gy, cx, cy, dur)
+                    humanizedSwipe(macro, gx, gy, cx, cy, dur, label = hit.label)
                 }
                 TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT -> {
                     val (sx, sy) = clickTransform.scalePoint(action.targetX, action.targetY)
@@ -1972,7 +2113,7 @@ class MacroRunner(
                     val cy = sy.coerceIn(1, (sh - 2).coerceAtLeast(1))
                     val dur = action.dragDurationMs.coerceIn(60L, 5000L)
                     runtime.log(LogLevel.ACTION, "Kejar '${hit.label}' $pct%$modeTag → Drag ($cx,$cy)→($gx,$gy) ${dur}ms$leadTag")
-                    runtime.swipe(cx, cy, gx, gy, dur)
+                    humanizedSwipe(macro, cx, cy, gx, gy, dur, label = hit.label)
                 }
             }
             if (ok) {
@@ -2195,10 +2336,12 @@ class MacroRunner(
         val (sx, sy) = transform.scalePoint(action.x, action.y)
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var matched = false
+        var lastArgb: Int? = null
         while (!runtime.isStopped()) {
             runtime.waitIfPaused()
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
             val argb = runtime.samplePixelArgb(sx, sy)
+            if (argb != null) lastArgb = argb
             if (argb != null && ColorUtil.matches(argb, action.color, action.tolerance)) {
                 matched = true
                 break
@@ -2207,12 +2350,23 @@ class MacroRunner(
             runtime.sleep(100L)
         }
 
+        if (runtime.isVisualDebugEnabled()) {
+            runtime.onVisualDebug(
+                VisualDebugEvent.ColorCheck(
+                    x = sx,
+                    y = sy,
+                    matched = matched,
+                    actualHex = lastArgb?.let { ColorUtil.toHex(it) } ?: "------",
+                    targetHex = action.color
+                )
+            )
+        }
+
         if (matched) {
             runtime.log(LogLevel.COLOR, "Warna ${action.color} cocok di ($sx,$sy)")
             markProgress()
             if (action.clickOnFound) {
-                val (tx, ty) = applyJitter(sx, sy, transform.scaleDistance(macro.jitterPx))
-                if (guardedClick(macro, tx, ty, 50L)) runtime.onActionExecuted()
+                if (guardedClick(macro, sx, sy, 50L, label = "Warna ${action.color}")) runtime.onActionExecuted()
             }
             return handleBranch(
                 action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
@@ -2240,6 +2394,7 @@ class MacroRunner(
         val scaledRegion = action.region?.let { transform.scaleRegion(it) }
         val deadline = runtime.nowMs() + action.timeoutMs.coerceAtLeast(0L)
         var lastOutcome = TextConditionEvaluator.evaluate(action, emptyList())
+        var lastBlocks: List<OcrBlock> = emptyList()
         var sawBlocks = false
 
         fun updateBestOutcome(candidate: com.example.vision.TextMatchOutcome) {
@@ -2257,7 +2412,10 @@ class MacroRunner(
             checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
 
             val fastBlocks = runtime.recognizeText(scaledRegion, enhanced = false)
-            if (fastBlocks.isNotEmpty()) sawBlocks = true
+            if (fastBlocks.isNotEmpty()) {
+                sawBlocks = true
+                lastBlocks = fastBlocks
+            }
             val fastOutcome = TextConditionEvaluator.evaluate(action, fastBlocks)
             updateBestOutcome(fastOutcome)
             if (fastOutcome.matched) break
@@ -2267,6 +2425,7 @@ class MacroRunner(
             if (enhancedBlocks.isNotEmpty()) {
                 sawBlocks = true
                 val combined = (fastBlocks + enhancedBlocks).distinctBy { "${it.text.lowercase()}|${it.left / 12}|${it.top / 12}" }
+                lastBlocks = combined
                 val enhOutcome = TextConditionEvaluator.evaluate(action, combined)
                 updateBestOutcome(enhOutcome)
                 if (enhOutcome.matched) break
@@ -2274,6 +2433,29 @@ class MacroRunner(
 
             if (runtime.nowMs() >= deadline) break
             runtime.sleep(200L)
+        }
+
+        if (runtime.isVisualDebugEnabled()) {
+            val preview = when {
+                lastOutcome.matched && action.compareMode.isNumeric && lastOutcome.parsedNumber != null ->
+                    formatPlainNumber(lastOutcome.parsedNumber!!)
+                lastOutcome.matched -> lastOutcome.matchedText.take(28)
+                else -> lastOutcome.allText.take(28).ifBlank { "(kosong)" }
+            }
+            val label = if (action.compareMode.isNumeric) {
+                "OCR ${action.compareMode.shortLabel} ${formatPlainNumber(action.targetNumber)}"
+            } else {
+                "OCR '${action.query.take(16)}'"
+            }
+            runtime.onVisualDebug(
+                VisualDebugEvent.OcrCheck(
+                    label = label,
+                    matched = lastOutcome.matched,
+                    readPreview = preview,
+                    region = scaledRegion,
+                    blocks = lastBlocks
+                )
+            )
         }
 
         if (lastOutcome.matched) {
@@ -2299,10 +2481,7 @@ class MacroRunner(
                 val cy = lastOutcome.matchedBlock?.centerY
                     ?: scaledRegion?.let { it.top + it.height / 2 }
                     ?: (liveH / 2)
-                val (rawTx, rawTy) = applyJitter(cx, cy, transform.scaleDistance(macro.jitterPx))
-                val tx = rawTx.coerceIn(1, liveW - 2)
-                val ty = rawTy.coerceIn(1, liveH - 2)
-                if (guardedClick(macro, tx, ty, 80L)) runtime.onActionExecuted()
+                if (guardedClick(macro, cx, cy, 80L, label = "OCR")) runtime.onActionExecuted()
             }
             return handleBranch(
                 action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
@@ -2378,17 +2557,20 @@ class MacroRunner(
         return found
     }
 
+    private data class BannedHit(val imageName: String, val box: MatchResult)
+
     /**
      * Checks the always-active Banned Image Guard before dispatching any click at ([clickX], [clickY]).
-     * Returns the matched banned image name if the click must be BLOCKED, or null when safe to click.
+     * Returns the matched banned image & bounding box if the click must be BLOCKED, or null when safe.
      */
-    private fun findBlockingBannedImage(macro: Macro, clickX: Int, clickY: Int): String? {
+    private fun findBlockingBannedHit(macro: Macro, clickX: Int, clickY: Int): BannedHit? {
         val guard = activeBannedGuardMacro(macro) ?: return null
         val frame = runtime.captureFrame() ?: return null
         val boxes = detectGlobalBannedBoxes(guard, frame)
         if (boxes.isEmpty()) return null
         if (guard.bannedMode == BannedImageMode.BLOCK_IF_PRESENT) {
-            return boxes.first().first
+            val first = boxes.first()
+            return BannedHit(first.first, first.second)
         }
         val guardTransform = ResolutionScaler.forMacro(guard, frame.width, frame.height)
         val avoidPx = guardTransform.scaleDistance(guard.bannedAvoidRadiusPx.coerceAtLeast(0))
@@ -2400,20 +2582,368 @@ class MacroRunner(
             if (fx in (b.x - avoidPx)..(b.x + b.width + avoidPx) &&
                 fy in (b.y - avoidPx)..(b.y + b.height + avoidPx)
             ) {
-                return bName
+                return BannedHit(bName, b)
             }
         }
         return null
     }
 
-    /** Always-active guarded click wrapper used across all macro actions. */
-    private suspend fun guardedClick(macro: Macro, x: Int, y: Int, durationMs: Long): Boolean {
-        val blockedBy = findBlockingBannedImage(macro, x, y)
-        if (blockedBy != null) {
-            runtime.log(LogLevel.WARN, "⛔ Klik ($x, $y) DIBLOKIR oleh Guard Banned Gambar ('$blockedBy')!")
+    /**
+     * Always-active Humanizer + Banned Guard click wrapper used across all macro actions.
+     * Applies Gaussian scatter & natural tap hold duration (when Humanizer is enabled), checks
+     * Banned Image Guard, emits Live Visual Debug events, and dispatches the tap.
+     */
+    private suspend fun guardedClick(
+        macro: Macro,
+        x: Int,
+        y: Int,
+        durationMs: Long,
+        isLongPress: Boolean = false,
+        label: String = ""
+    ): Boolean {
+        val liveW = runtime.screenWidth.coerceAtLeast(4)
+        val liveH = runtime.screenHeight.coerceAtLeast(4)
+        val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
+        val legacyJitter = transform.scaleDistance(macro.jitterPx)
+        val click = humanizer.humanizeClick(
+            x = x,
+            y = y,
+            baseDurationMs = durationMs,
+            screenW = liveW,
+            screenH = liveH,
+            legacyJitterPx = legacyJitter,
+            rawConfig = macro.humanizer,
+            isLongPress = isLongPress
+        )
+        val blocked = findBlockingBannedHit(macro, click.x, click.y)
+        if (blocked != null) {
+            if (runtime.isVisualDebugEnabled()) {
+                runtime.onVisualDebug(
+                    VisualDebugEvent.BannedBlocked(
+                        x = click.x,
+                        y = click.y,
+                        imageName = blocked.imageName,
+                        left = blocked.box.x,
+                        top = blocked.box.y,
+                        right = blocked.box.x + blocked.box.width,
+                        bottom = blocked.box.y + blocked.box.height
+                    )
+                )
+            }
+            runtime.log(LogLevel.WARN, "⛔ Klik (${click.x}, ${click.y}) DIBLOKIR oleh Guard Banned Gambar ('${blocked.imageName}')!")
+            runtime.onBannedBlocked(blocked.imageName)
             return false
         }
-        return runtime.click(x, y, durationMs)
+        if (isLongPress) {
+            runtime.log(LogLevel.ACTION, "Tahan (${click.x},${click.y}) ${click.durationMs}ms")
+        } else if (label.startsWith("Klik")) {
+            val hTag = if (click.humanized) " [${click.durationMs}ms]" else ""
+            runtime.log(LogLevel.ACTION, "$label di (${click.x},${click.y})$hTag")
+        }
+        if (runtime.isVisualDebugEnabled()) {
+            runtime.onVisualDebug(
+                VisualDebugEvent.TapPoint(
+                    x = click.x,
+                    y = click.y,
+                    label = label,
+                    humanized = click.humanized
+                )
+            )
+        }
+        val ok = runtime.click(click.x, click.y, click.durationMs)
+        if (ok) sessionActionsCounter++
+        return ok
+    }
+
+    /** Humanizer-aware swipe wrapper supporting curved quadratic Bezier arcs and Live Visual Debug telemetry. */
+    private suspend fun humanizedSwipe(
+        macro: Macro,
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        durationMs: Long,
+        label: String = ""
+    ): Boolean {
+        val liveW = runtime.screenWidth.coerceAtLeast(4)
+        val liveH = runtime.screenHeight.coerceAtLeast(4)
+        val sw = humanizer.humanizeSwipe(
+            x1 = x1,
+            y1 = y1,
+            x2 = x2,
+            y2 = y2,
+            baseDurationMs = durationMs,
+            screenW = liveW,
+            screenH = liveH,
+            rawConfig = macro.humanizer
+        )
+        if (label == "Swipe") {
+            val curveTag = if (sw.curved) " [Bezier]" else ""
+            runtime.log(LogLevel.ACTION, "Swipe (${sw.x1},${sw.y1}) → (${sw.x2},${sw.y2}) ${sw.durationMs}ms$curveTag")
+        }
+        if (runtime.isVisualDebugEnabled()) {
+            runtime.onVisualDebug(
+                VisualDebugEvent.SwipePath(
+                    x1 = sw.x1,
+                    y1 = sw.y1,
+                    cx = sw.cx,
+                    cy = sw.cy,
+                    x2 = sw.x2,
+                    y2 = sw.y2,
+                    curved = sw.curved,
+                    label = label
+                )
+            )
+        }
+        val ok = if (sw.curved) {
+            runtime.swipeCurved(sw.x1, sw.y1, sw.cx, sw.cy, sw.x2, sw.y2, sw.durationMs)
+        } else {
+            runtime.swipe(sw.x1, sw.y1, sw.x2, sw.y2, sw.durationMs)
+        }
+        if (ok) sessionActionsCounter++
+        return ok
+    }
+
+    /** Triggers a natural Humanizer "Human Break" AFK pause when scheduled; updates Watchdog progress so Watchdog never misfires. */
+    private suspend fun checkHumanBreak(
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl? {
+        if (depth != 0 || inStuckRecovery || inAccountSwitchFlow) return null
+        if (nextHumanBreakAtMs <= 0L) return null
+        val now = runtime.nowMs()
+        if (now < nextHumanBreakAtMs) return null
+
+        val breakDurMs = humanizer.nextBreakDurationMs(macro.humanizer)
+        if (breakDurMs <= 0L) {
+            nextHumanBreakAtMs = 0L
+            return null
+        }
+
+        val totalSec = ((breakDurMs + 999L) / 1000L).toInt().coerceAtLeast(1)
+        runtime.log(LogLevel.INFO, "☕ Human Break dimulai (${totalSec} dtk) — istirahat alami agar terlihat seperti manusia...")
+        runtime.onHumanBreakStarted(totalSec)
+        var remMs = breakDurMs
+        try {
+            while (remMs > 0L && !runtime.isStopped()) {
+                runtime.waitIfPaused()
+                if (runtime.nowMs() - startedAt >= maxDurationMs) {
+                    return FlowControl.STOP_MACRO
+                }
+                val remSec = ((remMs + 999L) / 1000L).toInt().coerceAtLeast(1)
+                runtime.onHumanBreakChanged(remSec)
+                val slice = minOf(remMs, 1000L)
+                runtime.sleep(slice)
+                remMs -= slice
+                markProgress()
+            }
+        } finally {
+            runtime.onHumanBreakChanged(0)
+        }
+
+        if (runtime.isStopped()) return FlowControl.STOP_MACRO
+        val nextInterval = humanizer.nextBreakIntervalMs(macro.humanizer)
+        nextHumanBreakAtMs = if (nextInterval > 0L) runtime.nowMs() + nextInterval else 0L
+        runtime.log(LogLevel.INFO, "☕ Human Break selesai — melanjutkan macro.")
+        markProgress()
+        return null
+    }
+
+    // ---- Visual Variables & Counters Engine (No-Code) ----
+
+    private fun normalizeVarName(raw: String): String = raw.trim().lowercase()
+
+    private fun activeAccountVarKey(): String = currentAccount?.id?.takeIf { it.isNotBlank() } ?: "_default"
+
+    private fun readVariable(name: String, scope: VariableScope): Double {
+        val key = normalizeVarName(name)
+        if (key.isBlank()) return 0.0
+        return when (scope) {
+            VariableScope.SESSION -> sessionVariables[key] ?: 0.0
+            VariableScope.PER_ACCOUNT -> accountVariables[activeAccountVarKey()]?.get(key) ?: 0.0
+        }
+    }
+
+    private fun readAnyVariable(name: String): Double {
+        val key = normalizeVarName(name)
+        if (key.isBlank()) return 0.0
+        return accountVariables[activeAccountVarKey()]?.get(key) ?: sessionVariables[key] ?: 0.0
+    }
+
+    private fun writeVariable(name: String, scope: VariableScope, value: Double) {
+        val key = normalizeVarName(name)
+        if (key.isBlank()) return
+        val safe = if (value.isFinite()) value else 0.0
+        when (scope) {
+            VariableScope.SESSION -> sessionVariables[key] = safe
+            VariableScope.PER_ACCOUNT -> accountVariables.getOrPut(activeAccountVarKey()) { LinkedHashMap() }[key] = safe
+        }
+        publishVariablesSnapshot()
+    }
+
+    private fun mergedVariablesSnapshot(): Map<String, Double> {
+        val merged = LinkedHashMap<String, Double>(sessionVariables.size + 4)
+        merged.putAll(sessionVariables)
+        accountVariables[activeAccountVarKey()]?.forEach { (k, v) ->
+            val displayKey = if (k in merged) "👤$k" else k
+            merged[displayKey] = v
+        }
+        return merged
+    }
+
+    private fun publishVariablesSnapshot() {
+        runtime.onVariablesChanged(mergedVariablesSnapshot())
+    }
+
+    private suspend fun executeVariableAction(
+        action: VariableAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        if (action.operation == VariableOperation.RESET_ALL) {
+            when (action.scope) {
+                VariableScope.SESSION -> sessionVariables.clear()
+                VariableScope.PER_ACCOUNT -> accountVariables[activeAccountVarKey()]?.clear()
+            }
+            publishVariablesSnapshot()
+            runtime.log(LogLevel.INFO, "🔄 Semua variabel (${action.scope.shortLabel}) direset ke 0.")
+            runtime.onActionExecuted()
+            markProgress()
+            return FlowControl.NEXT
+        }
+
+        val key = normalizeVarName(action.variableName)
+        if (key.isBlank()) {
+            runtime.log(LogLevel.WARN, "Variabel dilewati: nama variabel masih kosong.")
+            return FlowControl.NEXT
+        }
+
+        when (action.operation) {
+            VariableOperation.SET -> {
+                writeVariable(key, action.scope, action.value)
+                runtime.log(LogLevel.INFO, "🔢 Variabel '$key' = ${formatPlainNumber(action.value)}")
+            }
+            VariableOperation.ADD -> {
+                val next = readVariable(key, action.scope) + action.value
+                writeVariable(key, action.scope, next)
+                runtime.log(LogLevel.INFO, "🔢 Variabel '$key' + ${formatPlainNumber(action.value)} → ${formatPlainNumber(next)}")
+            }
+            VariableOperation.SUBTRACT -> {
+                val next = readVariable(key, action.scope) - action.value
+                writeVariable(key, action.scope, next)
+                runtime.log(LogLevel.INFO, "🔢 Variabel '$key' - ${formatPlainNumber(action.value)} → ${formatPlainNumber(next)}")
+            }
+            VariableOperation.MULTIPLY -> {
+                val next = readVariable(key, action.scope) * action.value
+                writeVariable(key, action.scope, next)
+                runtime.log(LogLevel.INFO, "🔢 Variabel '$key' × ${formatPlainNumber(action.value)} → ${formatPlainNumber(next)}")
+            }
+            VariableOperation.READ_OCR_NUMBER -> {
+                val liveW = runtime.screenWidth.coerceAtLeast(4)
+                val liveH = runtime.screenHeight.coerceAtLeast(4)
+                val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
+                val scaledRegion = action.region?.let { transform.scaleRegion(it) }
+                val deadline = runtime.nowMs() + action.ocrTimeoutMs.coerceAtLeast(0L)
+                var parsedNumber: Double? = null
+                var lastBlocks: List<OcrBlock> = emptyList()
+
+                while (!runtime.isStopped()) {
+                    runtime.waitIfPaused()
+                    checkStuckRecovery(macro, startedAt, maxDurationMs, depth)?.let { return it }
+
+                    val fastBlocks = runtime.recognizeText(scaledRegion, enhanced = false)
+                    if (fastBlocks.isNotEmpty()) lastBlocks = fastBlocks
+                    val fastNums = TextConditionEvaluator.mergeSameLineBlocks(fastBlocks)
+                        .flatMap { TextConditionEvaluator.extractNumbers(it.text) }
+                        .ifEmpty { fastBlocks.flatMap { TextConditionEvaluator.extractNumbers(it.text) } }
+                    if (fastNums.isNotEmpty()) {
+                        parsedNumber = fastNums.first()
+                        break
+                    }
+
+                    val enhancedBlocks = runtime.recognizeText(scaledRegion, enhanced = true)
+                    if (enhancedBlocks.isNotEmpty()) {
+                        val combined = (fastBlocks + enhancedBlocks).distinctBy { "${it.text.lowercase()}|${it.left / 12}|${it.top / 12}" }
+                        lastBlocks = combined
+                        val enhNums = TextConditionEvaluator.mergeSameLineBlocks(combined)
+                            .flatMap { TextConditionEvaluator.extractNumbers(it.text) }
+                            .ifEmpty { combined.flatMap { TextConditionEvaluator.extractNumbers(it.text) } }
+                        if (enhNums.isNotEmpty()) {
+                            parsedNumber = enhNums.first()
+                            break
+                        }
+                    }
+
+                    if (runtime.nowMs() >= deadline) break
+                    runtime.sleep(200L)
+                }
+
+                if (runtime.isVisualDebugEnabled()) {
+                    runtime.onVisualDebug(
+                        VisualDebugEvent.OcrCheck(
+                            label = "Var:$key",
+                            matched = parsedNumber != null,
+                            readPreview = parsedNumber?.let { formatPlainNumber(it) } ?: "(kosong)",
+                            region = scaledRegion,
+                            blocks = lastBlocks
+                        )
+                    )
+                }
+
+                if (parsedNumber != null) {
+                    writeVariable(key, action.scope, parsedNumber)
+                    runtime.log(LogLevel.INFO, "🔢 Variabel '$key' ← OCR = ${formatPlainNumber(parsedNumber)}")
+                } else if (action.useFallbackOnOcrFail) {
+                    writeVariable(key, action.scope, action.fallbackValue)
+                    runtime.log(LogLevel.WARN, "⚠️ OCR angka untuk '$key' kosong — memakai nilai cadangan ${formatPlainNumber(action.fallbackValue)}.")
+                } else {
+                    runtime.log(LogLevel.WARN, "⚠️ OCR angka untuk '$key' tidak terbaca — mempertahankan nilai ${formatPlainNumber(readVariable(key, action.scope))}.")
+                }
+            }
+            VariableOperation.RESET_ALL -> Unit
+        }
+
+        runtime.onActionExecuted()
+        markProgress()
+        return FlowControl.NEXT
+    }
+
+    private suspend fun executeCheckVariableAction(
+        action: CheckVariableAction,
+        macro: Macro,
+        startedAt: Long,
+        maxDurationMs: Long,
+        depth: Int
+    ): FlowControl {
+        val key = normalizeVarName(action.variableName)
+        if (key.isBlank()) {
+            runtime.log(LogLevel.WARN, "Cek Variabel dilewati: nama variabel masih kosong.")
+            return FlowControl.NEXT
+        }
+        val actual = readVariable(key, action.scope)
+        val rhsKey = normalizeVarName(action.compareToVariable)
+        val expected = if (rhsKey.isNotBlank()) readVariable(rhsKey, action.scope) else action.targetValue
+        val rhsText = if (rhsKey.isNotBlank()) "$rhsKey (${formatPlainNumber(expected)})" else formatPlainNumber(expected)
+        val matched = action.operator.evaluate(actual, expected)
+
+        if (matched) {
+            runtime.log(LogLevel.INFO, "✅ Cek Variabel: $key (${formatPlainNumber(actual)}) ${action.operator.symbol} $rhsText → BENAR")
+            markProgress()
+            return handleBranch(
+                action.thenActions, action.foundMode, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.foundBranchId
+            )
+        } else {
+            runtime.log(LogLevel.INFO, "ℹ️ Cek Variabel: $key (${formatPlainNumber(actual)}) ${action.operator.symbol} $rhsText → SALAH")
+            return handleBranch(
+                action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                targetBranchId = action.notFoundBranchId
+            )
+        }
     }
 
     // ---- Universal Multi-Account Switcher Engine (OCR + Auto-Scroll & Clone App / Hybrid) ----
@@ -2437,6 +2967,7 @@ class MacroRunner(
             val idx = enabled.indexOfFirst { it.id == account.id }.let { if (it >= 0) it + 1 else 1 }
             runtime.onActiveAccountChanged(idx, enabled.size, account)
         }
+        publishVariablesSnapshot()
     }
 
     private fun pickInitialAccount(
@@ -2574,6 +3105,7 @@ class MacroRunner(
             if (switchFlow == FlowControl.STOP_MACRO || runtime.isStopped()) return FlowControl.STOP_MACRO
 
             if (!lastAccountSelectFailed) {
+                runtime.onAccountSwitched(chosen.label)
                 markProgress()
                 return if (restartAfterSwitch) FlowControl.RESTART_ROOT else FlowControl.NEXT
             }
@@ -2773,11 +3305,22 @@ class MacroRunner(
             if (keyword.isNotBlank()) {
                 val blocks = runtime.recognizeText(scaledRegion, enhanced = true)
                 val matched = findMatchingAccountBlock(blocks, keyword, action.matchMode)
+                if (runtime.isVisualDebugEnabled()) {
+                    runtime.onVisualDebug(
+                        VisualDebugEvent.OcrCheck(
+                            label = "Akun: ${target.label.take(16)}",
+                            matched = matched != null,
+                            readPreview = matched?.text?.take(28) ?: blocks.joinToString(" ") { it.text }.take(28).ifBlank { "(kosong)" },
+                            region = scaledRegion,
+                            blocks = blocks
+                        )
+                    )
+                }
                 if (matched != null) {
                     val tx = (matched.centerX + offsetX).coerceIn(1, liveW - 2)
                     val ty = (matched.centerY + offsetY).coerceIn(1, liveH - 2)
                     runtime.log(LogLevel.INFO, "👤 Akun '${target.label}' ditemukan via OCR ('${matched.text}') → klik ($tx, $ty).")
-                    if (guardedClick(macro, tx, ty, 60L)) {
+                    if (guardedClick(macro, tx, ty, 60L, label = "Akun ${target.label}")) {
                         runtime.onActionExecuted()
                         markProgress()
                         return if (action.thenActions.isNotEmpty()) {
@@ -2821,7 +3364,7 @@ class MacroRunner(
                         val tx = ((m.centerX * scaleX).roundToInt() + offsetX).coerceIn(1, liveW - 2)
                         val ty = ((m.centerY * scaleY).roundToInt() + offsetY).coerceIn(1, liveH - 2)
                         runtime.log(LogLevel.INFO, "👤 Akun '${target.label}' ditemukan via gambar cadangan (${(m.score * 100).roundToInt()}%) → klik ($tx, $ty).")
-                        if (guardedClick(macro, tx, ty, 60L)) {
+                        if (guardedClick(macro, tx, ty, 60L, label = "Akun ${target.label}")) {
                             runtime.onActionExecuted()
                             markProgress()
                             return if (action.thenActions.isNotEmpty()) {
@@ -2865,7 +3408,7 @@ class MacroRunner(
             }
             scrollsUsedInCurrentDir++
             runtime.log(LogLevel.ACTION, "↕ Auto-Scroll akun #$scrollsUsedInCurrentDir (${if (reversed) "balik" else "maju"}): ($sx1,$sy1) → ($sx2,$sy2)")
-            runtime.swipe(sx1, sy1, sx2, sy2, action.scrollDurationMs.coerceIn(120L, 2000L))
+            humanizedSwipe(macro, sx1, sy1, sx2, sy2, action.scrollDurationMs.coerceIn(120L, 2000L), label = "Scroll Akun")
             markProgress()
             val settle = action.scrollSettleMs.coerceIn(100L, 5000L)
             if (settle > 0L && !runtime.isStopped()) {

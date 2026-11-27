@@ -691,6 +691,67 @@ class OverlayMacroSettingsView(
         val randomDelayField = addNumberRow(bodyContainer, "Acak jeda (+ms)", macro.randomDelayMs.toString())
         val maxMinField = addNumberRow(bodyContainer, "Stop otomatis (menit, 0=off)", macro.maxDurationMin.toString())
 
+        // Humanizer Engine quick preset switcher
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("🤖 Humanizer Engine (Anti-Deteksi Alami)"))
+        var chosenHumanizer = macro.humanizer
+        val hInfoTv = TextView(context).apply {
+            text = chosenHumanizer.preset.description
+            setTextColor(Color.parseColor("#94A3B8"))
+            textSize = 10f
+            setPadding(dp(2), 0, dp(2), dp(5))
+        }
+        val hRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+        }
+        val hBtns = mutableListOf<Pair<com.example.data.HumanizerPreset, TextView>>()
+        val isProOverlay = com.example.billing.PremiumStateHolder.isPremium.value
+        com.example.data.HumanizerPreset.entries.forEachIndexed { idx, preset ->
+            val proPreset = !com.example.billing.PremiumFeatureGate.isHumanizerConfigFree(
+                com.example.data.HumanizerConfig(preset = preset)
+            )
+            val locked = !isProOverlay && proPreset
+            val activeHex = when (preset) {
+                com.example.data.HumanizerPreset.OFF -> "#475569"
+                com.example.data.HumanizerPreset.NATURAL -> "#059669"
+                com.example.data.HumanizerPreset.STEALTH -> "#0891B2"
+                com.example.data.HumanizerPreset.CUSTOM -> "#7C3AED"
+            }
+            val btn = makeBtn(
+                if (locked) "🔒 ${preset.shortLabel}" else preset.shortLabel,
+                if (preset == chosenHumanizer.preset) activeHex else "#1E293B",
+                marginEndDp = 0
+            ) {
+                if (locked) {
+                    Toast.makeText(context, "🔒 Humanizer ${preset.shortLabel} khusus PRO (Mode Natural gratis!)", Toast.LENGTH_LONG).show()
+                    return@makeBtn
+                }
+                chosenHumanizer = when (preset) {
+                    com.example.data.HumanizerPreset.OFF -> chosenHumanizer.copy(preset = preset)
+                    com.example.data.HumanizerPreset.NATURAL -> chosenHumanizer.copy(preset = preset)
+                    com.example.data.HumanizerPreset.STEALTH -> chosenHumanizer.copy(preset = preset, humanBreakEnabled = true)
+                    com.example.data.HumanizerPreset.CUSTOM -> chosenHumanizer.effective().copy(preset = preset)
+                }
+                hInfoTv.text = preset.description
+                hBtns.forEach { (p, tv) ->
+                    val selHex = when (p) {
+                        com.example.data.HumanizerPreset.OFF -> "#475569"
+                        com.example.data.HumanizerPreset.NATURAL -> "#059669"
+                        com.example.data.HumanizerPreset.STEALTH -> "#0891B2"
+                        com.example.data.HumanizerPreset.CUSTOM -> "#7C3AED"
+                    }
+                    (tv.background as? GradientDrawable)?.setColor(Color.parseColor(if (p == chosenHumanizer.preset) selHex else "#1E293B"))
+                }
+            }
+            hBtns += preset to btn
+            hRow.addView(btn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = if (idx < com.example.data.HumanizerPreset.entries.lastIndex) dp(4) else 0
+            })
+        }
+        bodyContainer.addView(hRow)
+        bodyContainer.addView(hInfoTv)
+
         // Auto-Scale Resolusi Layar (All Devices)
         val scaleHolders = buildAutoScaleControls(standaloneSave = false)
 
@@ -756,7 +817,12 @@ class OverlayMacroSettingsView(
                 sourceWidth = (scaleHolders.srcWField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
                 sourceHeight = (scaleHolders.srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
                 autoScaleResolution = scaleHolders.autoScaleCheck.isChecked,
-                scaleMode = scaleHolders.getMode()
+                scaleMode = scaleHolders.getMode(),
+                humanizer = if (isProOverlay || com.example.billing.PremiumFeatureGate.isHumanizerConfigFree(chosenHumanizer)) {
+                    chosenHumanizer
+                } else {
+                    macro.humanizer
+                }
             )
             macro = updated
             onUpdateMacro(updated)
@@ -768,6 +834,7 @@ class OverlayMacroSettingsView(
     // ---- TAB 2: Complete Main Action Tree ----
 
     private fun buildActionList() {
+        val isPremiumPlan = com.example.billing.PremiumStateHolder.isPremium.value
         val branchScroll = HorizontalScrollView(context).apply {
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(6)
@@ -787,7 +854,6 @@ class OverlayMacroSettingsView(
             showCreateBranchInline = false
             rebuildBody()
         })
-        val isPremiumPlan = com.example.billing.PremiumStateHolder.isPremium.value
         macro.branches.forEach { b ->
             val isSel = selectedBranchId == b.id
             branchRow.addView(makeBtn(
@@ -1763,7 +1829,7 @@ class OverlayMacroSettingsView(
                 quickImageSwapActionId = action.id
                 rebuildBody()
             })
-        } else if (action is TextAction || action is SelectAccountAction || (action is TrackObjectAction && action.trackAnyMotion)) {
+        } else if (action is TextAction || action is SelectAccountAction || (action is com.example.data.VariableAction && action.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) || (action is TrackObjectAction && action.trackAnyMotion)) {
             row.addView(makeSmallIconBtn("📐", "#0369A1") {
                 onPickRegionOnScreen(action.id)
             })
@@ -1997,6 +2063,7 @@ class OverlayMacroSettingsView(
             listOf(
                 ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE,
                 ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT,
+                ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE, ActionKind.NOTIFY,
                 ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
                 ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR,
                 ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
@@ -2011,10 +2078,10 @@ class OverlayMacroSettingsView(
                 setPadding(dp(10), dp(7), dp(10), dp(7))
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor(if (isLockedByPlan) "#151A2B" else "#1E293B"))
-                    cornerRadius = dp(10).toFloat()
                     if (isLockedByPlan) {
                         setStroke(dp(1), Color.parseColor("#78350F"))
                     }
+                    cornerRadius = dp(10).toFloat()
                 }
                 layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                     bottomMargin = dp(5)
@@ -3588,6 +3655,294 @@ class OverlayMacroSettingsView(
                             launchWaitMs = (launchWaitF.text.toString().toLongOrNull() ?: sa.launchWaitMs).coerceIn(0L, 60_000L),
                             notFound = notFoundMode,
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: sa.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is com.example.data.VariableAction -> {
+                var op = action.operation
+                var scope = action.scope
+                var useRegion = action.region != null
+
+                val nameF = addTextRow(bodyContainer, "Nama Variabel", action.variableName)
+
+                bodyContainer.addView(sectionLabel("Operasi"))
+                val opBtns = mutableListOf<Pair<com.example.data.VariableOperation, TextView>>()
+                com.example.data.VariableOperation.entries.chunked(2).forEach { pair ->
+                    val r = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    pair.forEachIndexed { idx, item ->
+                        val tv = makeBtn(item.label, if (item == op) "#7C3AED" else "#1E293B", marginEndDp = 0) {
+                            op = item
+                            opBtns.forEach { (k, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == op) "#7C3AED" else "#1E293B"))
+                            }
+                        }
+                        opBtns += item to tv
+                        r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(r)
+                }
+
+                bodyContainer.addView(sectionLabel("Cakupan"))
+                val scBtns = mutableListOf<Pair<com.example.data.VariableScope, TextView>>()
+                val scRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                com.example.data.VariableScope.entries.forEachIndexed { idx, sc ->
+                    val tv = makeBtn(sc.label, if (sc == scope) "#0891B2" else "#1E293B", marginEndDp = 0) {
+                        scope = sc
+                        scBtns.forEach { (k, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == scope) "#0891B2" else "#1E293B"))
+                        }
+                    }
+                    scBtns += sc to tv
+                    scRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < com.example.data.VariableScope.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(scRow)
+
+                val valStr = if (action.value == action.value.toLong().toDouble()) action.value.toLong().toString() else action.value.toString()
+                val valF = addTextRow(bodyContainer, "Nilai / Tambahan", valStr)
+                addPickTargetBtn("📐 Pilih Area Angka OCR di Layar (untuk Baca OCR)") {
+                    onPickRegionOnScreen(action.id)
+                }
+                val regionCheck = CheckBox(context).apply {
+                    text = if (action.region != null) {
+                        "Pakai area OCR (${action.region!!.left},${action.region!!.top}–${action.region!!.right},${action.region!!.bottom})"
+                    } else "Area OCR: Layar Penuh"
+                    isChecked = useRegion
+                    isEnabled = action.region != null
+                    setTextColor(Color.WHITE)
+                    textSize = 11f
+                    setOnCheckedChangeListener { _, checked -> useRegion = checked }
+                }
+                bodyContainer.addView(regionCheck)
+                val ocrTimeoutF = addNumberRow(bodyContainer, "Timeout OCR (ms)", action.ocrTimeoutMs.toString())
+                val delF = addNumberRow(bodyContainer, "Jeda setelah (ms)", action.delayAfterMs.toString())
+
+                addSaveActionBtn {
+                    saveEdited { cur ->
+                        val va = (cur as? com.example.data.VariableAction) ?: action
+                        va.copy(
+                            variableName = nameF.text.toString().trim().take(32),
+                            operation = op,
+                            scope = scope,
+                            value = valF.text.toString().replace(',', '.').toDoubleOrNull() ?: va.value,
+                            region = if (useRegion) va.region else null,
+                            ocrTimeoutMs = (ocrTimeoutF.text.toString().toLongOrNull() ?: va.ocrTimeoutMs).coerceIn(0L, 30_000L),
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: va.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is com.example.data.CheckVariableAction -> {
+                var op = action.operator
+                var scope = action.scope
+                var foundMode = action.foundMode
+                var notFoundMode = action.notFound
+
+                val nameF = addTextRow(bodyContainer, "Nama Variabel", action.variableName)
+                bodyContainer.addView(sectionLabel("Operator Perbandingan"))
+                val opBtns = mutableListOf<Pair<com.example.data.VariableCompareOp, TextView>>()
+                val opRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                com.example.data.VariableCompareOp.entries.forEachIndexed { idx, item ->
+                    val tv = makeBtn(item.symbol, if (item == op) "#DB2777" else "#1E293B", marginEndDp = 0) {
+                        op = item
+                        opBtns.forEach { (k, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == op) "#DB2777" else "#1E293B"))
+                        }
+                    }
+                    opBtns += item to tv
+                    opRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < com.example.data.VariableCompareOp.entries.lastIndex) dp(3) else 0
+                    })
+                }
+                bodyContainer.addView(opRow)
+
+                val targetStr = if (action.targetValue == action.targetValue.toLong().toDouble()) action.targetValue.toLong().toString() else action.targetValue.toString()
+                val targetF = addTextRow(bodyContainer, "Angka Target", targetStr)
+                val cmpVarF = addTextRow(bodyContainer, "Atau Variabel Lain (opsional)", action.compareToVariable)
+
+                bodyContainer.addView(sectionLabel("Cakupan Variabel"))
+                val scBtns = mutableListOf<Pair<com.example.data.VariableScope, TextView>>()
+                val scRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                }
+                com.example.data.VariableScope.entries.forEachIndexed { idx, sc ->
+                    val tv = makeBtn(sc.label, if (sc == scope) "#0891B2" else "#1E293B", marginEndDp = 0) {
+                        scope = sc
+                        scBtns.forEach { (k, v) ->
+                            (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == scope) "#0891B2" else "#1E293B"))
+                        }
+                    }
+                    scBtns += sc to tv
+                    scRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < com.example.data.VariableScope.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(scRow)
+
+                bodyContainer.addView(sectionLabel("Jika BENAR"))
+                val fmBtns = mutableListOf<Pair<NotFoundMode, TextView>>()
+                NotFoundMode.entries.chunked(2).forEach { pair ->
+                    val r = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    pair.forEachIndexed { idx, m ->
+                        val tv = makeBtn(m.label, if (m == foundMode) "#059669" else "#1E293B", marginEndDp = 0) {
+                            foundMode = m
+                            fmBtns.forEach { (k, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == foundMode) "#059669" else "#1E293B"))
+                            }
+                        }
+                        fmBtns += m to tv
+                        r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(r)
+                }
+
+                bodyContainer.addView(sectionLabel("Jika SALAH"))
+                val nfBtns = mutableListOf<Pair<NotFoundMode, TextView>>()
+                NotFoundMode.entries.chunked(2).forEach { pair ->
+                    val r = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    pair.forEachIndexed { idx, m ->
+                        val tv = makeBtn(m.label, if (m == notFoundMode) "#D97706" else "#1E293B", marginEndDp = 0) {
+                            notFoundMode = m
+                            nfBtns.forEach { (k, v) ->
+                                (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (k == notFoundMode) "#D97706" else "#1E293B"))
+                            }
+                        }
+                        nfBtns += m to tv
+                        r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                            marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                        })
+                    }
+                    bodyContainer.addView(r)
+                }
+
+                val delF = addNumberRow(bodyContainer, "Jeda setelah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    saveEdited { cur ->
+                        val cv = (cur as? com.example.data.CheckVariableAction) ?: action
+                        cv.copy(
+                            variableName = nameF.text.toString().trim().take(32),
+                            operator = op,
+                            targetValue = targetF.text.toString().replace(',', '.').toDoubleOrNull() ?: cv.targetValue,
+                            compareToVariable = cmpVarF.text.toString().trim().take(32),
+                            scope = scope,
+                            foundMode = foundMode,
+                            notFound = notFoundMode,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: cv.delayAfterMs).coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+
+            is com.example.data.NotifyAction -> {
+                var level = action.level
+                var sendRemote = action.sendRemote
+                var includeShot = action.includeScreenshot
+                var phoneAlarm = action.triggerPhoneAlarm
+
+                bodyContainer.addView(TextView(context).apply {
+                    text = "🔔 Kirim Notifikasi Telegram/Discord & Alarm HP (dukung {macro}, {loop}, {actions}, {account}, {var:nama})"
+                    setTextColor(Color.parseColor("#F59E0B"))
+                    textSize = 11f
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                })
+
+                val lvlBtns = mutableListOf<Pair<com.example.data.NotifyLevel, TextView>>()
+                fun refreshLvl() {
+                    lvlBtns.forEach { (l, tv) ->
+                        val active = l == level
+                        tv.background = GradientDrawable().apply {
+                            setColor(if (active) Color.parseColor("#D97706") else Color.parseColor("#1E293B"))
+                            cornerRadius = dp(7).toFloat()
+                        }
+                        tv.setTextColor(if (active) Color.WHITE else Color.parseColor("#94A3B8"))
+                    }
+                }
+                val lvlRow = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) }
+                }
+                com.example.data.NotifyLevel.entries.forEachIndexed { idx, l ->
+                    val tv = TextView(context).apply {
+                        text = "${l.icon} ${l.label}"
+                        textSize = 10f
+                        gravity = Gravity.CENTER
+                        setPadding(dp(4), dp(6), dp(4), dp(6))
+                        setOnClickListener { level = l; refreshLvl() }
+                    }
+                    lvlBtns += l to tv
+                    lvlRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginEnd = if (idx < com.example.data.NotifyLevel.entries.lastIndex) dp(4) else 0
+                    })
+                }
+                bodyContainer.addView(lvlRow)
+                refreshLvl()
+
+                val titleF = addTextRow(bodyContainer, "Judul notifikasi", action.title)
+                val msgF = addTextRow(bodyContainer, "Pesan", action.message)
+                val remoteBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                val shotBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                val alarmBtn = makeBtn("", "#1E293B", marginEndDp = 0) {}
+                fun refreshFlags() {
+                    remoteBtn.text = if (sendRemote) "✓ Kirim ke Telegram / Discord" else "○ Tidak kirim ke Telegram / Discord"
+                    remoteBtn.background = GradientDrawable().apply {
+                        setColor(if (sendRemote) Color.parseColor("#0EA5E9") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    shotBtn.text = if (includeShot) "✓ Lampirkan Screenshot Layar" else "○ Tanpa Screenshot Layar"
+                    shotBtn.background = GradientDrawable().apply {
+                        setColor(if (includeShot) Color.parseColor("#10B981") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                    alarmBtn.text = if (phoneAlarm) "✓ Bunyikan Alarm & Getar HP" else "○ Tanpa Alarm HP Lokal"
+                    alarmBtn.background = GradientDrawable().apply {
+                        setColor(if (phoneAlarm) Color.parseColor("#D97706") else Color.parseColor("#1E293B"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                }
+                remoteBtn.setOnClickListener { sendRemote = !sendRemote; refreshFlags() }
+                shotBtn.setOnClickListener { includeShot = !includeShot; refreshFlags() }
+                alarmBtn.setOnClickListener { phoneAlarm = !phoneAlarm; refreshFlags() }
+                listOf(remoteBtn, shotBtn, alarmBtn).forEach { b ->
+                    bodyContainer.addView(b, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(5) })
+                }
+                refreshFlags()
+
+                val delF = addNumberRow(bodyContainer, "Jeda setelah (ms)", action.delayAfterMs.toString())
+                addSaveActionBtn {
+                    saveEdited { cur ->
+                        val na = (cur as? com.example.data.NotifyAction) ?: action
+                        na.copy(
+                            title = titleF.text.toString().trim().take(80),
+                            message = msgF.text.toString().trim().take(400),
+                            level = level,
+                            sendRemote = sendRemote,
+                            includeScreenshot = includeShot,
+                            triggerPhoneAlarm = phoneAlarm,
+                            delayAfterMs = (delF.text.toString().toLongOrNull() ?: na.delayAfterMs).coerceAtLeast(0L)
                         )
                     }
                 }

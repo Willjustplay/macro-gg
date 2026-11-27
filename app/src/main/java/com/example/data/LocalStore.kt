@@ -72,6 +72,23 @@ class LocalStore(context: Context) {
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
+    private val notifyConfigFile = File(rootDir, "notify_config.json")
+    private val farmingStatsFile = File(rootDir, "farming_stats.json")
+    private val afkGuardFile = File(rootDir, "afk_guard_config.json")
+    private val schedulesFile = File(rootDir, "schedules.json")
+
+    private val _notificationConfig = MutableStateFlow(loadNotificationConfig())
+    val notificationConfig: StateFlow<NotificationConfig> = _notificationConfig.asStateFlow()
+
+    private val _farmingStats = MutableStateFlow(loadFarmingStats())
+    val farmingStats: StateFlow<List<FarmingSessionRecord>> = _farmingStats.asStateFlow()
+
+    private val _afkGuardConfig = MutableStateFlow(loadAfkGuardConfig())
+    val afkGuardConfig: StateFlow<AfkAndDeviceGuardConfig> = _afkGuardConfig.asStateFlow()
+
+    private val _schedules = MutableStateFlow(loadSchedules())
+    val schedules: StateFlow<List<MacroSchedule>> = _schedules.asStateFlow()
+
     init {
         effectiveNowMs()
         flushClockWatermark()
@@ -146,6 +163,77 @@ class LocalStore(context: Context) {
     fun saveSettings(settings: AppSettings) {
         prefs.edit().putString(KEY_SETTINGS, json.encodeToString(settings)).apply()
         _settings.value = settings
+    }
+
+    // ---- Local Device-Only Notifications, Farming Stats, AFK Guard & Auto-Scheduler ----
+
+    private fun loadNotificationConfig(): NotificationConfig {
+        if (!notifyConfigFile.exists()) return NotificationConfig()
+        return runCatching { json.decodeFromString<NotificationConfig>(notifyConfigFile.readText()) }
+            .getOrDefault(NotificationConfig())
+    }
+
+    fun saveNotificationConfig(config: NotificationConfig) {
+        runCatching { rootDir.mkdirs(); notifyConfigFile.writeText(json.encodeToString(config)) }
+        _notificationConfig.value = config
+    }
+
+    private fun loadFarmingStats(): List<FarmingSessionRecord> {
+        if (!farmingStatsFile.exists()) return emptyList()
+        return runCatching { json.decodeFromString<List<FarmingSessionRecord>>(farmingStatsFile.readText()) }
+            .getOrDefault(emptyList()).sortedByDescending { it.endedAtMs }
+    }
+
+    fun recordFarmingSession(record: FarmingSessionRecord) {
+        val next = (listOf(record) + _farmingStats.value).take(120)
+        runCatching { rootDir.mkdirs(); farmingStatsFile.writeText(json.encodeToString(next)) }
+        _farmingStats.value = next
+    }
+
+    fun clearFarmingStats() {
+        runCatching { if (farmingStatsFile.exists()) farmingStatsFile.delete() }
+        _farmingStats.value = emptyList()
+    }
+
+    private fun loadAfkGuardConfig(): AfkAndDeviceGuardConfig {
+        if (!afkGuardFile.exists()) return AfkAndDeviceGuardConfig()
+        return runCatching { json.decodeFromString<AfkAndDeviceGuardConfig>(afkGuardFile.readText()) }
+            .getOrDefault(AfkAndDeviceGuardConfig())
+    }
+
+    fun saveAfkGuardConfig(config: AfkAndDeviceGuardConfig) {
+        runCatching { rootDir.mkdirs(); afkGuardFile.writeText(json.encodeToString(config)) }
+        _afkGuardConfig.value = config
+    }
+
+    private fun loadSchedules(): List<MacroSchedule> {
+        if (!schedulesFile.exists()) return emptyList()
+        return runCatching { json.decodeFromString<List<MacroSchedule>>(schedulesFile.readText()) }
+            .getOrDefault(emptyList()).sortedWith(compareBy({ it.hour }, { it.minute }))
+    }
+
+    fun saveSchedule(schedule: MacroSchedule) {
+        val next = (_schedules.value.filterNot { it.id == schedule.id } + schedule)
+            .sortedWith(compareBy({ it.hour }, { it.minute }))
+        runCatching { rootDir.mkdirs(); schedulesFile.writeText(json.encodeToString(next)) }
+        _schedules.value = next
+    }
+
+    fun deleteSchedule(id: String) {
+        val next = _schedules.value.filterNot { it.id == id }
+        runCatching { rootDir.mkdirs(); schedulesFile.writeText(json.encodeToString(next)) }
+        _schedules.value = next
+    }
+
+    fun markScheduleTriggered(id: String, triggeredAtMs: Long) {
+        val next = _schedules.value.map { s ->
+            if (s.id == id) {
+                val keepEnabled = s.repeatMode != ScheduleRepeatMode.ONCE
+                s.copy(lastTriggeredAtMs = triggeredAtMs, enabled = keepEnabled)
+            } else s
+        }
+        runCatching { rootDir.mkdirs(); schedulesFile.writeText(json.encodeToString(next)) }
+        _schedules.value = next
     }
 
     // ---- Macros & Custom Macro Logos ----

@@ -577,512 +577,21 @@ fun ActionEditorSheet(
                 }
 
                 is TrackObjectAction -> {
-                    val selectedAsset = images.firstOrNull { it.name == a.imageName }
-                    var showExtraPicker by remember(a.id) { mutableStateOf(false) }
-
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (a.trackAnyMotion) Color(0xFFE11D48).copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        border = if (a.trackAnyMotion) androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFE11D48)) else null
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                                Text(
-                                    "Lacak Semua Pasukan Bergerak (Bebas Warna)",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    "Kejar pasukan / kerumunan bergerak apa saja tanpa terikat gambar, warna, level, atau skin (cocok untuk semua jenis pasukan COC).",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = a.trackAnyMotion,
-                                onCheckedChange = { draft = a.copy(trackAnyMotion = it) }
-                            )
-                        }
-                    }
-
-                    if (a.trackAnyMotion) {
-                        Text(
-                            "Tips: Aktifkan 'Batasi area pelacakan' di bawah ke area arena/base agar tidak terganggu tombol UI di pinggir layar.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Gambar Objek Bergerak", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (selectedAsset != null) {
-                                FilledTonalButton(
-                                    onClick = { recropAsset = selectedAsset },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Text("Potong Ulang", style = MaterialTheme.typography.labelSmall)
-                                }
-                            }
-                            Button(
-                                onClick = {
-                                    onSave(draft)
-                                    onLaunchCropForAction(a.id)
-                                },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                            ) {
-                                Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("Tangkap Objek", style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                    }
-
-                    if (images.isEmpty()) {
-                        Text(
-                            "Belum ada gambar di pustaka. Ketuk 'Tangkap Objek' di atas untuk memotong gambar objek yang bergerak.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        var folderFilter by remember(a.id) { mutableStateOf<String?>(null) }
-                        if (imageFolders.isNotEmpty()) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                item(key = "tf_all") {
-                                    FilterChip(
-                                        selected = folderFilter == null,
-                                        onClick = { folderFilter = null },
-                                        label = { Text("Semua", style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                                item(key = "tf_root") {
-                                    FilterChip(
-                                        selected = folderFilter == "",
-                                        onClick = { folderFilter = "" },
-                                        label = { Text("Utama", style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                                items(imageFolders, key = { "tf_$it" }) { f ->
-                                    FilterChip(
-                                        selected = folderFilter == f,
-                                        onClick = { folderFilter = f },
-                                        label = { Text("📁 $f", style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                            }
-                        }
-                        val filteredImages = remember(images, folderFilter) {
-                            when (folderFilter) {
-                                null -> images
-                                "" -> images.filter { it.folder.isBlank() }
-                                else -> images.filter { it.folder == folderFilter }
-                            }
-                        }
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            items(filteredImages, key = { "tr_${it.name}" }) { asset ->
-                                val selected = asset.name == a.imageName
-                                val isExtra = asset.name in a.extraImageNames
-                                val bmp = rememberAssetThumbnail(asset.path, asset.updatedAt)
-                                Column(
-                                    modifier = Modifier
-                                        .width(86.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .border(
-                                            width = if (selected || isExtra) 2.dp else 1.dp,
-                                            color = when {
-                                                selected -> MaterialTheme.colorScheme.primary
-                                                isExtra -> Color(0xFFE11D48)
-                                                else -> MaterialTheme.colorScheme.outlineVariant
-                                            },
-                                            shape = RoundedCornerShape(12.dp)
-                                        )
-                                        .background(
-                                            when {
-                                                selected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-                                                isExtra -> Color(0xFFE11D48).copy(alpha = 0.14f)
-                                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                            }
-                                        )
-                                        .clickable {
-                                            draft = a.copy(
-                                                imageName = asset.name,
-                                                extraImageNames = a.extraImageNames.filter { it != asset.name }
-                                            )
-                                        }
-                                        .padding(6.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(64.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFF0F172A)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (bmp != null) {
-                                            Image(
-                                                bitmap = bmp,
-                                                contentDescription = asset.displayName,
-                                                contentScale = ContentScale.Fit,
-                                                modifier = Modifier.size(60.dp)
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.height(4.dp))
-                                    Text(
-                                        asset.displayName.removeSuffix(".png"),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-
-                        // Extra pose / animation frames (up to 3 additional frames)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                "Pose / Animasi Tambahan (${a.extraImageNames.size}/3)",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            TextButton(onClick = { showExtraPicker = !showExtraPicker }) {
-                                Text(if (showExtraPicker) "Tutup" else "+ Pilih Pose", style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                        if (a.extraImageNames.isNotEmpty()) {
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                a.extraImageNames.forEach { extraName ->
-                                    FilterChip(
-                                        selected = true,
-                                        onClick = { draft = a.copy(extraImageNames = a.extraImageNames.filter { it != extraName }) },
-                                        label = { Text("${extraName.substringAfterLast('/').removeSuffix(".png")} ✕", style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                            }
-                        }
-                        if (showExtraPicker) {
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                images.filter { it.name != a.imageName }.forEach { asset ->
-                                    val chosen = asset.name in a.extraImageNames
-                                    FilterChip(
-                                        selected = chosen,
-                                        onClick = {
-                                            val next = if (chosen) {
-                                                a.extraImageNames.filter { it != asset.name }
-                                            } else {
-                                                (a.extraImageNames + asset.name).distinct().take(3)
-                                            }
-                                            draft = a.copy(extraImageNames = next)
-                                        },
-                                        label = { Text(asset.displayName.removeSuffix(".png"), style = MaterialTheme.typography.labelSmall) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    }
-
-                    HorizontalDivider()
-                    Text("Aksi ke Objek (Tap / Drag)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        TrackInteractionMode.entries.forEach { m ->
-                            FilterChip(
-                                selected = a.interactionMode == m,
-                                onClick = { draft = a.copy(interactionMode = m) },
-                                label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
-                            )
-                        }
-                    }
-                    Text(
-                        a.interactionMode.description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    when (a.interactionMode) {
-                        TrackInteractionMode.TAP_ONCE -> {
-                            NumberField("Durasi Tap (ms)", a.tapDurationMs.toString()) {
-                                draft = a.copy(tapDurationMs = (it.toLongOrNull() ?: a.tapDurationMs).coerceIn(20L, 400L))
-                            }
-                        }
-                        TrackInteractionMode.TAP_CONTINUOUS -> {
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                NumberField("Interval Tap (ms)", a.repeatIntervalMs.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(repeatIntervalMs = (it.toLongOrNull() ?: a.repeatIntervalMs).coerceIn(40L, 5000L))
-                                }
-                                NumberField("Maks Kejar (ms)", a.maxTrackDurationMs.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(maxTrackDurationMs = (it.toLongOrNull() ?: a.maxTrackDurationMs).coerceIn(300L, 300_000L))
-                                }
-                            }
-                            NumberField("Durasi Tap (ms)", a.tapDurationMs.toString()) {
-                                draft = a.copy(tapDurationMs = (it.toLongOrNull() ?: a.tapDurationMs).coerceIn(20L, 400L))
-                            }
-                        }
-                        TrackInteractionMode.DRAG_TO_POINT,
-                        TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT -> {
-                            val pointLabel = if (a.interactionMode == TrackInteractionMode.DRAG_TO_POINT) {
-                                "Pilih Titik Tujuan Drag di Layar"
-                            } else {
-                                "Pilih Titik Awal Drag di Layar"
-                            }
-                            FilledTonalButton(
-                                onClick = { onPickTargetOnScreen(draft, a.id) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(pointLabel)
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                NumberField("Titik X", a.targetX.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(targetX = it.toIntOrNull() ?: a.targetX)
-                                }
-                                NumberField("Titik Y", a.targetY.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(targetY = it.toIntOrNull() ?: a.targetY)
-                                }
-                                NumberField("Durasi Drag (ms)", a.dragDurationMs.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(dragDurationMs = (it.toLongOrNull() ?: a.dragDurationMs).coerceIn(60L, 5000L))
-                                }
-                            }
-                        }
-                        TrackInteractionMode.DRAG_BY_OFFSET -> {
-                            FilledTonalButton(
-                                onClick = { onPickTargetOnScreen(draft, a.id) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Tentukan Arah & Jarak Drag di Layar")
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                SignedNumberField("Geser dX (px)", a.dragOffsetX.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(dragOffsetX = it.toIntOrNull() ?: a.dragOffsetX)
-                                }
-                                SignedNumberField("Geser dY (px)", a.dragOffsetY.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(dragOffsetY = it.toIntOrNull() ?: a.dragOffsetY)
-                                }
-                                NumberField("Durasi Drag (ms)", a.dragDurationMs.toString(), Modifier.weight(1f)) {
-                                    draft = a.copy(dragDurationMs = (it.toLongOrNull() ?: a.dragDurationMs).coerceIn(60L, 5000L))
-                                }
-                            }
-                        }
-                    }
-
-                    HorizontalDivider()
-                    if (!a.trackAnyMotion) {
-                        // Similarity slider
-                        Column {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Kemiripan (Akurasi)", style = MaterialTheme.typography.bodyMedium)
-                                Text("${(a.threshold * 100).roundToInt()}%", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                            }
-                            Slider(
-                                value = a.threshold.coerceIn(0.45f, 0.99f),
-                                onValueChange = { draft = a.copy(threshold = it) },
-                                valueRange = 0.45f..0.99f
-                            )
-                        }
-                    }
-
-                    // Lead prediction slider
-                    Column {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Prediksi Gerak / Lead Click", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                if (a.leadPredictionMs <= 0L) "Mati" else "+${a.leadPredictionMs} ms",
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        Slider(
-                            value = a.leadPredictionMs.toFloat().coerceIn(0f, 300f),
-                            onValueChange = { draft = a.copy(leadPredictionMs = (it / 10f).roundToInt() * 10L) },
-                            valueRange = 0f..300f
-                        )
-                        Text(
-                            "Menggeser titik tap/drag sedikit ke depan arah gerak objek agar tidak telat.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    if (!a.trackAnyMotion) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                                Text("Cocokkan Warna Pasukan (RGB/HSV)", style = MaterialTheme.typography.bodyMedium)
-                                Text("Wajib untuk pasukan beranimasi / berputar 8 arah (COC) agar tidak terkecoh rumput & zoom", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = a.useColorMatch, onCheckedChange = { draft = a.copy(useColorMatch = it) })
-                        }
-
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                                Text("Prioritaskan Objek Bergerak", style = MaterialTheme.typography.bodyMedium)
-                                Text("Deteksi perubahan antar-frame agar mengejar pasukan bergerak & mengabaikan bangunan diam", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = a.prioritizeMotion, onCheckedChange = { draft = a.copy(prioritizeMotion = it) })
-                        }
-
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                                Text("Cek Mirror Kiri ↔ Kanan", style = MaterialTheme.typography.bodyMedium)
-                                Text("Cocok jika objek/karakter berbalik arah saat bergerak", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = a.matchMirrorX, onCheckedChange = { draft = a.copy(matchMirrorX = it) })
-                        }
-
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                                Text("Fokus Tengah (Abaikan Pinggir Latar)", style = MaterialTheme.typography.bodyMedium)
-                                Text("Mengurangi gangguan saat objek melintas di atas latar berbeda", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = a.ignoreBackgroundEdges, onCheckedChange = { draft = a.copy(ignoreBackgroundEdges = it) })
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        NumberField("Batas cari awal (ms)", a.timeoutMs.toString(), Modifier.weight(1f)) {
-                            draft = a.copy(timeoutMs = (it.toLongOrNull() ?: a.timeoutMs).coerceAtLeast(0L))
-                        }
-                        NumberField("Radius lacak (px)", a.trackRadiusPx.toString(), Modifier.weight(1f)) {
-                            draft = a.copy(trackRadiusPx = (it.toIntOrNull() ?: a.trackRadiusPx).coerceIn(60, 1200))
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        SignedNumberField("Offset X objek", a.offsetX.toString(), Modifier.weight(1f)) {
-                            draft = a.copy(offsetX = it.toIntOrNull() ?: a.offsetX)
-                        }
-                        SignedNumberField("Offset Y objek", a.offsetY.toString(), Modifier.weight(1f)) {
-                            draft = a.copy(offsetY = it.toIntOrNull() ?: a.offsetY)
-                        }
-                        NumberField("Jeda sesudah", a.delayAfterMs.toString(), Modifier.weight(1f)) {
-                            draft = a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L))
-                        }
-                    }
-
-                    // Optional search area
-                    var useTrackRegion by remember(a.id) { mutableStateOf(a.region != null) }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Batasi area pelacakan (opsional)", style = MaterialTheme.typography.bodyMedium)
-                            Text("Lebih cepat & hemat CPU jika objek hanya bergerak di area tertentu", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = useTrackRegion,
-                            onCheckedChange = {
-                                useTrackRegion = it
-                                draft = a.copy(region = if (it) (a.region ?: Region(0, 0, screenW, screenH)) else null)
-                            }
-                        )
-                    }
-                    if (useTrackRegion) {
-                        FilledTonalButton(
-                            onClick = { onPickRegionOnScreen(draft, a.id) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.CropFree, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Pilih Area Pelacakan di Layar")
-                        }
-                        val reg = a.region ?: Region(0, 0, screenW, screenH)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NumberField("Kiri", reg.left.toString(), Modifier.weight(1f)) {
-                                draft = a.copy(region = reg.copy(left = it.toIntOrNull() ?: reg.left))
-                            }
-                            NumberField("Atas", reg.top.toString(), Modifier.weight(1f)) {
-                                draft = a.copy(region = reg.copy(top = it.toIntOrNull() ?: reg.top))
-                            }
-                            NumberField("Kanan", reg.right.toString(), Modifier.weight(1f)) {
-                                draft = a.copy(region = reg.copy(right = it.toIntOrNull() ?: reg.right))
-                            }
-                            NumberField("Bawah", reg.bottom.toString(), Modifier.weight(1f)) {
-                                draft = a.copy(region = reg.copy(bottom = it.toIntOrNull() ?: reg.bottom))
-                            }
-                        }
-                    }
-
-                    HorizontalDivider()
-                    BranchSectionEditor(
-                        title = "Saat Objek Ditemukan & Ditangani",
-                        accent = Color(0xFF10B981),
-                        modeLabel = "Setelah aksi selesai:",
-                        mode = a.foundMode,
-                        onModeChange = { draft = a.copy(foundMode = it) },
+                    TrackObjectActionEditor(
+                        a = a,
+                        images = images,
+                        imageFolders = imageFolders,
                         branches = branches,
-                        targetBranchId = a.foundBranchId,
-                        onTargetBranchIdChange = { draft = a.copy(foundBranchId = it) },
-                        branchActions = a.thenActions,
-                        onAddChild = { child -> draft = a.copy(thenActions = a.thenActions + child) },
-                        onAddClickTargetOnScreen = {
-                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
-                            val updated = a.copy(thenActions = a.thenActions + newClick)
-                            draft = updated
-                            onPickTargetOnScreen(updated, newClick.id)
-                        },
-                        onPickChildOnScreen = { childId -> onPickTargetOnScreen(draft, childId) },
-                        onDeleteChild = { cid -> draft = a.copy(thenActions = a.thenActions.filter { it.id != cid }) },
                         screenW = screenW,
                         screenH = screenH,
-                        defaultImage = images.firstOrNull()?.name.orEmpty()
-                    )
-
-                    BranchSectionEditor(
-                        title = "Saat Objek Tidak Ditemukan (Else)",
-                        accent = Color(0xFFF59E0B),
-                        modeLabel = "Setelah aksi Jika Tidak Ditemukan:",
-                        mode = a.notFound,
-                        onModeChange = { draft = a.copy(notFound = it) },
-                        branches = branches,
-                        targetBranchId = a.notFoundBranchId,
-                        onTargetBranchIdChange = { draft = a.copy(notFoundBranchId = it) },
-                        branchActions = a.elseActions,
-                        onAddChild = { child -> draft = a.copy(elseActions = a.elseActions + child) },
-                        onAddClickTargetOnScreen = {
-                            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
-                            val updated = a.copy(elseActions = a.elseActions + newClick)
-                            draft = updated
-                            onPickTargetOnScreen(updated, newClick.id)
+                        onUpdate = { draft = it },
+                        onRequestRecrop = { recropAsset = it },
+                        onSaveAndLaunchCrop = {
+                            onSave(draft)
+                            onLaunchCropForAction(a.id)
                         },
-                        onPickChildOnScreen = { childId -> onPickTargetOnScreen(draft, childId) },
-                        onDeleteChild = { cid -> draft = a.copy(elseActions = a.elseActions.filter { it.id != cid }) },
-                        screenW = screenW,
-                        screenH = screenH,
-                        defaultImage = images.firstOrNull()?.name.orEmpty()
+                        onPickTargetOnScreen = { updated, targetId -> onPickTargetOnScreen(updated, targetId) },
+                        onPickRegionOnScreen = { updated, targetId -> onPickRegionOnScreen(updated, targetId) }
                     )
                 }
 
@@ -1962,6 +1471,29 @@ fun ActionEditorSheet(
                     )
                 }
 
+                is com.example.data.VariableAction -> {
+                    VariableActionEditor(
+                        action = a,
+                        onPickRegionOnScreen = { onPickRegionOnScreen(a, a.id) },
+                        onUpdate = { draft = it }
+                    )
+                }
+
+                is com.example.data.CheckVariableAction -> {
+                    CheckVariableActionEditor(
+                        action = a,
+                        branches = branches,
+                        onUpdate = { draft = it }
+                    )
+                }
+
+                is com.example.data.NotifyAction -> {
+                    NotifyActionEditor(
+                        action = a,
+                        onUpdate = { draft = it }
+                    )
+                }
+
                 is RestartAction, is StopAction -> {
                     Text(
                         "Aksi kontrol alur (dapat diatur peluang Random Event di bawah jika ingin acak).",
@@ -2232,6 +1764,7 @@ private fun BranchSectionEditor(
                 val quickKinds = listOf(
                     ActionKind.CLICK, ActionKind.SWIPE, ActionKind.ZOOM,
                     ActionKind.WAIT, ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT,
+                    ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE, ActionKind.NOTIFY,
                     ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH,
                     ActionKind.EXIT_APP, ActionKind.LAUNCH_APP,
                     ActionKind.JUMP, ActionKind.RUN_MACRO, ActionKind.FINISH_MACRO, ActionKind.RESTART, ActionKind.STOP
@@ -2370,3 +1903,523 @@ private fun SignedNumberField(
         modifier = modifier
     )
 }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TrackObjectActionEditor(
+    a: TrackObjectAction,
+    images: List<ImageAsset>,
+    imageFolders: List<String>,
+    branches: List<MacroBranch>,
+    screenW: Int,
+    screenH: Int,
+    onUpdate: (TrackObjectAction) -> Unit,
+    onRequestRecrop: (ImageAsset) -> Unit,
+    onSaveAndLaunchCrop: () -> Unit,
+    onPickTargetOnScreen: (Action, String) -> Unit,
+    onPickRegionOnScreen: (Action, String) -> Unit
+) {
+    val selectedAsset = images.firstOrNull { it.name == a.imageName }
+    var showExtraPicker by remember(a.id) { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (a.trackAnyMotion) Color(0xFFE11D48).copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = if (a.trackAnyMotion) androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFE11D48)) else null
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text(
+                    "Lacak Semua Pasukan Bergerak (Bebas Warna)",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Kejar pasukan / kerumunan bergerak apa saja tanpa terikat gambar, warna, level, atau skin (cocok untuk semua jenis pasukan COC).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = a.trackAnyMotion,
+                onCheckedChange = { onUpdate(a.copy(trackAnyMotion = it)) }
+            )
+        }
+    }
+
+    if (a.trackAnyMotion) {
+        Text(
+            "Tips: Aktifkan 'Batasi area pelacakan' di bawah ke area arena/base agar tidak terganggu tombol UI di pinggir layar.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Gambar Objek Bergerak", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (selectedAsset != null) {
+                    FilledTonalButton(
+                        onClick = { onRequestRecrop(selectedAsset) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("Potong Ulang", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Button(
+                    onClick = onSaveAndLaunchCrop,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(Icons.Filled.Crop, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Tangkap Objek", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+
+        if (images.isEmpty()) {
+            Text(
+                "Belum ada gambar di pustaka. Ketuk 'Tangkap Objek' di atas untuk memotong gambar objek yang bergerak.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            var folderFilter by remember(a.id) { mutableStateOf<String?>(null) }
+            if (imageFolders.isNotEmpty()) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    item(key = "tf_all") {
+                        FilterChip(
+                            selected = folderFilter == null,
+                            onClick = { folderFilter = null },
+                            label = { Text("Semua", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                    item(key = "tf_root") {
+                        FilterChip(
+                            selected = folderFilter == "",
+                            onClick = { folderFilter = "" },
+                            label = { Text("Utama", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                    items(imageFolders, key = { "tf_$it" }) { f ->
+                        FilterChip(
+                            selected = folderFilter == f,
+                            onClick = { folderFilter = f },
+                            label = { Text("📁 $f", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+            val filteredImages = remember(images, folderFilter) {
+                when (folderFilter) {
+                    null -> images
+                    "" -> images.filter { it.folder.isBlank() }
+                    else -> images.filter { it.folder == folderFilter }
+                }
+            }
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(filteredImages, key = { "tr_${it.name}" }) { asset ->
+                    val selected = asset.name == a.imageName
+                    val isExtra = asset.name in a.extraImageNames
+                    val bmp = rememberAssetThumbnail(asset.path, asset.updatedAt)
+                    Column(
+                        modifier = Modifier
+                            .width(86.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(
+                                width = if (selected || isExtra) 2.dp else 1.dp,
+                                color = when {
+                                    selected -> MaterialTheme.colorScheme.primary
+                                    isExtra -> Color(0xFFE11D48)
+                                    else -> MaterialTheme.colorScheme.outlineVariant
+                                },
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .background(
+                                when {
+                                    selected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                    isExtra -> Color(0xFFE11D48).copy(alpha = 0.14f)
+                                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                }
+                            )
+                            .clickable {
+                                onUpdate(
+                                    a.copy(
+                                        imageName = asset.name,
+                                        extraImageNames = a.extraImageNames.filter { it != asset.name }
+                                    )
+                                )
+                            }
+                            .padding(6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF0F172A)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (bmp != null) {
+                                Image(
+                                    bitmap = bmp,
+                                    contentDescription = asset.displayName,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.size(60.dp)
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            asset.displayName.removeSuffix(".png"),
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Pose / Animasi Tambahan (${a.extraImageNames.size}/3)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                TextButton(onClick = { showExtraPicker = !showExtraPicker }) {
+                    Text(if (showExtraPicker) "Tutup" else "+ Pilih Pose", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            if (a.extraImageNames.isNotEmpty()) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    a.extraImageNames.forEach { extraName ->
+                        FilterChip(
+                            selected = true,
+                            onClick = { onUpdate(a.copy(extraImageNames = a.extraImageNames.filter { it != extraName })) },
+                            label = { Text("${extraName.substringAfterLast('/').removeSuffix(".png")} ✕", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+            if (showExtraPicker) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    images.filter { it.name != a.imageName }.forEach { asset ->
+                        val chosen = asset.name in a.extraImageNames
+                        FilterChip(
+                            selected = chosen,
+                            onClick = {
+                                val next = if (chosen) {
+                                    a.extraImageNames.filter { it != asset.name }
+                                } else {
+                                    (a.extraImageNames + asset.name).distinct().take(3)
+                                }
+                                onUpdate(a.copy(extraImageNames = next))
+                            },
+                            label = { Text(asset.displayName.removeSuffix(".png"), style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalDivider()
+    Text("Aksi ke Objek (Tap / Drag)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TrackInteractionMode.entries.forEach { m ->
+            FilterChip(
+                selected = a.interactionMode == m,
+                onClick = { onUpdate(a.copy(interactionMode = m)) },
+                label = { Text(m.label, style = MaterialTheme.typography.labelSmall) }
+            )
+        }
+    }
+    Text(
+        a.interactionMode.description,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+
+    when (a.interactionMode) {
+        TrackInteractionMode.TAP_ONCE -> {
+            NumberField("Durasi Tap (ms)", a.tapDurationMs.toString()) {
+                onUpdate(a.copy(tapDurationMs = (it.toLongOrNull() ?: a.tapDurationMs).coerceIn(20L, 400L)))
+            }
+        }
+        TrackInteractionMode.TAP_CONTINUOUS -> {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumberField("Interval Tap (ms)", a.repeatIntervalMs.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(repeatIntervalMs = (it.toLongOrNull() ?: a.repeatIntervalMs).coerceIn(40L, 5000L)))
+                }
+                NumberField("Maks Kejar (ms)", a.maxTrackDurationMs.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(maxTrackDurationMs = (it.toLongOrNull() ?: a.maxTrackDurationMs).coerceIn(300L, 300_000L)))
+                }
+            }
+            NumberField("Durasi Tap (ms)", a.tapDurationMs.toString()) {
+                onUpdate(a.copy(tapDurationMs = (it.toLongOrNull() ?: a.tapDurationMs).coerceIn(20L, 400L)))
+            }
+        }
+        TrackInteractionMode.DRAG_TO_POINT,
+        TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT -> {
+            val pointLabel = if (a.interactionMode == TrackInteractionMode.DRAG_TO_POINT) {
+                "Pilih Titik Tujuan Drag di Layar"
+            } else {
+                "Pilih Titik Awal Drag di Layar"
+            }
+            FilledTonalButton(
+                onClick = { onPickTargetOnScreen(a, a.id) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(pointLabel)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumberField("Titik X", a.targetX.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(targetX = it.toIntOrNull() ?: a.targetX))
+                }
+                NumberField("Titik Y", a.targetY.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(targetY = it.toIntOrNull() ?: a.targetY))
+                }
+                NumberField("Durasi Drag (ms)", a.dragDurationMs.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(dragDurationMs = (it.toLongOrNull() ?: a.dragDurationMs).coerceIn(60L, 5000L)))
+                }
+            }
+        }
+        TrackInteractionMode.DRAG_BY_OFFSET -> {
+            FilledTonalButton(
+                onClick = { onPickTargetOnScreen(a, a.id) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Tentukan Arah & Jarak Drag di Layar")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SignedNumberField("Geser dX (px)", a.dragOffsetX.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(dragOffsetX = it.toIntOrNull() ?: a.dragOffsetX))
+                }
+                SignedNumberField("Geser dY (px)", a.dragOffsetY.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(dragOffsetY = it.toIntOrNull() ?: a.dragOffsetY))
+                }
+                NumberField("Durasi Drag (ms)", a.dragDurationMs.toString(), Modifier.weight(1f)) {
+                    onUpdate(a.copy(dragDurationMs = (it.toLongOrNull() ?: a.dragDurationMs).coerceIn(60L, 5000L)))
+                }
+            }
+        }
+    }
+
+    HorizontalDivider()
+    if (!a.trackAnyMotion) {
+        Column {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Kemiripan (Akurasi)", style = MaterialTheme.typography.bodyMedium)
+                Text("${(a.threshold * 100).roundToInt()}%", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
+            Slider(
+                value = a.threshold.coerceIn(0.45f, 0.99f),
+                onValueChange = { onUpdate(a.copy(threshold = it)) },
+                valueRange = 0.45f..0.99f
+            )
+        }
+    }
+
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Prediksi Gerak / Lead Click", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (a.leadPredictionMs <= 0L) "Mati" else "+${a.leadPredictionMs} ms",
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Slider(
+            value = a.leadPredictionMs.toFloat().coerceIn(0f, 300f),
+            onValueChange = { onUpdate(a.copy(leadPredictionMs = (it / 10f).roundToInt() * 10L)) },
+            valueRange = 0f..300f
+        )
+        Text(
+            "Menggeser titik tap/drag sedikit ke depan arah gerak objek agar tidak telat.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    if (!a.trackAnyMotion) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text("Cocokkan Warna Pasukan (RGB/HSV)", style = MaterialTheme.typography.bodyMedium)
+                Text("Wajib untuk pasukan beranimasi / berputar 8 arah (COC) agar tidak terkecoh rumput & zoom", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = a.useColorMatch, onCheckedChange = { onUpdate(a.copy(useColorMatch = it)) })
+        }
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text("Prioritaskan Objek Bergerak", style = MaterialTheme.typography.bodyMedium)
+                Text("Deteksi perubahan antar-frame agar mengejar pasukan bergerak & mengabaikan bangunan diam", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = a.prioritizeMotion, onCheckedChange = { onUpdate(a.copy(prioritizeMotion = it)) })
+        }
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text("Cek Mirror Kiri ↔ Kanan", style = MaterialTheme.typography.bodyMedium)
+                Text("Cocok jika objek/karakter berbalik arah saat bergerak", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = a.matchMirrorX, onCheckedChange = { onUpdate(a.copy(matchMirrorX = it)) })
+        }
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text("Fokus Tengah (Abaikan Pinggir Latar)", style = MaterialTheme.typography.bodyMedium)
+                Text("Mengurangi gangguan saat objek melintas di atas latar berbeda", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = a.ignoreBackgroundEdges, onCheckedChange = { onUpdate(a.copy(ignoreBackgroundEdges = it)) })
+        }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        NumberField("Batas cari awal (ms)", a.timeoutMs.toString(), Modifier.weight(1f)) {
+            onUpdate(a.copy(timeoutMs = (it.toLongOrNull() ?: a.timeoutMs).coerceAtLeast(0L)))
+        }
+        NumberField("Radius lacak (px)", a.trackRadiusPx.toString(), Modifier.weight(1f)) {
+            onUpdate(a.copy(trackRadiusPx = (it.toIntOrNull() ?: a.trackRadiusPx).coerceIn(60, 1200)))
+        }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        SignedNumberField("Offset X objek", a.offsetX.toString(), Modifier.weight(1f)) {
+            onUpdate(a.copy(offsetX = it.toIntOrNull() ?: a.offsetX))
+        }
+        SignedNumberField("Offset Y objek", a.offsetY.toString(), Modifier.weight(1f)) {
+            onUpdate(a.copy(offsetY = it.toIntOrNull() ?: a.offsetY))
+        }
+        NumberField("Jeda sesudah", a.delayAfterMs.toString(), Modifier.weight(1f)) {
+            onUpdate(a.copy(delayAfterMs = (it.toLongOrNull() ?: a.delayAfterMs).coerceAtLeast(0L)))
+        }
+    }
+
+    var useTrackRegion by remember(a.id) { mutableStateOf(a.region != null) }
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Batasi area pelacakan (opsional)", style = MaterialTheme.typography.bodyMedium)
+            Text("Lebih cepat & hemat CPU jika objek hanya bergerak di area tertentu", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(
+            checked = useTrackRegion,
+            onCheckedChange = {
+                useTrackRegion = it
+                onUpdate(a.copy(region = if (it) (a.region ?: Region(0, 0, screenW, screenH)) else null))
+            }
+        )
+    }
+    if (useTrackRegion) {
+        FilledTonalButton(
+            onClick = { onPickRegionOnScreen(a, a.id) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Filled.CropFree, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Pilih Area Pelacakan di Layar")
+        }
+        val reg = a.region ?: Region(0, 0, screenW, screenH)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NumberField("Kiri", reg.left.toString(), Modifier.weight(1f)) {
+                onUpdate(a.copy(region = reg.copy(left = it.toIntOrNull() ?: reg.left)))
+            }
+            NumberField("Atas", reg.top.toString(), Modifier.weight(1f)) {
+                onUpdate(a.copy(region = reg.copy(top = it.toIntOrNull() ?: reg.top)))
+            }
+            NumberField("Kanan", reg.right.toString(), Modifier.weight(1f)) {
+                onUpdate(a.copy(region = reg.copy(right = it.toIntOrNull() ?: reg.right)))
+            }
+            NumberField("Bawah", reg.bottom.toString(), Modifier.weight(1f)) {
+                onUpdate(a.copy(region = reg.copy(bottom = it.toIntOrNull() ?: reg.bottom)))
+            }
+        }
+    }
+
+    HorizontalDivider()
+    BranchSectionEditor(
+        title = "Saat Objek Ditemukan & Ditangani",
+        accent = Color(0xFF10B981),
+        modeLabel = "Setelah aksi selesai:",
+        mode = a.foundMode,
+        onModeChange = { onUpdate(a.copy(foundMode = it)) },
+        branches = branches,
+        targetBranchId = a.foundBranchId,
+        onTargetBranchIdChange = { onUpdate(a.copy(foundBranchId = it)) },
+        branchActions = a.thenActions,
+        onAddChild = { child -> onUpdate(a.copy(thenActions = a.thenActions + child)) },
+        onAddClickTargetOnScreen = {
+            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+            val updated = a.copy(thenActions = a.thenActions + newClick)
+            onUpdate(updated)
+            onPickTargetOnScreen(updated, newClick.id)
+        },
+        onPickChildOnScreen = { childId -> onPickTargetOnScreen(a, childId) },
+        onDeleteChild = { cid -> onUpdate(a.copy(thenActions = a.thenActions.filter { it.id != cid })) },
+        screenW = screenW,
+        screenH = screenH,
+        defaultImage = images.firstOrNull()?.name.orEmpty()
+    )
+
+    BranchSectionEditor(
+        title = "Saat Objek Tidak Ditemukan (Else)",
+        accent = Color(0xFFF59E0B),
+        modeLabel = "Setelah aksi Jika Tidak Ditemukan:",
+        mode = a.notFound,
+        onModeChange = { onUpdate(a.copy(notFound = it)) },
+        branches = branches,
+        targetBranchId = a.notFoundBranchId,
+        onTargetBranchIdChange = { onUpdate(a.copy(notFoundBranchId = it)) },
+        branchActions = a.elseActions,
+        onAddChild = { child -> onUpdate(a.copy(elseActions = a.elseActions + child)) },
+        onAddClickTargetOnScreen = {
+            val newClick = ClickAction(x = screenW / 2, y = screenH / 2, delayAfterMs = 250L)
+            val updated = a.copy(elseActions = a.elseActions + newClick)
+            onUpdate(updated)
+            onPickTargetOnScreen(updated, newClick.id)
+        },
+        onPickChildOnScreen = { childId -> onPickTargetOnScreen(a, childId) },
+        onDeleteChild = { cid -> onUpdate(a.copy(elseActions = a.elseActions.filter { it.id != cid })) },
+        screenW = screenW,
+        screenH = screenH,
+        defaultImage = images.firstOrNull()?.name.orEmpty()
+    )
+}
+

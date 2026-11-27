@@ -158,6 +158,43 @@ class MacroAccessibilityService : AccessibilityService() {
         )
     }
 
+    /** Dispatches a smooth quadratic Bezier curved swipe `(x1,y1) -> (cx,cy) -> (x2,y2)` for Humanizer mode. */
+    suspend fun performCurvedSwipe(
+        x1: Float,
+        y1: Float,
+        cx: Float,
+        cy: Float,
+        x2: Float,
+        y2: Float,
+        durationMs: Long
+    ): Boolean {
+        val safeDuration = durationMs.coerceIn(25L, GestureDescription.getMaxGestureDuration())
+        val sx1 = if (x1.isFinite()) x1.coerceAtLeast(1f) else 1f
+        val sy1 = if (y1.isFinite()) y1.coerceAtLeast(1f) else 1f
+        val scx = if (cx.isFinite()) cx.coerceAtLeast(1f) else sx1
+        val scy = if (cy.isFinite()) cy.coerceAtLeast(1f) else sy1
+        val sx2 = if (x2.isFinite()) x2.coerceAtLeast(1f) else sx1
+        val sy2 = if (y2.isFinite()) y2.coerceAtLeast(1f) else sy1
+        val buildGesture = {
+            val path = Path().apply {
+                moveTo(sx1, sy1)
+                if (hypot((sx2 - sx1).toDouble(), (sy2 - sy1).toDouble()) >= 2.0) {
+                    quadTo(scx, scy, sx2, sy2)
+                } else {
+                    lineTo(sx1 + 0.5f, sy1 + 0.5f)
+                }
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, safeDuration)
+            GestureDescription.Builder().addStroke(stroke).build()
+        }
+        return dispatchWithRetry(
+            label = "Swipe Bezier (${sx1.toInt()},${sy1.toInt()})→(${sx2.toInt()},${sy2.toInt()})",
+            expectedDurationMs = safeDuration,
+            maxRetries = 1,
+            buildGesture = buildGesture
+        )
+    }
+
     /**
      * Dispatches a 2-finger diagonal pinch gesture centered at ([cx], [cy]).
      * [zoomIn] = true spreads fingers apart; false pinches fingers together.
@@ -658,6 +695,19 @@ class MacroAccessibilityService : AccessibilityService() {
         ): Boolean {
             val svc = instance ?: return false
             return svc.performSwipe(x1, y1, x2, y2, durationMs)
+        }
+
+        suspend fun dispatchCurvedSwipe(
+            x1: Float,
+            y1: Float,
+            cx: Float,
+            cy: Float,
+            x2: Float,
+            y2: Float,
+            durationMs: Long
+        ): Boolean {
+            val svc = instance ?: return false
+            return svc.performCurvedSwipe(x1, y1, cx, cy, x2, y2, durationMs)
         }
 
         suspend fun dispatchZoom(

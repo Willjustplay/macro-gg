@@ -132,6 +132,140 @@ object AutomationCoordinator {
     private val _activeAccountLabel = MutableStateFlow("")
     val activeAccountLabel: StateFlow<String> = _activeAccountLabel.asStateFlow()
 
+    private val _visualDebugEnabled = MutableStateFlow(false)
+    val visualDebugEnabled: StateFlow<Boolean> = _visualDebugEnabled.asStateFlow()
+
+    private val _debugEvents = kotlinx.coroutines.flow.MutableSharedFlow<VisualDebugEvent>(extraBufferCapacity = 48)
+    val debugEvents: kotlinx.coroutines.flow.SharedFlow<VisualDebugEvent> = _debugEvents
+
+    private val _liveVariables = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val liveVariables: StateFlow<Map<String, Double>> = _liveVariables.asStateFlow()
+
+    private val _humanBreakRemainingSec = MutableStateFlow(0)
+    val humanBreakRemainingSec: StateFlow<Int> = _humanBreakRemainingSec.asStateFlow()
+
+    private val _liveSessionStats = MutableStateFlow<com.example.data.LiveSessionStats?>(null)
+    val liveSessionStats: StateFlow<com.example.data.LiveSessionStats?> = _liveSessionStats.asStateFlow()
+
+    private val _afkBlackScreenActive = MutableStateFlow(false)
+    val afkBlackScreenActive: StateFlow<Boolean> = _afkBlackScreenActive.asStateFlow()
+
+    private val _deviceHealth = MutableStateFlow<com.example.data.DeviceHealthSnapshot?>(null)
+    val deviceHealth: StateFlow<com.example.data.DeviceHealthSnapshot?> = _deviceHealth.asStateFlow()
+
+    private val _thermalPaused = MutableStateFlow(false)
+    val thermalPaused: StateFlow<Boolean> = _thermalPaused.asStateFlow()
+
+    fun toggleAfkBlackScreen(): Boolean {
+        val next = !_afkBlackScreenActive.value
+        _afkBlackScreenActive.value = next
+        if (next) {
+            _deviceHealth.value = DeviceHealthReader.read(appCtx)
+            ExecutionLogBus.info("🌙 Mode Layar Hitam AFK AKTIF — layar diredupkan hemat baterai.")
+        } else {
+            ExecutionLogBus.info("☀ Mode Layar Hitam AFK dimatikan.")
+        }
+        return next
+    }
+
+    fun setAfkBlackScreenActive(active: Boolean) {
+        if (_afkBlackScreenActive.value == active) return
+        _afkBlackScreenActive.value = active
+        if (active) {
+            _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        }
+    }
+
+    fun refreshDeviceHealth(): com.example.data.DeviceHealthSnapshot? {
+        val snap = DeviceHealthReader.read(appCtx)
+        _deviceHealth.value = snap
+        return snap
+    }
+
+    fun runScheduledMacro(schedule: com.example.data.MacroSchedule) {
+        val localStore = store ?: return
+        val target = localStore.getMacroById(schedule.macroId)
+        val schedTitle = schedule.label.ifBlank { schedule.macroName.ifBlank { "Jadwal" } }
+        if (target == null) {
+            ExecutionLogBus.error("⏰ Jadwal '$schedTitle' gagal: macro tidak ditemukan.")
+            return
+        }
+        val effectiveNow = localStore.effectiveNowMs()
+        val parentSet = localStore.getMacroSetById(target.setId)
+        MacroSecurity.checkDirectRun(target, effectiveNow, parentSet)?.let { denial ->
+            ExecutionLogBus.error("⏰ Jadwal '$schedTitle' ditolak: ${MacroSecurity.denialMessage(target, denial, parentSet)}")
+            return
+        }
+        com.example.billing.PremiumFeatureGate.checkMacroRun(
+            macro = target,
+            isPremium = com.example.billing.PremiumStateHolder.isPremium.value
+        )?.let { premiumDenial ->
+            ExecutionLogBus.error("⏰ Jadwal '$schedTitle' ditolak: 🔒 ${premiumDenial.reason}")
+            return
+        }
+        if (!MacroAccessibilityService.isConnected.value) {
+            val msg = "Jadwal '$schedTitle' tidak bisa jalan karena Aksesibilitas belum aktif."
+            ExecutionLogBus.error("⏰ $msg")
+            val cfg = localStore.notificationConfig.value
+            val remoteAllowed = cfg.notifyOnError && com.example.billing.PremiumStateHolder.isPremium.value
+            if (remoteAllowed || cfg.alarmOnError) {
+                PhoneAlarmAndNotifyManager.dispatchAsync(
+                    context = appCtx,
+                    config = cfg,
+                    title = "Jadwal Gagal — $schedTitle",
+                    message = msg,
+                    level = com.example.data.NotifyLevel.WARNING,
+                    sendRemote = remoteAllowed,
+                    includeScreenshot = false,
+                    triggerPhoneAlarm = cfg.alarmOnError
+                )
+            }
+            return
+        }
+
+        ExecutionLogBus.info("⏰ Memulai jadwal '$schedTitle' → macro '${target.name}'...")
+        engineScope.launch {
+            val pkg = schedule.launchAppPackage.trim()
+            if (pkg.isNotBlank()) {
+                val ctx = appCtx
+                val launchIntent = runCatching { ctx?.packageManager?.getLaunchIntentForPackage(pkg) }.getOrNull()
+                if (launchIntent != null && ctx != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                    val launched = MacroAccessibilityService.launchActivityIntent(launchIntent) ||
+                        runCatching { ctx.startActivity(launchIntent); true }.getOrDefault(false)
+                    if (launched) {
+                        ExecutionLogBus.info("⏰ Membuka '${schedule.launchAppLabel.ifBlank { pkg }}', menunggu ${schedule.launchWaitSec}d...")
+                        delay(schedule.launchWaitSec.coerceIn(1, 60) * 1000L)
+                    }
+                }
+            }
+            val effectiveMacro = if (schedule.stopAfterMinutes > 0) {
+                target.copy(maxDurationMin = schedule.stopAfterMinutes)
+            } else target
+            val (sw, sh) = liveScreenSize(ScreenCaptureService.captureWidth, ScreenCaptureService.captureHeight)
+            runMacro(
+                macro = effectiveMacro,
+                screenWidth = sw,
+                screenHeight = sh,
+                startInBlackScreen = schedule.enableBlackScreenOnStart
+            )
+        }
+    }
+
+    fun toggleVisualDebug(): Boolean {
+        val next = !_visualDebugEnabled.value
+        _visualDebugEnabled.value = next
+        ExecutionLogBus.info(
+            if (next) "🐞 Debug Visual AKTIF — kotak deteksi, skor %, OCR & kurva swipe ditampilkan di layar."
+            else "🐞 Debug Visual dimatikan."
+        )
+        return next
+    }
+
+    fun setVisualDebugEnabled(enabled: Boolean) {
+        _visualDebugEnabled.value = enabled
+    }
+
     fun requestSkipAccount() {
         if (_engineState.value == EngineState.RUNNING || _engineState.value == EngineState.PAUSED) {
             skipAccountRequested.set(true)
@@ -144,6 +278,8 @@ object AutomationCoordinator {
         if (store == null) {
             store = LocalStore.get(context)
         }
+        _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        MacroSchedulerManager.syncAlarms(context)
     }
 
     fun getStore(): LocalStore? = store
@@ -346,6 +482,7 @@ object AutomationCoordinator {
                     is ImageAction -> a.copy(region = storedRegion)
                     is TrackObjectAction -> a.copy(region = storedRegion)
                     is com.example.data.SelectAccountAction -> a.copy(region = storedRegion)
+                    is com.example.data.VariableAction -> a.copy(region = storedRegion)
                     else -> a
                 }
             }
@@ -600,7 +737,9 @@ object AutomationCoordinator {
             if (m.accountSwitch.enabled && m.accountSwitch.method != com.example.data.AccountSwitchMethod.CLONE_APP && m.accountSwitch.accounts.any { it.enabled }) return true
             for (a in m.allActionsSequence()) {
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction ||
-                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP)
+                    (a is com.example.data.VariableAction && a.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
+                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP) ||
+                    (a is com.example.data.NotifyAction && a.includeScreenshot)
                 ) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
                     val linked = localStore?.getMacroById(a.targetMacroId)
@@ -651,7 +790,8 @@ object AutomationCoordinator {
     fun runMacro(
         macro: Macro,
         screenWidth: Int = ScreenCaptureService.captureWidth,
-        screenHeight: Int = ScreenCaptureService.captureHeight
+        screenHeight: Int = ScreenCaptureService.captureHeight,
+        startInBlackScreen: Boolean = false
     ) {
         stop()
         val effectiveNow = store?.effectiveNowMs() ?: System.currentTimeMillis()
@@ -684,17 +824,171 @@ object AutomationCoordinator {
         _currentLoop.value = 0
         _actionsExecuted.value = 0
         _activeAccountLabel.value = ""
+        _liveVariables.value = emptyMap()
+        _humanBreakRemainingSec.value = 0
+        _thermalPaused.value = false
+        _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        if (startInBlackScreen) {
+            _afkBlackScreenActive.value = true
+        }
         _engineState.value = EngineState.RUNNING
         ScreenCaptureService.highFrequencyCapture = true
 
         val startedAt = System.currentTimeMillis()
         val counter = AtomicInteger(0)
+        val watchdogCount = AtomicInteger(0)
+        val bannedCount = AtomicInteger(0)
+        val accountSwitchCount = AtomicInteger(0)
+        val humanBreakCount = AtomicInteger(0)
+        val lastVarsRef = java.util.concurrent.atomic.AtomicReference<Map<String, Double>>(emptyMap())
         val localStore = store
+
+        fun publishLiveStats() {
+            _liveSessionStats.value = com.example.data.LiveSessionStats(
+                macroName = _activeMacro.value.name.ifBlank { macro.name },
+                startedAtMs = startedAt,
+                loopsCompleted = _currentLoop.value,
+                actionsExecuted = counter.get(),
+                watchdogRecoveries = watchdogCount.get(),
+                bannedBlocks = bannedCount.get(),
+                accountSwitches = accountSwitchCount.get(),
+                humanBreaks = humanBreakCount.get()
+            )
+        }
+        publishLiveStats()
 
         activeJob = engineScope.launch {
             ExecutionLogBus.info(
                 "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
             )
+            var lastPeriodicReportAt = startedAt
+            val periodicReportJob = launch {
+                while (isActive && !stopRequested.get()) {
+                    delay(15_000L)
+                    if (!com.example.billing.PremiumStateHolder.isPremium.value) continue
+                    val cfg = localStore?.notificationConfig?.value ?: continue
+                    val intervalMin = cfg.periodicReportMinutes
+                    if (intervalMin <= 0 || !cfg.hasAnyRemoteConfigured()) continue
+                    val now = System.currentTimeMillis()
+                    if (now - lastPeriodicReportAt >= intervalMin * 60_000L) {
+                        lastPeriodicReportAt = now
+                        val dur = (now - startedAt).coerceAtLeast(0L)
+                        val loops = _currentLoop.value
+                        val acts = counter.get()
+                        val rateL = com.example.data.FarmingStatsCalculator.formatRate(
+                            com.example.data.FarmingStatsCalculator.ratePerHour(loops, dur)
+                        )
+                        val accLine = _activeAccountLabel.value.takeIf { it.isNotBlank() }?.let { "\nAkun: $it" } ?: ""
+                        val msg = "Durasi: ${com.example.data.FarmingStatsCalculator.formatDuration(dur)} • Loop: $loops ($rateL/jam) • Aksi: $acts" +
+                            "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}$accLine"
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Laporan Berkala — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = msg,
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+            }
+            val deviceGuardJob = launch {
+                while (isActive && !stopRequested.get()) {
+                    val snap = DeviceHealthReader.read(appCtx)
+                    if (snap != null) {
+                        _deviceHealth.value = snap
+                        val gCfg = localStore?.afkGuardConfig?.value ?: com.example.data.AfkAndDeviceGuardConfig()
+                        val decision = com.example.data.DeviceGuardEvaluator.evaluate(gCfg, snap, _thermalPaused.value)
+                        val nCfg = localStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+                        val remoteAllowed = nCfg.hasAnyRemoteConfigured() && com.example.billing.PremiumStateHolder.isPremium.value
+                        val macroTitle = _activeMacro.value.name.ifBlank { macro.name }
+                        when (decision) {
+                            com.example.data.DeviceGuardDecision.STOP_LOW_BATTERY -> {
+                                val msg = "Baterai ${snap.batteryPercent}% (batas ${gCfg.minBatteryPercent}%, tidak dicas) — macro dihentikan demi keamanan baterai."
+                                ExecutionLogBus.warn("🔋 $msg")
+                                if (gCfg.notifyOnGuardTrigger) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Guard Baterai Lemah — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.WARNING,
+                                        sendRemote = remoteAllowed,
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = true
+                                    )
+                                }
+                                stopRequested.set(true)
+                                activeJob?.cancel()
+                                break
+                            }
+                            com.example.data.DeviceGuardDecision.STOP_OVERHEAT -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                val msg = "Suhu HP mencapai $tempTxt (batas ${gCfg.maxTempCelsius}°C) — macro dihentikan otomatis."
+                                ExecutionLogBus.warn("🌡 $msg")
+                                if (gCfg.notifyOnGuardTrigger) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Guard Suhu Panas — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.CRITICAL,
+                                        sendRemote = remoteAllowed,
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = true
+                                    )
+                                }
+                                stopRequested.set(true)
+                                activeJob?.cancel()
+                                break
+                            }
+                            com.example.data.DeviceGuardDecision.PAUSE_OVERHEAT -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                _thermalPaused.value = true
+                                pausedFlag.set(true)
+                                _engineState.value = EngineState.PAUSED
+                                val msg = "Suhu HP $tempTxt (≥ ${gCfg.maxTempCelsius}°C) — macro dijeda sementara untuk mendinginkan HP."
+                                ExecutionLogBus.warn("🌡 $msg")
+                                if (gCfg.notifyOnGuardTrigger && remoteAllowed) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Jeda Pendinginan HP — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.WARNING,
+                                        sendRemote = true,
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = false
+                                    )
+                                }
+                            }
+                            com.example.data.DeviceGuardDecision.RESUME_COOLED -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                _thermalPaused.value = false
+                                pausedFlag.set(false)
+                                _engineState.value = EngineState.RUNNING
+                                ExecutionLogBus.info("❄ Suhu HP turun ke $tempTxt — macro dilanjutkan otomatis.")
+                            }
+                            com.example.data.DeviceGuardDecision.STAY_THERMAL_PAUSED,
+                            com.example.data.DeviceGuardDecision.OK -> Unit
+                        }
+                    }
+                    delay(10_000L)
+                }
+            }
+            val autoBlackScreenJob = launch {
+                val sec = localStore?.afkGuardConfig?.value?.autoBlackScreenAfterSec ?: 0
+                if (sec > 0 && !_afkBlackScreenActive.value) {
+                    cooperativeDelay(sec.coerceIn(5, 3600) * 1000L)
+                    if (isActive && !stopRequested.get() && _engineState.value == EngineState.RUNNING) {
+                        _afkBlackScreenActive.value = true
+                        ExecutionLogBus.info("🌙 Layar Hitam AFK otomatis aktif setelah ${sec}d.")
+                    }
+                }
+            }
             val runtime = object : MacroRuntime {
                 override val screenWidth: Int get() = liveScreenSize(screenWidth, screenHeight).first
                 override val screenHeight: Int get() = liveScreenSize(screenWidth, screenHeight).second
@@ -706,6 +1000,18 @@ object AutomationCoordinator {
 
                 override suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
                     MacroAccessibilityService.dispatchSwipe(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), durationMs)
+
+                override suspend fun swipeCurved(
+                    x1: Int,
+                    y1: Int,
+                    cx: Int,
+                    cy: Int,
+                    x2: Int,
+                    y2: Int,
+                    durationMs: Long
+                ): Boolean = MacroAccessibilityService.dispatchCurvedSwipe(
+                    x1.toFloat(), y1.toFloat(), cx.toFloat(), cy.toFloat(), x2.toFloat(), y2.toFloat(), durationMs
+                )
 
                 override suspend fun zoom(cx: Int, cy: Int, zoomIn: Boolean, distancePx: Int, durationMs: Long): Boolean =
                     MacroAccessibilityService.dispatchZoom(cx.toFloat(), cy.toFloat(), zoomIn, distancePx, durationMs)
@@ -914,36 +1220,187 @@ object AutomationCoordinator {
                     }
                 }
                 override fun consumeManualSkipAccountRequest(): Boolean = skipAccountRequested.getAndSet(false)
+                override fun isVisualDebugEnabled(): Boolean = _visualDebugEnabled.value
+                override fun onVisualDebug(event: VisualDebugEvent) {
+                    _debugEvents.tryEmit(event)
+                }
+                override fun onVariablesChanged(variables: Map<String, Double>) {
+                    lastVarsRef.set(variables)
+                    _liveVariables.value = variables
+                }
+                override fun onHumanBreakChanged(remainingSec: Int) {
+                    _humanBreakRemainingSec.value = remainingSec.coerceAtLeast(0)
+                }
+                override fun onWatchdogTriggered(modeLabel: String) {
+                    val count = watchdogCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnWatchdog && cfg.hasAnyRemoteConfigured() && com.example.billing.PremiumStateHolder.isPremium.value) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Watchdog Anti-Macet — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = "Recovery #$count ($modeLabel) pada loop #${_currentLoop.value}.",
+                            level = com.example.data.NotifyLevel.WARNING,
+                            sendRemote = true,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = false,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+                override fun onBannedBlocked(imageName: String) {
+                    bannedCount.incrementAndGet()
+                    publishLiveStats()
+                }
+                override fun onAccountSwitched(accountLabel: String) {
+                    val count = accountSwitchCount.incrementAndGet()
+                    publishLiveStats()
+                    val cfg = localStore?.notificationConfig?.value ?: return
+                    if (cfg.notifyOnAccountSwitch && cfg.hasAnyRemoteConfigured() && com.example.billing.PremiumStateHolder.isPremium.value) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Ganti Akun — ${_activeMacro.value.name.ifBlank { macro.name }}",
+                            message = "Beralih ke akun '$accountLabel' (perpindahan #$count, loop #${_currentLoop.value}).",
+                            level = com.example.data.NotifyLevel.INFO,
+                            sendRemote = true,
+                            includeScreenshot = false,
+                            triggerPhoneAlarm = false
+                        )
+                    }
+                }
+                override fun onHumanBreakStarted(durationSec: Int) {
+                    humanBreakCount.incrementAndGet()
+                    publishLiveStats()
+                }
+                override suspend fun sendNotification(
+                    title: String,
+                    message: String,
+                    level: com.example.data.NotifyLevel,
+                    sendRemote: Boolean,
+                    includeScreenshot: Boolean,
+                    triggerPhoneAlarm: Boolean
+                ) {
+                    val cfg = localStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                        context = appCtx,
+                        config = cfg,
+                        title = title,
+                        message = message,
+                        level = level,
+                        sendRemote = sendRemote && com.example.billing.PremiumStateHolder.isPremium.value,
+                        includeScreenshot = includeScreenshot,
+                        triggerPhoneAlarm = triggerPhoneAlarm,
+                        captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                    )
+                }
                 override fun onMatchFound(match: MatchResult, label: String) {
-                    if (localStore?.settings?.value?.showDebugMatchBox != false) {
+                    if (!_visualDebugEnabled.value && localStore?.settings?.value?.showDebugMatchBox != false) {
                         flashMatchHighlight(match, label)
                     }
                 }
-                override fun onLoopChanged(loop: Int) { _currentLoop.value = loop }
-                override fun onActionExecuted() { _actionsExecuted.value = counter.incrementAndGet() }
+                override fun onLoopChanged(loop: Int) {
+                    _currentLoop.value = loop
+                    publishLiveStats()
+                }
+                override fun onActionExecuted() {
+                    _actionsExecuted.value = counter.incrementAndGet()
+                    publishLiveStats()
+                }
                 override fun log(level: LogLevel, message: String) = ExecutionLogBus.log(level, message)
                 override fun nowMs(): Long = localStore?.effectiveNowMs() ?: System.currentTimeMillis()
             }
 
+            var endReason = "Selesai"
+            var errorDetail = ""
             try {
                 // Brief settle delay so releasing the floating Play button never cancels action #1
                 cooperativeDelay(140L)
                 MacroRunner(runtime).run(macro)
+                if (stopRequested.get()) {
+                    endReason = "Dihentikan"
+                }
             } catch (_: CancellationException) {
+                endReason = "Dihentikan"
                 ExecutionLogBus.info("Macro dihentikan.")
             } catch (t: Throwable) {
+                endReason = "Error"
+                errorDetail = t.message ?: t::class.java.simpleName
                 _engineState.value = EngineState.ERROR
-                ExecutionLogBus.error("Error: ${t.message ?: t::class.java.simpleName}")
+                ExecutionLogBus.error("Error: $errorDetail")
             } finally {
+                periodicReportJob.cancel()
+                deviceGuardJob.cancel()
+                autoBlackScreenJob.cancel()
                 localStore?.flushClockWatermark()
                 ScreenCaptureService.trackingCaptureMode = false
                 ScreenCaptureService.highFrequencyCapture = false
-                val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                val endedAt = System.currentTimeMillis()
+                val elapsed = (endedAt - startedAt).coerceAtLeast(0L)
+                val finalLoops = _currentLoop.value
+                val finalActions = counter.get()
+                val finalMacroName = _activeMacro.value.name.ifBlank { macro.name }
+                if (elapsed >= 500L || finalActions > 0 || finalLoops > 0 || endReason == "Error") {
+                    localStore?.recordFarmingSession(
+                        com.example.data.FarmingSessionRecord(
+                            macroId = macro.id,
+                            macroName = finalMacroName,
+                            startedAtMs = startedAt,
+                            endedAtMs = endedAt,
+                            durationMs = elapsed,
+                            loopsCompleted = finalLoops,
+                            actionsExecuted = finalActions,
+                            watchdogRecoveries = watchdogCount.get(),
+                            bannedBlocks = bannedCount.get(),
+                            accountSwitches = accountSwitchCount.get(),
+                            humanBreaks = humanBreakCount.get(),
+                            endReason = endReason,
+                            finalVariables = lastVarsRef.get()
+                        )
+                    )
+                }
+                val cfg = localStore?.notificationConfig?.value
+                if (cfg != null) {
+                    val isPro = com.example.billing.PremiumStateHolder.isPremium.value
+                    val durTxt = com.example.data.FarmingStatsCalculator.formatDuration(elapsed)
+                    if (endReason == "Error" && ((cfg.notifyOnError && isPro) || cfg.alarmOnError)) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Error — $finalMacroName",
+                            message = "$errorDetail\nDurasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions",
+                            level = com.example.data.NotifyLevel.CRITICAL,
+                            sendRemote = cfg.notifyOnError && isPro,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnError,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    } else if (endReason == "Selesai" && ((cfg.notifyOnComplete && isPro) || cfg.alarmOnComplete)) {
+                        PhoneAlarmAndNotifyManager.dispatchAsync(
+                            context = appCtx,
+                            config = cfg,
+                            title = "Macro Selesai — $finalMacroName",
+                            message = "Durasi: $durTxt • Loop: $finalLoops • Aksi: $finalActions" +
+                                "\nWatchdog: ${watchdogCount.get()} • Banned dicegah: ${bannedCount.get()}",
+                            level = com.example.data.NotifyLevel.SUCCESS,
+                            sendRemote = cfg.notifyOnComplete && isPro,
+                            includeScreenshot = cfg.attachScreenshotOnEvents,
+                            triggerPhoneAlarm = cfg.alarmOnComplete,
+                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        )
+                    }
+                }
+                _liveVariables.value = emptyMap()
+                _humanBreakRemainingSec.value = 0
+                _liveSessionStats.value = null
+                _thermalPaused.value = false
+                _afkBlackScreenActive.value = false
                 if (_engineState.value != EngineState.ERROR) {
                     _engineState.value = EngineState.IDLE
                 }
                 pausedFlag.set(false)
-                ExecutionLogBus.info("Selesai (${counter.get()} aksi dalam ${elapsed}ms).")
+                ExecutionLogBus.info("Selesai ($finalActions aksi dalam ${elapsed}ms).")
             }
         }
     }
@@ -1128,6 +1585,7 @@ object AutomationCoordinator {
     fun resume() {
         if (_engineState.value == EngineState.PAUSED) {
             pausedFlag.set(false)
+            _thermalPaused.value = false
             _engineState.value = EngineState.RUNNING
             ExecutionLogBus.info("Dilanjutkan.")
         }
@@ -1138,6 +1596,11 @@ object AutomationCoordinator {
         pausedFlag.set(false)
         skipAccountRequested.set(false)
         _activeAccountLabel.value = ""
+        _liveVariables.value = emptyMap()
+        _humanBreakRemainingSec.value = 0
+        _liveSessionStats.value = null
+        _thermalPaused.value = false
+        _afkBlackScreenActive.value = false
         ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null

@@ -140,6 +140,8 @@ private fun WjustMacroApp() {
     val engineState by AutomationCoordinator.engineState.collectAsStateWithLifecycle()
     val isOverlayActive by AutomationCoordinator.isOverlayActive.collectAsStateWithLifecycle()
     val activeMacro by AutomationCoordinator.activeMacro.collectAsStateWithLifecycle()
+    val liveSessionStats by AutomationCoordinator.liveSessionStats.collectAsStateWithLifecycle()
+    val deviceHealth by AutomationCoordinator.deviceHealth.collectAsStateWithLifecycle()
     val lastPickedPixel by AutomationCoordinator.lastPickedPixel.collectAsStateWithLifecycle()
     val liveLogs by ExecutionLogBus.logs.collectAsStateWithLifecycle()
     val isCapturing by ScreenCaptureService.isCapturing.collectAsStateWithLifecycle()
@@ -147,6 +149,8 @@ private fun WjustMacroApp() {
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var toolsSubTab by remember { mutableIntStateOf(0) } // 0=Lua, 1=Log, 2=Pengaturan
+    var showStatsAndNotifySheet by remember { mutableStateOf(false) }
+    var showAfkAndScheduleSheet by remember { mutableStateOf(false) }
     var editingMacroId by remember { mutableStateOf<String?>(null) }
     var unlockedMacroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var securitySheetMacroId by remember { mutableStateOf<String?>(null) }
@@ -899,7 +903,9 @@ private fun WjustMacroApp() {
                             onDeleteMacro = { m -> viewModel.deleteMacro(m.id) },
                             isPremium = isPremium,
                             activePlanLabel = billingState.activePlanLabel,
-                            onOpenPaywall = { f -> openPaywall(f) }
+                            onOpenPaywall = { f -> openPaywall(f) },
+                            onOpenStatsAndNotify = { showStatsAndNotifySheet = true },
+                            onOpenAfkAndSchedule = { showAfkAndScheduleSheet = true }
                         )
 
                         MainTab.IMAGES -> ImageLibraryScreen(
@@ -1001,6 +1007,32 @@ private fun WjustMacroApp() {
                     }
                 }
             }
+        }
+
+        if (showStatsAndNotifySheet) {
+            com.example.ui.StatsAndNotifySheet(
+                store = com.example.data.LocalStore.get(context),
+                liveStats = liveSessionStats,
+                onDismiss = { showStatsAndNotifySheet = false },
+                isPremium = isPremium,
+                onRequirePremium = { label ->
+                    openPaywall(PremiumFeature.REMOTE_NOTIFICATIONS, "$label khusus Wjust macro PRO.")
+                }
+            )
+        }
+
+        if (showAfkAndScheduleSheet) {
+            com.example.ui.AfkGuardAndScheduleSheet(
+                store = com.example.data.LocalStore.get(context),
+                macros = macros,
+                deviceHealth = deviceHealth,
+                onDismiss = { showAfkAndScheduleSheet = false },
+                isPremium = isPremium,
+                freeScheduleLimit = PremiumFeatureGate.FREE_MAX_SCHEDULES,
+                onRequirePremium = { label ->
+                    openPaywall(PremiumFeature.SCHEDULER_LIMIT, "$label khusus Wjust macro PRO.")
+                }
+            )
         }
 
         // Password verification modal (guards locked edit, security/Active-Passive mode changes, logo change, duplicate)

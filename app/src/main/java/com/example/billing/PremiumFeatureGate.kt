@@ -75,9 +75,25 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
         title = "Multi-Akun Tanpa Batas (PRO)",
         subtitle = "Versi gratis mendukung hingga 2 akun per macro. Upgrade ke Wjust macro PRO untuk rotasi akun tanpa batas."
     ),
+    HUMANIZER_PRO(
+        title = "Humanizer Stealth, Break & Kustom (PRO)",
+        subtitle = "Mode Humanizer Natural gratis! Upgrade ke PRO untuk mode Stealth, Istirahat Alami (Human Break), dan pengaturan Gaussian/Bezier kustom."
+    ),
+    VISUAL_VARIABLES(
+        title = "Variabel & Penghitung Visual (PRO)",
+        subtitle = "Simpan hitungan, baca angka OCR ke variabel, dan cek kondisi variabel tanpa kode tersedia di Wjust macro PRO."
+    ),
+    REMOTE_NOTIFICATIONS(
+        title = "Notifikasi Telegram & Discord (PRO)",
+        subtitle = "Statistik lokal & Alarm HP gratis! Upgrade ke PRO untuk notifikasi Telegram Bot, Discord Webhook, screenshot layar, dan aksi Kirim Notifikasi."
+    ),
+    SCHEDULER_LIMIT(
+        title = "Jadwal Otomatis Tanpa Batas (PRO)",
+        subtitle = "Versi gratis mendukung 1 jadwal otomatis + Layar Hitam AFK & Guard HP penuh. Upgrade ke PRO untuk jadwal tanpa batas."
+    ),
     UPGRADE_GENERAL(
         title = "Wjust macro PRO",
-        subtitle = "Buka semua 22 jenis aksi (termasuk Cabang Urutan), macro & multi-akun tanpa batas, Macro Set, Ekspor/Impor, Anti-Macet, dan Lua Studio."
+        subtitle = "Buka semua 25 aksi, Variabel Visual, Humanizer Stealth + Break, Notifikasi Telegram/Discord, Jadwal & Multi-Akun tanpa batas."
     )
 }
 
@@ -90,6 +106,7 @@ data class MacroRunDenial(
 object PremiumFeatureGate {
     const val FREE_MAX_MACROS = 3
     const val FREE_MAX_ACCOUNTS = 2
+    const val FREE_MAX_SCHEDULES = 1
 
     val FREE_ACTION_KINDS: Set<ActionKind> = setOf(
         ActionKind.CLICK,
@@ -108,6 +125,13 @@ object PremiumFeatureGate {
 
     fun canAddAccount(currentAccountCount: Int, isPremium: Boolean): Boolean =
         isPremium || currentAccountCount < FREE_MAX_ACCOUNTS
+
+    fun canAddSchedule(currentScheduleCount: Int, isPremium: Boolean): Boolean =
+        isPremium || currentScheduleCount < FREE_MAX_SCHEDULES
+
+    fun isHumanizerConfigFree(config: com.example.data.HumanizerConfig): Boolean =
+        config.preset == com.example.data.HumanizerPreset.OFF ||
+            config.preset == com.example.data.HumanizerPreset.NATURAL
 
     fun remainingFreeMacroSlots(currentMacroCount: Int): Int =
         (FREE_MAX_MACROS - currentMacroCount).coerceAtLeast(0)
@@ -137,10 +161,22 @@ object PremiumFeatureGate {
         val blocked = findFirstBlockedAction(macro.actions)
             ?: if (macro.accountSwitch.enabled) findFirstBlockedAction(macro.accountSwitch.switchActions) else null
         if (blocked != null) {
+            val feat = when (blocked.kind) {
+                ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE -> PremiumFeature.VISUAL_VARIABLES
+                ActionKind.NOTIFY -> PremiumFeature.REMOTE_NOTIFICATIONS
+                else -> PremiumFeature.ACTION_LOCKED
+            }
             return MacroRunDenial(
-                feature = PremiumFeature.ACTION_LOCKED,
+                feature = feat,
                 reason = "Aksi '${blocked.kind.label}' khusus Wjust macro PRO. Versi gratis mendukung Klik, Swipe, Deteksi Gambar, dan Ganti Akun (maks $FREE_MAX_ACCOUNTS akun).",
                 blockedKind = blocked.kind
+            )
+        }
+
+        if (!isHumanizerConfigFree(macro.humanizer)) {
+            return MacroRunDenial(
+                feature = PremiumFeature.HUMANIZER_PRO,
+                reason = "Humanizer ${macro.humanizer.preset.shortLabel} / Human Break khusus Wjust macro PRO. Mode Natural tersedia gratis."
             )
         }
 

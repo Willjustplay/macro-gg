@@ -15,7 +15,7 @@ data class ContainerRef(val parentId: String? = null, val slot: Slot? = null) {
 }
 
 fun Action.slots(): List<Slot> = when (this) {
-    is ImageAction, is TrackObjectAction, is TextAction, is ColorAction, is SelectAccountAction -> listOf(Slot.THEN, Slot.ELSE)
+    is ImageAction, is TrackObjectAction, is TextAction, is ColorAction, is SelectAccountAction, is CheckVariableAction -> listOf(Slot.THEN, Slot.ELSE)
     is LoopAction -> listOf(Slot.BODY)
     else -> emptyList()
 }
@@ -26,6 +26,7 @@ fun Action.childList(slot: Slot): List<Action> = when (this) {
     is TextAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is ColorAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is SelectAccountAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
+    is CheckVariableAction -> if (slot == Slot.THEN) thenActions else if (slot == Slot.ELSE) elseActions else emptyList()
     is LoopAction -> if (slot == Slot.BODY) actions else emptyList()
     else -> emptyList()
 }
@@ -52,6 +53,11 @@ fun Action.withChildList(slot: Slot, list: List<Action>): Action = when (this) {
         else -> this
     }
     is SelectAccountAction -> when (slot) {
+        Slot.THEN -> copy(thenActions = list)
+        Slot.ELSE -> copy(elseActions = list)
+        else -> this
+    }
+    is CheckVariableAction -> when (slot) {
         Slot.THEN -> copy(thenActions = list)
         Slot.ELSE -> copy(elseActions = list)
         else -> this

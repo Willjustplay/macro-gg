@@ -1093,9 +1093,14 @@ fun MacroEditorScreen(
             onPick = { kind ->
                 if (!isPremium && !com.example.billing.PremiumFeatureGate.isActionKindFree(kind)) {
                     addTargetRef = null
+                    val feat = when (kind) {
+                        ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE -> com.example.billing.PremiumFeature.VISUAL_VARIABLES
+                        ActionKind.NOTIFY -> com.example.billing.PremiumFeature.REMOTE_NOTIFICATIONS
+                        else -> com.example.billing.PremiumFeature.ACTION_LOCKED
+                    }
                     onRequirePremium(
-                        com.example.billing.PremiumFeature.ACTION_LOCKED,
-                        "Aksi '${kind.label}' khusus Wjust macro PRO. Versi gratis hanya mendukung Klik, Swipe, dan Deteksi Gambar."
+                        feat,
+                        "Aksi '${kind.label}' khusus Wjust macro PRO. Versi gratis mendukung Klik, Swipe, Deteksi Gambar, dan Ganti Akun (maks 2 akun)."
                     )
                     return@AddActionPickerSheet
                 }
@@ -1850,6 +1855,8 @@ private fun AddActionPickerSheet(
     val groups = if (isPremium) {
         listOf(
             "Deteksi (Macrorify)" to listOf(ActionKind.IMAGE, ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
+            "Variabel & Hitungan (Tanpa Kode)" to listOf(ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE),
+            "Notifikasi & Alarm HP" to listOf(ActionKind.NOTIFY),
             "Cabang & Arah Urutan" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
             "Ganti Akun Game (Semua Game)" to listOf(ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT),
             "Sentuhan & Gestur" to listOf(ActionKind.CLICK, ActionKind.LONG_PRESS, ActionKind.SWIPE, ActionKind.ZOOM, ActionKind.WAIT),
@@ -1860,6 +1867,8 @@ private fun AddActionPickerSheet(
         listOf(
             "Aksi Gratis (Tersedia)" to listOf(ActionKind.CLICK, ActionKind.SWIPE, ActionKind.IMAGE),
             "Ganti Akun Gratis (Maks 2 Akun)" to listOf(ActionKind.SWITCH_ACCOUNT, ActionKind.SELECT_ACCOUNT),
+            "Variabel Visual (PRO)" to listOf(ActionKind.VARIABLE, ActionKind.CHECK_VARIABLE),
+            "Notifikasi Telegram / Discord (PRO)" to listOf(ActionKind.NOTIFY),
             "Cabang Urutan (PRO)" to listOf(ActionKind.BRANCH_ROUTER, ActionKind.GOTO_BRANCH),
             "Deteksi Lanjutan (PRO)" to listOf(ActionKind.TRACK_OBJECT, ActionKind.TEXT, ActionKind.COLOR),
             "Sentuhan & Jeda (PRO)" to listOf(ActionKind.LONG_PRESS, ActionKind.ZOOM, ActionKind.WAIT),
@@ -1960,6 +1969,7 @@ private fun MacroSettingsSheet(
     var maxMin by remember(macro.id) { mutableStateOf(macro.maxDurationMin.toString()) }
     var stuckSec by remember(macro.id) { mutableStateOf(macro.autoRecoverStuckSec.toString()) }
     var recoveryMode by remember(macro.id) { mutableStateOf(macro.stuckRecoveryMode) }
+    var humanizer by remember(macro.id) { mutableStateOf(macro.humanizer) }
     var autoScale by remember(macro.id) { mutableStateOf(macro.autoScaleResolution) }
     var sourceWText by remember(macro.id) {
         mutableStateOf(if (macro.sourceWidth > 0) macro.sourceWidth.toString() else "")
@@ -2197,6 +2207,18 @@ private fun MacroSettingsSheet(
 
             HorizontalDivider()
 
+            // Humanizer Engine (Mode Natural FREE; Stealth + Human Break + Custom PRO)
+            HumanizerSettingsSection(
+                config = humanizer,
+                onUpdate = { humanizer = it },
+                isPremium = isPremium,
+                onRequirePremium = { _ ->
+                    onRequirePremium(com.example.billing.PremiumFeature.HUMANIZER_PRO)
+                }
+            )
+
+            HorizontalDivider()
+
             // Auto-Scale Resolusi Layar (PRO)
             if (isPremium) {
                 AutoScaleControlsBlock(
@@ -2284,6 +2306,9 @@ private fun MacroSettingsSheet(
                     onClick = {
                         val savedSrcW = (sourceWText.toIntOrNull() ?: 0).coerceIn(0, 10000)
                         val savedSrcH = (sourceHText.toIntOrNull() ?: 0).coerceIn(0, 10000)
+                        val safeHumanizer = if (isPremium || com.example.billing.PremiumFeatureGate.isHumanizerConfigFree(humanizer)) {
+                            humanizer
+                        } else macro.humanizer
                         onSave(
                             macro.copy(
                                 name = name.trim().ifBlank { "Macro Baru" },
@@ -2292,6 +2317,7 @@ private fun MacroSettingsSheet(
                                 jitterPx = (jitter.toIntOrNull() ?: 0).coerceIn(0, 60),
                                 randomDelayMs = (randomDelay.toLongOrNull() ?: 0L).coerceAtLeast(0L),
                                 maxDurationMin = (maxMin.toIntOrNull() ?: 0).coerceIn(0, 1440),
+                                humanizer = safeHumanizer,
                                 autoRecoverStuckSec = if (isPremium) (stuckSec.toIntOrNull() ?: 0).coerceIn(0, 3600) else 0,
                                 stuckRecoveryMode = if (isPremium) recoveryMode else macro.stuckRecoveryMode,
                                 sourceWidth = if (isPremium) savedSrcW else macro.sourceWidth,

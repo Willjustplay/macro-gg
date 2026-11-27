@@ -321,6 +321,8 @@ object ResolutionScaler {
                 a.interactionMode == TrackInteractionMode.DRAG_TO_POINT ||
                 a.interactionMode == TrackInteractionMode.DRAG_FROM_POINT_TO_OBJECT
             is TextAction -> a.region != null
+            is SelectAccountAction -> a.region != null
+            is VariableAction -> a.region != null
             else -> false
         }
     }
@@ -375,6 +377,14 @@ object ResolutionScaler {
                     }
                 }
                 is TextAction -> a.region?.let {
+                    maxX = max(maxX, it.right)
+                    maxY = max(maxY, it.bottom)
+                }
+                is SelectAccountAction -> a.region?.let {
+                    maxX = max(maxX, it.right)
+                    maxY = max(maxY, it.bottom)
+                }
+                is VariableAction -> a.region?.let {
                     maxX = max(maxX, it.right)
                     maxY = max(maxY, it.bottom)
                 }
