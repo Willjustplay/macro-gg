@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -148,7 +149,8 @@ fun PlayerHomeScreen(
     onTogglePassive: (Macro) -> Unit,
     onDeleteMacro: (Macro) -> Unit,
     onDeleteMacroSet: (MacroSet, Boolean) -> Unit,
-    onOpenStatsAndNotify: () -> Unit = {}
+    onOpenStatsAndNotify: () -> Unit = {},
+    onOpenAfkAndSchedule: () -> Unit = {}
 ) {
     var expandedSetIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteMacro by remember { mutableStateOf<Macro?>(null) }
@@ -269,18 +271,38 @@ fun PlayerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF6366F1).copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Color(0xFF6366F1).copy(alpha = 0.35f))
+                ) {
+                    IconButton(
+                        onClick = onOpenAfkAndSchedule,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Bedtime,
+                            contentDescription = "AFK, Guard & Jadwal",
+                            tint = Color(0xFF818CF8),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(5.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
                     color = Color(0xFFF59E0B).copy(alpha = 0.14f),
                     border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.35f))
                 ) {
                     IconButton(
                         onClick = onOpenStatsAndNotify,
-                        modifier = Modifier.size(40.dp)
+                        modifier = Modifier.size(38.dp)
                     ) {
                         Icon(
-                            imageVector = androidx.compose.material.icons.Icons.Filled.QueryStats,
+                            imageVector = Icons.Filled.QueryStats,
                             contentDescription = "Statistik & Notifikasi",
                             tint = Color(0xFFF59E0B),
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
                     }
                 }

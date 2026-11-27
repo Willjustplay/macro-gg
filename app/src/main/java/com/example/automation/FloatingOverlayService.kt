@@ -104,6 +104,8 @@ class FloatingOverlayService : Service() {
     private var activeAccountBadgeView: TextView? = null
     private var humanBreakBadgeView: TextView? = null
     private var visualDebugBtn: TextView? = null
+    private var afkBtn: TextView? = null
+    private var afkController: AfkBlackScreenController? = null
     private var isCollapsed = false
 
     // Hide Buttons Mode (minimizes entire overlay UI to a tiny translucent bubble)
@@ -466,6 +468,13 @@ class FloatingOverlayService : Service() {
                 Toast.makeText(this, "Macro dikunci dengan sandi — tidak dapat diubah", Toast.LENGTH_SHORT).show()
             }
         })
+
+        // Mode Layar Hitam AFK (🌙) 1-tap toggle
+        val btnAfk = makeCompactButton("🌙", "#1E293B") {
+            AutomationCoordinator.toggleAfkBlackScreen()
+        }
+        afkBtn = btnAfk
+        topRow.addView(btnAfk)
 
         // Hide Buttons Mode toggle
         topRow.addView(makeCompactButton("👁", "#475569") {
@@ -1520,15 +1529,102 @@ class FloatingOverlayService : Service() {
         }
 
         serviceScope.launch {
-            AutomationCoordinator.humanBreakRemainingSec.collect { remSec ->
-                if (remSec <= 0) {
-                    humanBreakBadgeView?.visibility = View.GONE
-                } else {
+            combine(
+                AutomationCoordinator.humanBreakRemainingSec,
+                AutomationCoordinator.thermalPaused,
+                AutomationCoordinator.deviceHealth
+            ) { remSec, thermalPaused, health -> Triple(remSec, thermalPaused, health) }.collect { (remSec, thermalPaused, health) ->
+                if (thermalPaused) {
+                    val tempTxt = health?.let { com.example.data.DeviceGuardEvaluator.formatTemp(it.tempCelsius) } ?: ""
+                    humanBreakBadgeView?.text = "❄ Pendinginan HP ($tempTxt)..."
+                    humanBreakBadgeView?.setTextColor(Color.parseColor("#7DD3FC"))
+                    humanBreakBadgeView?.visibility = View.VISIBLE
+                } else if (remSec > 0) {
                     val m = remSec / 60
                     val s = remSec % 60
                     humanBreakBadgeView?.text = String.format("☕ Istirahat Alami: %02d:%02d", m, s)
+                    humanBreakBadgeView?.setTextColor(Color.parseColor("#FDE68A"))
                     humanBreakBadgeView?.visibility = View.VISIBLE
+                } else {
+                    humanBreakBadgeView?.visibility = View.GONE
                 }
+            }
+        }
+
+        serviceScope.launch {
+            AutomationCoordinator.afkBlackScreenActive.collect { active ->
+                (afkBtn?.background as? GradientDrawable)?.setColor(
+                    Color.parseColor(if (active) "#6366F1" else "#1E293B")
+                )
+                if (active) {
+                    refreshScreenSize()
+                    dismissMacroSettingsPanel()
+                    dismissMarkerEditor()
+                    setOverlayChromeVisibility(View.GONE)
+                    hiddenBubbleView?.visibility = View.GONE
+                    val ctrl = afkController ?: AfkBlackScreenController(
+                        context = this@FloatingOverlayService,
+                        windowManager = windowManager,
+                        scope = serviceScope,
+                        onWake = { AutomationCoordinator.setAfkBlackScreenActive(false) },
+                        onStopMacro = { AutomationCoordinator.stop() }
+                    ).also { afkController = it }
+                    val activeMacro = AutomationCoordinator.activeMacro.value
+                    val needsVision = AutomationCoordinator.activeMode.value == AutomationMode.MACRO &&
+                        AutomationCoordinator.macroNeedsScreenCapture(activeMacro)
+                    ctrl.show(
+                        config = store.afkGuardConfig.value,
+                        macroName = AutomationCoordinator.activeTargetName(),
+                        macroNeedsVision = needsVision,
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight
+                    )
+                    ctrl.updateHud(
+                        loop = AutomationCoordinator.currentLoop.value,
+                        actions = AutomationCoordinator.actionsExecuted.value,
+                        health = AutomationCoordinator.refreshDeviceHealth(),
+                        thermalPaused = AutomationCoordinator.thermalPaused.value,
+                        humanBreakSec = AutomationCoordinator.humanBreakRemainingSec.value
+                    )
+                } else {
+                    afkController?.dismiss()
+                    if (isOverlayHidden) {
+                        hiddenBubbleView?.visibility = View.VISIBLE
+                    } else {
+                        setOverlayChromeVisibility(View.VISIBLE)
+                        applyMarkerVisibility()
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
+            combine(
+                AutomationCoordinator.currentLoop,
+                AutomationCoordinator.actionsExecuted,
+                AutomationCoordinator.deviceHealth,
+                AutomationCoordinator.thermalPaused,
+                AutomationCoordinator.humanBreakRemainingSec
+            ) { loop, acts, health, thermal, brk ->
+                listOf(loop, acts, health, thermal, brk)
+            }.collect {
+                if (afkController?.isShowing == true) {
+                    afkController?.updateHud(
+                        loop = AutomationCoordinator.currentLoop.value,
+                        actions = AutomationCoordinator.actionsExecuted.value,
+                        health = AutomationCoordinator.deviceHealth.value,
+                        thermalPaused = AutomationCoordinator.thermalPaused.value,
+                        humanBreakSec = AutomationCoordinator.humanBreakRemainingSec.value
+                    )
+                }
+            }
+        }
+
+        // Precision in-service scheduler heartbeat every 20s (complements AlarmManager when overlay is active)
+        serviceScope.launch {
+            while (true) {
+                delay(20_000L)
+                MacroSchedulerManager.checkAndRunDueSchedules(this@FloatingOverlayService)
             }
         }
 
@@ -2441,6 +2537,9 @@ class FloatingOverlayService : Service() {
 
     override fun onDestroy() {
         AutomationCoordinator.setOverlayActive(false)
+        AutomationCoordinator.setAfkBlackScreenActive(false)
+        afkController?.dismiss()
+        afkController = null
         hiddenBubbleView?.let {
             try { windowManager.removeView(it) } catch (_: Throwable) {}
         }

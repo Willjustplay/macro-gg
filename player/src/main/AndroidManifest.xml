@@ -98,6 +98,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-controlled floating play/pause/stop bar and compact status log for encrypted .wjm macros" />
         </service>
+
+        <receiver
+            android:name=".runtime.PlayerScheduleReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

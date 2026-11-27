@@ -123,6 +123,7 @@ private fun WjustPlayerApp(
     val isOverlayActive by PlayerCoordinator.isOverlayActive.collectAsStateWithLifecycle()
     val activeMacro by PlayerCoordinator.activeMacro.collectAsStateWithLifecycle()
     val liveSessionStats by PlayerCoordinator.liveSessionStats.collectAsStateWithLifecycle()
+    val deviceHealth by PlayerCoordinator.deviceHealth.collectAsStateWithLifecycle()
     val logs by PlayerSafeLogBus.logs.collectAsStateWithLifecycle()
     val isCapturing by PlayerScreenCaptureService.isCapturing.collectAsStateWithLifecycle()
     val isAccessibilityConnected by PlayerAccessibilityService.isConnected.collectAsStateWithLifecycle()
@@ -131,6 +132,7 @@ private fun WjustPlayerApp(
     var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     var showLocalImportDialog by remember { mutableStateOf(false) }
     var showStatsAndNotifySheet by remember { mutableStateOf(false) }
+    var showAfkAndScheduleSheet by remember { mutableStateOf(false) }
     var managingAccountsMacro by remember { mutableStateOf<Macro?>(null) }
     var localWjmFiles by remember { mutableStateOf<List<PlayerStorageHelper.LocalWjmEntry>>(emptyList()) }
     var loadingLocalFiles by remember { mutableStateOf(false) }
@@ -374,7 +376,8 @@ private fun WjustPlayerApp(
                         onTogglePassive = viewModel::togglePassive,
                         onDeleteMacro = viewModel::deleteMacro,
                         onDeleteMacroSet = viewModel::deleteMacroSet,
-                        onOpenStatsAndNotify = { showStatsAndNotifySheet = true }
+                        onOpenStatsAndNotify = { showStatsAndNotifySheet = true },
+                        onOpenAfkAndSchedule = { showAfkAndScheduleSheet = true }
                     )
                     PlayerTab.LOGS -> PlayerLogScreen(
                         logs = logs,
@@ -389,6 +392,15 @@ private fun WjustPlayerApp(
                 notifyStore = com.willjustplay.wjustplayer.data.PlayerNotificationStore.get(context),
                 liveStats = liveSessionStats,
                 onDismiss = { showStatsAndNotifySheet = false }
+            )
+        }
+
+        if (showAfkAndScheduleSheet) {
+            PlayerAfkAndScheduleSheet(
+                notifyStore = com.willjustplay.wjustplayer.data.PlayerNotificationStore.get(context),
+                macros = macros,
+                deviceHealth = deviceHealth,
+                onDismiss = { showAfkAndScheduleSheet = false }
             )
         }
 

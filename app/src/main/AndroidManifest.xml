@@ -82,6 +82,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-controlled floating macro control bar, screenshot cropper, touch recorder, visual markers, and live log" />
         </service>
+
+        <receiver
+            android:name=".automation.MacroScheduleReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

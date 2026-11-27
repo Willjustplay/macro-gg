@@ -147,6 +147,103 @@ object AutomationCoordinator {
     private val _liveSessionStats = MutableStateFlow<com.example.data.LiveSessionStats?>(null)
     val liveSessionStats: StateFlow<com.example.data.LiveSessionStats?> = _liveSessionStats.asStateFlow()
 
+    private val _afkBlackScreenActive = MutableStateFlow(false)
+    val afkBlackScreenActive: StateFlow<Boolean> = _afkBlackScreenActive.asStateFlow()
+
+    private val _deviceHealth = MutableStateFlow<com.example.data.DeviceHealthSnapshot?>(null)
+    val deviceHealth: StateFlow<com.example.data.DeviceHealthSnapshot?> = _deviceHealth.asStateFlow()
+
+    private val _thermalPaused = MutableStateFlow(false)
+    val thermalPaused: StateFlow<Boolean> = _thermalPaused.asStateFlow()
+
+    fun toggleAfkBlackScreen(): Boolean {
+        val next = !_afkBlackScreenActive.value
+        _afkBlackScreenActive.value = next
+        if (next) {
+            _deviceHealth.value = DeviceHealthReader.read(appCtx)
+            ExecutionLogBus.info("🌙 Mode Layar Hitam AFK AKTIF — layar diredupkan hemat baterai.")
+        } else {
+            ExecutionLogBus.info("☀ Mode Layar Hitam AFK dimatikan.")
+        }
+        return next
+    }
+
+    fun setAfkBlackScreenActive(active: Boolean) {
+        if (_afkBlackScreenActive.value == active) return
+        _afkBlackScreenActive.value = active
+        if (active) {
+            _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        }
+    }
+
+    fun refreshDeviceHealth(): com.example.data.DeviceHealthSnapshot? {
+        val snap = DeviceHealthReader.read(appCtx)
+        _deviceHealth.value = snap
+        return snap
+    }
+
+    fun runScheduledMacro(schedule: com.example.data.MacroSchedule) {
+        val localStore = store ?: return
+        val target = localStore.getMacroById(schedule.macroId)
+        val schedTitle = schedule.label.ifBlank { schedule.macroName.ifBlank { "Jadwal" } }
+        if (target == null) {
+            ExecutionLogBus.error("⏰ Jadwal '$schedTitle' gagal: macro tidak ditemukan.")
+            return
+        }
+        val effectiveNow = localStore.effectiveNowMs()
+        val parentSet = localStore.getMacroSetById(target.setId)
+        MacroSecurity.checkDirectRun(target, effectiveNow, parentSet)?.let { denial ->
+            ExecutionLogBus.error("⏰ Jadwal '$schedTitle' ditolak: ${MacroSecurity.denialMessage(target, denial, parentSet)}")
+            return
+        }
+        if (!MacroAccessibilityService.isConnected.value) {
+            val msg = "Jadwal '$schedTitle' tidak bisa jalan karena Aksesibilitas belum aktif."
+            ExecutionLogBus.error("⏰ $msg")
+            val cfg = localStore.notificationConfig.value
+            if (cfg.notifyOnError || cfg.alarmOnError) {
+                PhoneAlarmAndNotifyManager.dispatchAsync(
+                    context = appCtx,
+                    config = cfg,
+                    title = "Jadwal Gagal — $schedTitle",
+                    message = msg,
+                    level = com.example.data.NotifyLevel.WARNING,
+                    sendRemote = cfg.notifyOnError,
+                    includeScreenshot = false,
+                    triggerPhoneAlarm = cfg.alarmOnError
+                )
+            }
+            return
+        }
+
+        ExecutionLogBus.info("⏰ Memulai jadwal '$schedTitle' → macro '${target.name}'...")
+        engineScope.launch {
+            val pkg = schedule.launchAppPackage.trim()
+            if (pkg.isNotBlank()) {
+                val ctx = appCtx
+                val launchIntent = runCatching { ctx?.packageManager?.getLaunchIntentForPackage(pkg) }.getOrNull()
+                if (launchIntent != null && ctx != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                    val launched = MacroAccessibilityService.launchActivityIntent(launchIntent) ||
+                        runCatching { ctx.startActivity(launchIntent); true }.getOrDefault(false)
+                    if (launched) {
+                        ExecutionLogBus.info("⏰ Membuka '${schedule.launchAppLabel.ifBlank { pkg }}', menunggu ${schedule.launchWaitSec}d...")
+                        delay(schedule.launchWaitSec.coerceIn(1, 60) * 1000L)
+                    }
+                }
+            }
+            val effectiveMacro = if (schedule.stopAfterMinutes > 0) {
+                target.copy(maxDurationMin = schedule.stopAfterMinutes)
+            } else target
+            val (sw, sh) = liveScreenSize(ScreenCaptureService.captureWidth, ScreenCaptureService.captureHeight)
+            runMacro(
+                macro = effectiveMacro,
+                screenWidth = sw,
+                screenHeight = sh,
+                startInBlackScreen = schedule.enableBlackScreenOnStart
+            )
+        }
+    }
+
     fun toggleVisualDebug(): Boolean {
         val next = !_visualDebugEnabled.value
         _visualDebugEnabled.value = next
@@ -173,6 +270,8 @@ object AutomationCoordinator {
         if (store == null) {
             store = LocalStore.get(context)
         }
+        _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        MacroSchedulerManager.syncAlarms(context)
     }
 
     fun getStore(): LocalStore? = store
@@ -683,7 +782,8 @@ object AutomationCoordinator {
     fun runMacro(
         macro: Macro,
         screenWidth: Int = ScreenCaptureService.captureWidth,
-        screenHeight: Int = ScreenCaptureService.captureHeight
+        screenHeight: Int = ScreenCaptureService.captureHeight,
+        startInBlackScreen: Boolean = false
     ) {
         stop()
         val effectiveNow = store?.effectiveNowMs() ?: System.currentTimeMillis()
@@ -710,6 +810,11 @@ object AutomationCoordinator {
         _activeAccountLabel.value = ""
         _liveVariables.value = emptyMap()
         _humanBreakRemainingSec.value = 0
+        _thermalPaused.value = false
+        _deviceHealth.value = DeviceHealthReader.read(appCtx)
+        if (startInBlackScreen) {
+            _afkBlackScreenActive.value = true
+        }
         _engineState.value = EngineState.RUNNING
         ScreenCaptureService.highFrequencyCapture = true
 
@@ -770,6 +875,99 @@ object AutomationCoordinator {
                             triggerPhoneAlarm = false,
                             captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
                         )
+                    }
+                }
+            }
+            val deviceGuardJob = launch {
+                while (isActive && !stopRequested.get()) {
+                    val snap = DeviceHealthReader.read(appCtx)
+                    if (snap != null) {
+                        _deviceHealth.value = snap
+                        val gCfg = localStore?.afkGuardConfig?.value ?: com.example.data.AfkAndDeviceGuardConfig()
+                        val decision = com.example.data.DeviceGuardEvaluator.evaluate(gCfg, snap, _thermalPaused.value)
+                        val nCfg = localStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+                        val macroTitle = _activeMacro.value.name.ifBlank { macro.name }
+                        when (decision) {
+                            com.example.data.DeviceGuardDecision.STOP_LOW_BATTERY -> {
+                                val msg = "Baterai ${snap.batteryPercent}% (batas ${gCfg.minBatteryPercent}%, tidak dicas) — macro dihentikan demi keamanan baterai."
+                                ExecutionLogBus.warn("🔋 $msg")
+                                if (gCfg.notifyOnGuardTrigger) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Guard Baterai Lemah — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.WARNING,
+                                        sendRemote = nCfg.hasAnyRemoteConfigured(),
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = true
+                                    )
+                                }
+                                stopRequested.set(true)
+                                activeJob?.cancel()
+                                break
+                            }
+                            com.example.data.DeviceGuardDecision.STOP_OVERHEAT -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                val msg = "Suhu HP mencapai $tempTxt (batas ${gCfg.maxTempCelsius}°C) — macro dihentikan otomatis."
+                                ExecutionLogBus.warn("🌡 $msg")
+                                if (gCfg.notifyOnGuardTrigger) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Guard Suhu Panas — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.CRITICAL,
+                                        sendRemote = nCfg.hasAnyRemoteConfigured(),
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = true
+                                    )
+                                }
+                                stopRequested.set(true)
+                                activeJob?.cancel()
+                                break
+                            }
+                            com.example.data.DeviceGuardDecision.PAUSE_OVERHEAT -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                _thermalPaused.value = true
+                                pausedFlag.set(true)
+                                _engineState.value = EngineState.PAUSED
+                                val msg = "Suhu HP $tempTxt (≥ ${gCfg.maxTempCelsius}°C) — macro dijeda sementara untuk mendinginkan HP."
+                                ExecutionLogBus.warn("🌡 $msg")
+                                if (gCfg.notifyOnGuardTrigger) {
+                                    PhoneAlarmAndNotifyManager.dispatchAsync(
+                                        context = appCtx,
+                                        config = nCfg,
+                                        title = "Jeda Pendinginan HP — $macroTitle",
+                                        message = msg,
+                                        level = com.example.data.NotifyLevel.WARNING,
+                                        sendRemote = nCfg.hasAnyRemoteConfigured(),
+                                        includeScreenshot = false,
+                                        triggerPhoneAlarm = false
+                                    )
+                                }
+                            }
+                            com.example.data.DeviceGuardDecision.RESUME_COOLED -> {
+                                val tempTxt = com.example.data.DeviceGuardEvaluator.formatTemp(snap.tempCelsius)
+                                _thermalPaused.value = false
+                                pausedFlag.set(false)
+                                _engineState.value = EngineState.RUNNING
+                                ExecutionLogBus.info("❄ Suhu HP turun ke $tempTxt — macro dilanjutkan otomatis.")
+                            }
+                            com.example.data.DeviceGuardDecision.STAY_THERMAL_PAUSED,
+                            com.example.data.DeviceGuardDecision.OK -> Unit
+                        }
+                    }
+                    delay(10_000L)
+                }
+            }
+            val autoBlackScreenJob = launch {
+                val sec = localStore?.afkGuardConfig?.value?.autoBlackScreenAfterSec ?: 0
+                if (sec > 0 && !_afkBlackScreenActive.value) {
+                    cooperativeDelay(sec.coerceIn(5, 3600) * 1000L)
+                    if (isActive && !stopRequested.get() && _engineState.value == EngineState.RUNNING) {
+                        _afkBlackScreenActive.value = true
+                        ExecutionLogBus.info("🌙 Layar Hitam AFK otomatis aktif setelah ${sec}d.")
                     }
                 }
             }
@@ -1115,6 +1313,8 @@ object AutomationCoordinator {
                 ExecutionLogBus.error("Error: $errorDetail")
             } finally {
                 periodicReportJob.cancel()
+                deviceGuardJob.cancel()
+                autoBlackScreenJob.cancel()
                 localStore?.flushClockWatermark()
                 ScreenCaptureService.trackingCaptureMode = false
                 ScreenCaptureService.highFrequencyCapture = false
@@ -1175,6 +1375,8 @@ object AutomationCoordinator {
                 _liveVariables.value = emptyMap()
                 _humanBreakRemainingSec.value = 0
                 _liveSessionStats.value = null
+                _thermalPaused.value = false
+                _afkBlackScreenActive.value = false
                 if (_engineState.value != EngineState.ERROR) {
                     _engineState.value = EngineState.IDLE
                 }
@@ -1359,6 +1561,7 @@ object AutomationCoordinator {
     fun resume() {
         if (_engineState.value == EngineState.PAUSED) {
             pausedFlag.set(false)
+            _thermalPaused.value = false
             _engineState.value = EngineState.RUNNING
             ExecutionLogBus.info("Dilanjutkan.")
         }
@@ -1372,6 +1575,8 @@ object AutomationCoordinator {
         _liveVariables.value = emptyMap()
         _humanBreakRemainingSec.value = 0
         _liveSessionStats.value = null
+        _thermalPaused.value = false
+        _afkBlackScreenActive.value = false
         ScreenCaptureService.highFrequencyCapture = false
         activeJob?.cancel()
         activeJob = null

@@ -54,6 +54,8 @@ class PlayerOverlayService : Service() {
     private var activeAccountRow: LinearLayout? = null
     private var activeAccountBadgeView: TextView? = null
     private var humanBreakBadgeView: TextView? = null
+    private var afkBtn: TextView? = null
+    private var afkController: PlayerAfkBlackScreenController? = null
 
     private var hiddenBubbleView: View? = null
     private var logOverlayView: View? = null
@@ -101,6 +103,9 @@ class PlayerOverlayService : Service() {
 
     override fun onDestroy() {
         PlayerCoordinator.setOverlayActive(false)
+        PlayerCoordinator.setAfkBlackScreenActive(false)
+        afkController?.dismiss()
+        afkController = null
         serviceScope.cancel()
         removeViewSafe(controlBarView)
         removeViewSafe(hiddenBubbleView)
@@ -318,6 +323,12 @@ class PlayerOverlayService : Service() {
         row.addView(makeBtn("■", "#DC2626") {
             PlayerCoordinator.stop()
         })
+
+        val btnAfk = makeBtn("🌙", "#1E293B") {
+            PlayerCoordinator.toggleAfkBlackScreen()
+        }
+        afkBtn = btnAfk
+        row.addView(btnAfk)
 
         row.addView(makeBtn("👁", "#475569") {
             enterHideButtonsMode()
@@ -599,15 +610,91 @@ class PlayerOverlayService : Service() {
             }
         }
         serviceScope.launch {
-            PlayerCoordinator.humanBreakRemainingSec.collectLatest { remSec ->
-                if (remSec <= 0) {
-                    humanBreakBadgeView?.visibility = View.GONE
-                } else {
+            kotlinx.coroutines.flow.combine(
+                PlayerCoordinator.humanBreakRemainingSec,
+                PlayerCoordinator.thermalPaused,
+                PlayerCoordinator.deviceHealth
+            ) { remSec, thermal, health -> Triple(remSec, thermal, health) }.collectLatest { (remSec, thermal, health) ->
+                if (thermal) {
+                    val tempTxt = health?.let { com.example.data.DeviceGuardEvaluator.formatTemp(it.tempCelsius) } ?: ""
+                    humanBreakBadgeView?.text = "❄ Pendinginan HP ($tempTxt)..."
+                    humanBreakBadgeView?.setTextColor(Color.parseColor("#7DD3FC"))
+                    humanBreakBadgeView?.visibility = View.VISIBLE
+                } else if (remSec > 0) {
                     val m = remSec / 60
                     val s = remSec % 60
                     humanBreakBadgeView?.text = String.format("☕ Istirahat: %02d:%02d", m, s)
+                    humanBreakBadgeView?.setTextColor(Color.parseColor("#FDE68A"))
                     humanBreakBadgeView?.visibility = View.VISIBLE
+                } else {
+                    humanBreakBadgeView?.visibility = View.GONE
                 }
+            }
+        }
+        serviceScope.launch {
+            PlayerCoordinator.afkBlackScreenActive.collectLatest { active ->
+                (afkBtn?.background as? GradientDrawable)?.setColor(
+                    Color.parseColor(if (active) "#6366F1" else "#1E293B")
+                )
+                if (active) {
+                    refreshScreenSize()
+                    controlBarView?.visibility = View.GONE
+                    logOverlayView?.visibility = View.GONE
+                    hiddenBubbleView?.visibility = View.GONE
+                    val ctrl = afkController ?: PlayerAfkBlackScreenController(
+                        context = this@PlayerOverlayService,
+                        windowManager = windowManager,
+                        scope = serviceScope,
+                        onWake = { PlayerCoordinator.setAfkBlackScreenActive(false) },
+                        onStopMacro = { PlayerCoordinator.stop() }
+                    ).also { afkController = it }
+                    val m = PlayerCoordinator.activeMacro.value
+                    val needsVision = m != null && PlayerCoordinator.macroNeedsScreenCapture(m)
+                    val cfg = com.willjustplay.wjustplayer.data.PlayerNotificationStore.get(this@PlayerOverlayService).afkGuardConfig.value
+                    ctrl.show(
+                        config = cfg,
+                        macroName = m?.name ?: "Wjust Player",
+                        macroNeedsVision = needsVision,
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight
+                    )
+                    ctrl.updateHud(
+                        loop = PlayerCoordinator.currentLoop.value,
+                        health = PlayerCoordinator.refreshDeviceHealth(),
+                        thermalPaused = PlayerCoordinator.thermalPaused.value,
+                        humanBreakSec = PlayerCoordinator.humanBreakRemainingSec.value
+                    )
+                } else {
+                    afkController?.dismiss()
+                    if (isOverlayHidden) {
+                        hiddenBubbleView?.visibility = View.VISIBLE
+                    } else {
+                        controlBarView?.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
+        serviceScope.launch {
+            kotlinx.coroutines.flow.combine(
+                PlayerCoordinator.currentLoop,
+                PlayerCoordinator.deviceHealth,
+                PlayerCoordinator.thermalPaused,
+                PlayerCoordinator.humanBreakRemainingSec
+            ) { loop, health, thermal, brk -> listOf(loop, health, thermal, brk) }.collectLatest {
+                if (afkController?.isShowing == true) {
+                    afkController?.updateHud(
+                        loop = PlayerCoordinator.currentLoop.value,
+                        health = PlayerCoordinator.deviceHealth.value,
+                        thermalPaused = PlayerCoordinator.thermalPaused.value,
+                        humanBreakSec = PlayerCoordinator.humanBreakRemainingSec.value
+                    )
+                }
+            }
+        }
+        serviceScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(20_000L)
+                PlayerSchedulerManager.checkAndRunDueSchedules(this@PlayerOverlayService)
             }
         }
         serviceScope.launch {
