@@ -1845,8 +1845,9 @@ private fun MacroListCard(
                 }
             }
 
-            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard / Multi-Account badges row
-            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard || hasMultiAccount) {
+            // Security / Expiry / Passive / Auto-Scale / Watchdog / Banned Guard / Multi-Account / Bot ID badges row
+            val hasBotRemote = macro.remoteControlEnabled && macro.remoteId.isNotBlank()
+            if (effectivelyLocked || macro.isPassive || remainingLabel != null || isTampered || scaleTransform.isScaling || hasWatchdog || hasBannedGuard || hasMultiAccount || hasBotRemote) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isTampered) FeatureTag("⚠ Tidak Valid", Color(0xFFEF4444))
                     if (effectivelyLocked) FeatureTag("🔒 Terkunci", Color(0xFFA78BFA))
@@ -1855,6 +1856,9 @@ private fun MacroListCard(
                             text = if (macro.passiveEnabled) "🔗 Pasif ON" else "⛔ Pasif OFF",
                             color = if (macro.passiveEnabled) Color(0xFF10B981) else Color(0xFFF59E0B)
                         )
+                    }
+                    if (hasBotRemote) {
+                        FeatureTag("🤖 ID:${macro.remoteId}", Color(0xFF38BDF8))
                     }
                     if (scaleTransform.isScaling || effectivelyLocked) {
                         val scaleTint = if (macro.autoScaleResolution) Color(0xFF06B6D4) else Color(0xFF64748B)

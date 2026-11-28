@@ -308,3 +308,40 @@ fun Macro.countActions(): Int = actions.walk().count() + branches.sumOf { it.act
 fun Macro.countStuckActions(): Int = stuckActions.walk().count()
 
 fun Macro.countSwitchActions(): Int = accountSwitch.switchActions.walk().count()
+
+/** Returns all enabled remote-controllable actions in depth-first macro execution order. */
+fun Macro.enabledRemoteActions(): List<Pair<Action, ActionRemoteControl>> {
+    if (actionRemoteControls.isEmpty()) return emptyList()
+    val result = ArrayList<Pair<Action, ActionRemoteControl>>()
+    val seenIds = HashSet<String>()
+    for (act in allActionsSequence()) {
+        val ctrl = actionRemoteControls[act.id] ?: continue
+        if (!ctrl.enabled) continue
+        val slug = ctrl.normalizedId()
+        if (slug.isEmpty()) continue
+        if (seenIds.add(act.id)) {
+            result += act to ctrl
+        }
+    }
+    return result
+}
+
+/** Updates or removes the [ActionRemoteControl] entry for [actionId] while keeping valid entries intact. */
+fun Macro.withActionRemoteControl(actionId: String, control: ActionRemoteControl?): Macro {
+    val updated = actionRemoteControls.toMutableMap()
+    if (control == null || !control.enabled) {
+        updated.remove(actionId)
+    } else {
+        updated[actionId] = control.copy(remoteId = RemoteIdSanitizer.sanitize(control.remoteId))
+    }
+    return copy(actionRemoteControls = updated)
+}
+
+/** Removes any stale [actionRemoteControls] entries whose action IDs no longer exist in this macro. */
+fun Macro.pruneOrphanRemoteControls(): Macro {
+    if (actionRemoteControls.isEmpty()) return this
+    val liveIds = allActionsSequence().map { it.id }.toHashSet()
+    val cleaned = actionRemoteControls.filterKeys { it in liveIds }
+    return if (cleaned.size == actionRemoteControls.size) this else copy(actionRemoteControls = cleaned)
+}
+

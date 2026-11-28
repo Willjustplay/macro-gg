@@ -8,7 +8,9 @@ import com.example.data.AccountScrollDirection
 import com.example.data.AccountSwitchMethod
 import com.example.data.AccountTriggerMode
 import com.example.data.Action
+import com.example.data.ActionRemoteControl
 import com.example.data.BannedImageMode
+import com.example.data.RemoteActionMode
 import com.example.data.BranchConditionType
 import com.example.data.BranchNavigationMode
 import com.example.data.BranchOutcomeAction
@@ -138,6 +140,11 @@ interface MacroRuntime {
     fun onMatchFound(match: MatchResult, label: String) {}
     fun onLoopChanged(loop: Int) {}
     fun onActionExecuted() {}
+    /** Resolves live per-action Telegram/Discord remote control state (supports hot toggling while running). */
+    fun resolveRemoteActionControl(macro: Macro, actionId: String): ActionRemoteControl? =
+        loadMacro(macro.id)?.actionRemoteControls?.get(actionId) ?: macro.actionRemoteControls[actionId]
+    /** Called when a [RemoteActionMode.ONE_SHOT] action is triggered so live state & storage immediately reset to OFF. */
+    fun onOneShotRemoteActionConsumed(macroId: String, actionId: String) {}
     fun log(level: LogLevel, message: String)
     fun nowMs(): Long = System.currentTimeMillis()
 }
@@ -212,6 +219,8 @@ class MacroRunner(
     private val discoveredTemplateScale = HashMap<String, Double>()
     /** Caches discovered macro-wide scale per (macroId@frameWxH) so sibling templates match immediately. */
     private val discoveredMacroScale = HashMap<String, Double>()
+    /** Fallback ONE_SHOT tracker when a test runtime does not back [MacroRuntime.loadMacro] with live storage. */
+    private val fallbackConsumedOneShots = HashSet<String>()
 
     suspend fun run(macro: Macro) {
         val now = runtime.nowMs()
@@ -240,6 +249,7 @@ class MacroRunner(
             runtimeAccountLastUsed.clear()
             sessionVariables.clear()
             accountVariables.clear()
+            fallbackConsumedOneShots.clear()
             runtime.onVariablesChanged(emptyMap())
             runtime.onHumanBreakChanged(0)
             val breakInterval = humanizer.nextBreakIntervalMs(currentMacro.humanizer)
@@ -569,6 +579,31 @@ class MacroRunner(
             if (!action.enabled) {
                 idx++
                 continue
+            }
+
+            // Live per-action Telegram / Discord bot remote control (TOGGLE ON/OFF & ONE_SHOT trigger)
+            val remoteCtrl = runtime.resolveRemoteActionControl(macro, action.id)
+            if (remoteCtrl != null && remoteCtrl.enabled) {
+                val oneShotKey = "${macro.id}:${action.id}"
+                val isLiveBacked = runtime.loadMacro(macro.id) != null
+                if (!remoteCtrl.active ||
+                    (remoteCtrl.mode == RemoteActionMode.ONE_SHOT && !isLiveBacked && oneShotKey in fallbackConsumedOneShots)
+                ) {
+                    runtime.log(
+                        LogLevel.INFO,
+                        "🤖 Aksi '${remoteCtrl.displayName(action.kind.label)}' sedang OFF (Kontrol Bot) — dilewati."
+                    )
+                    idx++
+                    continue
+                }
+                if (remoteCtrl.mode == RemoteActionMode.ONE_SHOT) {
+                    if (!isLiveBacked) fallbackConsumedOneShots += oneShotKey
+                    runtime.onOneShotRemoteActionConsumed(macro.id, action.id)
+                    runtime.log(
+                        LogLevel.INFO,
+                        "🤖 Pemicu 1× '${remoteCtrl.displayName(action.kind.label)}' dijalankan (otomatis kembali OFF)."
+                    )
+                }
             }
 
             // Per-action Random Event probability roll (0..100%)

@@ -323,6 +323,40 @@ object MacroSecurity {
         )
     }
 
+    /**
+     * Updates a macro's Telegram/Discord remote control ID & enable flag without requiring a password
+     * (useful in Wjust Player for locked macros), refusing tampered macros and preserving [Macro.securitySeal].
+     */
+    fun updateMacroRemoteControl(
+        macro: Macro,
+        remoteControlEnabled: Boolean,
+        remoteId: String
+    ): Macro {
+        if (isTampered(macro)) return macro
+        return macro.copy(
+            remoteControlEnabled = remoteControlEnabled,
+            remoteId = RemoteIdSanitizer.sanitize(remoteId)
+        )
+    }
+
+    /**
+     * Flips the live ON/OFF state of an action explicitly marked remote-controllable by the macro creator,
+     * preserving [Macro.securitySeal] and refusing to modify locked non-remote actions or tampered macros.
+     */
+    fun setRemoteActionActive(
+        macro: Macro,
+        actionId: String,
+        active: Boolean
+    ): Macro {
+        if (isTampered(macro)) return macro
+        val existing = macro.actionRemoteControls[actionId] ?: return macro
+        if (!existing.enabled) return macro
+        val updatedMap = macro.actionRemoteControls.toMutableMap().apply {
+            this[actionId] = existing.copy(active = active)
+        }
+        return macro.copy(actionRemoteControls = updatedMap)
+    }
+
     data class OverwriteResult(
         val merged: Macro,
         val deadlineExtended: Boolean

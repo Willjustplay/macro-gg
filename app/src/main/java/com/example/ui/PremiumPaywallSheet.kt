@@ -238,7 +238,7 @@ fun PremiumPaywallSheet(
                         "Macro, Multi-Akun & Jadwal Otomatis tanpa batas (Gratis maks. 3 macro, 2 akun, 1 jadwal)",
                         "Humanizer Stealth + Istirahat Alami (Human Break) + Gaussian/Bezier kustom (Mode Natural gratis)",
                         "Variabel & Penghitung Visual + OCR Angka Tanpa Kode serta semua 25 aksi (Cabang Urutan, Loop, Teks, Warna, Kejar Objek, Rekam Sentuhan)",
-                        "Notifikasi Jarak Jauh Telegram Bot & Discord Webhook + Screenshot Layar & Aksi Kirim Notifikasi (Statistik lokal & Alarm HP gratis)",
+                        "Notifikasi & Kontrol Bot 2-Arah Telegram/Discord (ON/OFF ID Makro Aktif & Pasif, kontrol aksi live, panel tombol /menu & screenshot layar — Statistik & Alarm lokal gratis)",
                         "Ekspor & Impor Macro (.zip), Macro Set, Kunci Sandi, Tenggat Waktu & Mode Pasif",
                         "Auto-Scale Resolusi Lintas Layar, Watchdog Anti-Macet & Lua Studio penuh"
                     )

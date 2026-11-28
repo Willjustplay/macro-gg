@@ -188,5 +188,9 @@ class PremiumFeatureGateTest {
         assertFalse(PremiumFeatureGate.canAddSchedule(1, isPremium = false))
         assertTrue(PremiumFeatureGate.canAddSchedule(1, isPremium = true))
         assertTrue(PremiumFeatureGate.canAddSchedule(25, isPremium = true))
+
+        // 4. 2-way Telegram/Discord Remote Bot Control is PRO-only
+        assertFalse(PremiumFeatureGate.canUseRemoteBotControl(isPremium = false))
+        assertTrue(PremiumFeatureGate.canUseRemoteBotControl(isPremium = true))
     }
 }

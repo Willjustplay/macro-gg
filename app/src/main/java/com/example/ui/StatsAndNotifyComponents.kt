@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -90,6 +91,7 @@ fun StatsAndNotifySheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val savedConfig by store.notificationConfig.collectAsStateWithLifecycle()
     val sessions by store.farmingStats.collectAsStateWithLifecycle()
+    val macros by store.macros.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableIntStateOf(0) }
 
     ModalBottomSheet(
@@ -114,12 +116,20 @@ fun StatsAndNotifySheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = if (selectedTab == 0) Icons.Filled.QueryStats else Icons.Filled.NotificationsActive,
+                        imageVector = when (selectedTab) {
+                            0 -> Icons.Filled.QueryStats
+                            1 -> Icons.Filled.NotificationsActive
+                            else -> Icons.Filled.SmartToy
+                        },
                         contentDescription = null,
-                        tint = Color(0xFFF59E0B)
+                        tint = if (selectedTab == 2) Color(0xFF38BDF8) else Color(0xFFF59E0B)
                     )
                     Text(
-                        text = if (selectedTab == 0) "Statistik Farming" else "Notifikasi & Alarm HP",
+                        text = when (selectedTab) {
+                            0 -> "Statistik Farming"
+                            1 -> "Notifikasi & Alarm HP"
+                            else -> "Kontrol Bot Telegram / Discord"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -133,12 +143,17 @@ fun StatsAndNotifySheet(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("📊 Statistik") }
+                    text = { Text("📊 Statistik", maxLines = 1) }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("🔔 Notifikasi & Alarm") }
+                    text = { Text("🔔 Notifikasi", maxLines = 1) }
+                )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = { Text("🤖 Bot Kontrol", maxLines = 1) }
                 )
             }
 
@@ -149,18 +164,30 @@ fun StatsAndNotifySheet(
                     .padding(horizontal = 18.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (selectedTab == 0) {
-                    FarmingStatsTabContent(
+                when (selectedTab) {
+                    0 -> FarmingStatsTabContent(
                         liveStats = liveStats,
                         sessions = sessions,
                         onClearHistory = { store.clearFarmingStats() }
                     )
-                } else {
-                    NotifySettingsTabContent(
+                    1 -> NotifySettingsTabContent(
                         savedConfig = savedConfig,
                         isPremium = isPremium,
                         onRequirePremium = onRequirePremium,
-                        onSaveConfig = { store.saveNotificationConfig(it) }
+                        onSaveConfig = { updated ->
+                            store.saveNotificationConfig(updated)
+                            com.example.automation.AutomationCoordinator.syncRemoteBotListener(allowed = isPremium)
+                        }
+                    )
+                    else -> RemoteBotControlTabContent(
+                        savedConfig = savedConfig,
+                        macros = macros,
+                        isPremium = isPremium,
+                        onRequirePremium = onRequirePremium,
+                        onSaveConfig = { updated ->
+                            store.saveNotificationConfig(updated)
+                            com.example.automation.AutomationCoordinator.syncRemoteBotListener(allowed = isPremium)
+                        }
                     )
                 }
                 Spacer(Modifier.height(12.dp))

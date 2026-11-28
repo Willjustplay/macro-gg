@@ -1277,6 +1277,12 @@ data class Macro(
     val autoScaleResolution: Boolean = true,
     /** Projection mode used when source and target aspect ratios differ across any device. */
     val scaleMode: ResolutionScaleMode = ResolutionScaleMode.ADAPTIVE,
+    /** Allow controlling this macro (Active Start/Stop or Passive ON/OFF) via Telegram / Discord bot. */
+    val remoteControlEnabled: Boolean = false,
+    /** Short unique command ID for bot control (e.g. "farm_coc", "boss", "m1"). */
+    val remoteId: String = "",
+    /** Per-action Telegram/Discord bot control settings keyed by [Action.id]. */
+    val actionRemoteControls: Map<String, ActionRemoteControl> = emptyMap(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

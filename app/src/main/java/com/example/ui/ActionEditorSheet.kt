@@ -148,10 +148,17 @@ fun ActionEditorSheet(
     onPickRegionOnScreen: (updatedDraft: Action, targetActionId: String) -> Unit,
     onRecropImage: (String, Bitmap) -> Unit,
     onSave: (Action) -> Unit,
+    remoteControl: com.example.data.ActionRemoteControl? = null,
+    existingOtherActionRemoteIds: Set<String> = emptySet(),
+    macroRemoteIdHint: String = "",
+    onSaveWithRemote: ((Action, com.example.data.ActionRemoteControl?) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var draft by remember(action.id) { mutableStateOf(action) }
+    var remoteCtrlDraft by remember(action.id, remoteControl) {
+        mutableStateOf(remoteControl ?: com.example.data.ActionRemoteControl())
+    }
     var recropAsset by remember { mutableStateOf<ImageAsset?>(null) }
 
     ModalBottomSheet(
@@ -1563,12 +1570,31 @@ fun ActionEditorSheet(
                 }
             }
 
+            ActionRemoteControlEditorCard(
+                actionKindLabel = draft.kind.label,
+                control = remoteCtrlDraft,
+                existingOtherActionIds = existingOtherActionRemoteIds,
+                macroRemoteIdHint = macroRemoteIdHint,
+                onUpdate = { remoteCtrlDraft = it }
+            )
+
             Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
                     Text("Batal")
                 }
-                Button(onClick = { onSave(draft) }, modifier = Modifier.weight(1.4f)) {
+                Button(
+                    onClick = {
+                        val cleanedRemote = remoteCtrlDraft.takeIf { it.enabled && it.normalizedId().isNotEmpty() }
+                            ?.copy(remoteId = remoteCtrlDraft.normalizedId())
+                        if (onSaveWithRemote != null) {
+                            onSaveWithRemote(draft, cleanedRemote)
+                        } else {
+                            onSave(draft)
+                        }
+                    },
+                    modifier = Modifier.weight(1.4f)
+                ) {
                     Text("Simpan Aksi")
                 }
             }

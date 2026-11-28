@@ -84,8 +84,8 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
         subtitle = "Simpan hitungan, baca angka OCR ke variabel, dan cek kondisi variabel tanpa kode tersedia di Wjust macro PRO."
     ),
     REMOTE_NOTIFICATIONS(
-        title = "Notifikasi Telegram & Discord (PRO)",
-        subtitle = "Statistik lokal & Alarm HP gratis! Upgrade ke PRO untuk notifikasi Telegram Bot, Discord Webhook, screenshot layar, dan aksi Kirim Notifikasi."
+        title = "Notifikasi & Kontrol Bot Telegram/Discord (PRO)",
+        subtitle = "Statistik lokal & Alarm HP gratis! Upgrade ke PRO untuk notifikasi, screenshot layar, serta Kontrol Bot 2-Arah (ID Makro Aktif/Pasif & Aksi Live) via Telegram/Discord."
     ),
     SCHEDULER_LIMIT(
         title = "Jadwal Otomatis Tanpa Batas (PRO)",
@@ -93,7 +93,7 @@ enum class PremiumFeature(val title: String, val subtitle: String) {
     ),
     UPGRADE_GENERAL(
         title = "Wjust macro PRO",
-        subtitle = "Buka semua 25 aksi, Variabel Visual, Humanizer Stealth + Break, Notifikasi Telegram/Discord, Jadwal & Multi-Akun tanpa batas."
+        subtitle = "Buka semua 25 aksi, Variabel Visual, Humanizer Stealth + Break, Notifikasi & Kontrol Bot Telegram/Discord 2-Arah, Jadwal & Multi-Akun tanpa batas."
     )
 }
 
@@ -128,6 +128,8 @@ object PremiumFeatureGate {
 
     fun canAddSchedule(currentScheduleCount: Int, isPremium: Boolean): Boolean =
         isPremium || currentScheduleCount < FREE_MAX_SCHEDULES
+
+    fun canUseRemoteBotControl(isPremium: Boolean): Boolean = isPremium
 
     fun isHumanizerConfigFree(config: com.example.data.HumanizerConfig): Boolean =
         config.preset == com.example.data.HumanizerPreset.OFF ||
