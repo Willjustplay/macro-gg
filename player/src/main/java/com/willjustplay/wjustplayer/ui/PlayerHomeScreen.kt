@@ -839,6 +839,9 @@ private fun PlayerMacroCard(
                     )
                     val subtitle = buildList {
                         add(if (macro.isPassive) (if (macro.passiveEnabled) "Sub-Macro • ON" else "Sub-Macro • OFF") else "Siap Dijalankan")
+                        if (macro.remoteControlEnabled && macro.remoteId.isNotBlank()) {
+                            add("🤖 ID:${macro.remoteId}")
+                        }
                         if (!macro.isPassive && macro.accountSwitch.enabled) {
                             add("👥 $localAccountCount Akun")
                         }

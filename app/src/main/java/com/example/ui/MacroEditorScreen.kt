@@ -122,7 +122,11 @@ import com.example.automation.FloatingOverlayService
 import com.example.automation.PickedPixel
 import com.example.data.Action
 import com.example.data.ActionKind
+import com.example.data.ActionRemoteControl
 import com.example.data.ClickAction
+import com.example.data.RemoteActionMode
+import com.example.data.RemoteIdSanitizer
+import com.example.data.withActionRemoteControl
 import com.example.data.ColorAction
 import com.example.data.ContainerRef
 import com.example.data.ExitAppAction
@@ -967,6 +971,7 @@ fun MacroEditorScreen(
                         siblingCount = displayedActions.size,
                         depth = 0,
                         imageByName = imageByName,
+                        actionRemoteControls = macro.actionRemoteControls,
                         modifier = Modifier.animateItem(
                             placementSpec = if (isDragging) null else spring(stiffness = Spring.StiffnessMediumLow)
                         ),
@@ -1099,6 +1104,20 @@ fun MacroEditorScreen(
                 onLaunchRegionPickerOverlay(updatedMacro, targetActionId)
             },
             onRecropImage = onRecropImage,
+            remoteControl = macro.actionRemoteControls[act.id],
+            existingOtherActionRemoteIds = macro.actionRemoteControls
+                .filterKeys { it != act.id }
+                .values
+                .filter { it.enabled }
+                .map { it.normalizedId() }
+                .filter { it.isNotEmpty() }
+                .toSet(),
+            macroRemoteIdHint = macro.remoteId,
+            onSaveWithRemote = { updated, remoteCtrl ->
+                val withAction = macro.updateAnyAction(updated.id) { updated }
+                onUpdateMacro(withAction.withActionRemoteControl(updated.id, remoteCtrl))
+                editingAction = null
+            },
             onSave = { updated ->
                 onUpdateMacro(macro.updateAnyAction(updated.id) { updated })
                 editingAction = null
@@ -1196,6 +1215,7 @@ fun MacroEditorScreen(
     if (showMacroSettings) {
         MacroSettingsSheet(
             macro = macro,
+            allMacros = allMacros,
             logoPath = logoPath,
             screenW = screenW,
             screenH = screenH,
@@ -1224,6 +1244,7 @@ private fun ActionNodeCard(
     siblingCount: Int,
     depth: Int,
     imageByName: Map<String, ImageAsset>,
+    actionRemoteControls: Map<String, ActionRemoteControl> = emptyMap(),
     modifier: Modifier = Modifier,
     isDragging: Boolean = false,
     dragOffsetY: Float = 0f,
@@ -1368,6 +1389,29 @@ private fun ActionNodeCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val remoteCtrl = actionRemoteControls[action.id]
+                    if (remoteCtrl != null && remoteCtrl.enabled && remoteCtrl.normalizedId().isNotEmpty()) {
+                        val badgeColor = when {
+                            remoteCtrl.mode == RemoteActionMode.ONE_SHOT && remoteCtrl.active -> Color(0xFFF59E0B)
+                            remoteCtrl.mode == RemoteActionMode.ONE_SHOT -> Color(0xFFA78BFA)
+                            remoteCtrl.active -> Color(0xFF10B981)
+                            else -> Color(0xFF94A3B8)
+                        }
+                        val statusTag = when {
+                            remoteCtrl.mode == RemoteActionMode.ONE_SHOT && remoteCtrl.active -> "1× SIAP"
+                            remoteCtrl.mode == RemoteActionMode.ONE_SHOT -> "1×"
+                            remoteCtrl.active -> "ON"
+                            else -> "OFF"
+                        }
+                        Text(
+                            text = "🤖 Bot: ${remoteCtrl.normalizedId()} ($statusTag)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = badgeColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 when {
@@ -1601,6 +1645,7 @@ private fun ActionNodeCard(
                                             siblingCount = children.size,
                                             depth = depth + 1,
                                             imageByName = imageByName,
+                                            actionRemoteControls = actionRemoteControls,
                                             modifier = Modifier.onGloballyPositioned { coords ->
                                                 childHeights[child.id] = coords.size.height
                                             },
@@ -1855,6 +1900,7 @@ private fun AddActionPickerSheet(
 @Composable
 private fun MacroSettingsSheet(
     macro: Macro,
+    allMacros: List<Macro> = emptyList(),
     logoPath: String?,
     screenW: Int,
     screenH: Int,
@@ -1882,6 +1928,15 @@ private fun MacroSettingsSheet(
     }
     var scaleMode by remember(macro.id) { mutableStateOf(macro.scaleMode) }
     var humanizer by remember(macro.id) { mutableStateOf(macro.humanizer) }
+    var remoteControlEnabled by remember(macro.id) { mutableStateOf(macro.remoteControlEnabled) }
+    var remoteId by remember(macro.id) { mutableStateOf(macro.remoteId) }
+    val otherRemoteMacroIds = remember(allMacros, macro.id) {
+        allMacros
+            .filter { it.id != macro.id && it.remoteControlEnabled }
+            .map { RemoteIdSanitizer.sanitize(it.remoteId) }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
     val logoBmp = rememberAssetThumbnail(logoPath, macro.updatedAt)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -2119,6 +2174,19 @@ private fun MacroSettingsSheet(
 
             HorizontalDivider()
 
+            // Kontrol Bot Telegram / Discord (ID Makro ON/OFF untuk Makro Aktif & Pasif)
+            MacroRemoteControlSettingsSection(
+                macroName = name,
+                isPassive = macro.isPassive,
+                enabled = remoteControlEnabled,
+                remoteId = remoteId,
+                existingOtherMacroIds = otherRemoteMacroIds,
+                onEnabledChange = { remoteControlEnabled = it },
+                onRemoteIdChange = { remoteId = it }
+            )
+
+            HorizontalDivider()
+
             // Auto-Scale Resolusi Layar (semua perangkat: HP, Tablet, Foldable, Emulator, CloudPhone)
             AutoScaleControlsBlock(
                 macro = macro,
@@ -2160,6 +2228,7 @@ private fun MacroSettingsSheet(
                     onClick = {
                         val savedSrcW = (sourceWText.toIntOrNull() ?: 0).coerceIn(0, 10000)
                         val savedSrcH = (sourceHText.toIntOrNull() ?: 0).coerceIn(0, 10000)
+                        val sanitizedRemoteId = RemoteIdSanitizer.sanitize(remoteId)
                         onSave(
                             macro.copy(
                                 name = name.trim().ifBlank { "Macro Baru" },
@@ -2174,7 +2243,9 @@ private fun MacroSettingsSheet(
                                 sourceHeight = savedSrcH,
                                 autoScaleResolution = autoScale,
                                 scaleMode = scaleMode,
-                                humanizer = humanizer
+                                humanizer = humanizer,
+                                remoteControlEnabled = remoteControlEnabled && sanitizedRemoteId.isNotEmpty(),
+                                remoteId = sanitizedRemoteId
                             )
                         )
                     },

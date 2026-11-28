@@ -11,8 +11,14 @@ import com.example.automation.LogLevel
 import com.example.automation.MacroRunner
 import com.example.automation.MacroRuntime
 import com.example.automation.RecentsDismissGeometry
+import com.example.automation.RemoteBotApiClient
+import com.example.automation.RemoteBotListener
+import com.example.automation.RemoteBotListenerStatus
+import com.example.automation.RemoteControlHost
+import com.example.automation.RemoteHostOpResult
 import com.example.data.AccountProfile
 import com.example.data.AccountSwitchMethod
+import com.example.data.ActionRemoteControl
 import com.example.data.ColorAction
 import com.example.data.ExitAppMode
 import com.example.data.ImageAction
@@ -22,6 +28,7 @@ import com.example.data.MacroSet
 import com.example.data.RecentsSwipeDirection
 import com.example.data.RecordedGesture
 import com.example.data.Region
+import com.example.data.RemoteActionMode
 import com.example.data.SelectAccountAction
 import com.example.data.TextAction
 import com.example.data.TrackObjectAction
@@ -43,6 +50,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -178,6 +186,124 @@ object PlayerCoordinator {
         }
     }
 
+    private val remoteBotListener = RemoteBotListener { msg -> PlayerSafeLogBus.info(msg) }
+    val remoteBotStatus: StateFlow<RemoteBotListenerStatus> = remoteBotListener.status
+
+    fun syncRemoteBotListener() {
+        val cfg = notifyStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
+        remoteBotListener.sync(
+            scope = engineScope,
+            config = cfg,
+            allowed = true,
+            hostProvider = { buildRemoteControlHost() }
+        )
+    }
+
+    suspend fun sendRemoteBotPanelNow(config: com.example.data.NotificationConfig): RemoteHostOpResult =
+        withContext(Dispatchers.IO) {
+            RemoteBotApiClient.sendPanelNow(config, buildRemoteControlHost())
+        }
+
+    private fun buildRemoteControlHost(): RemoteControlHost = object : RemoteControlHost {
+        override val appDisplayName: String = "Wjust Player"
+        override val deviceTag: String
+            get() = notifyStore?.notificationConfig?.value?.remoteBot?.deviceTag.orEmpty()
+
+        override fun listMacros(): List<Macro> = store?.macros?.value.orEmpty()
+
+        override fun runningMacroId(): String? =
+            if (_engineState.value == PlayerEngineState.RUNNING || _engineState.value == PlayerEngineState.PAUSED) {
+                _activeMacro.value?.id
+            } else null
+
+        override fun liveStats(): com.example.data.LiveSessionStats? = _liveSessionStats.value
+
+        override fun deviceHealth(): com.example.data.DeviceHealthSnapshot? = refreshDeviceHealth()
+
+        override fun isAfkBlackScreenActive(): Boolean = _afkBlackScreenActive.value
+
+        override fun startActiveMacro(macro: Macro): RemoteHostOpResult {
+            val s = store ?: return RemoteHostOpResult(false, "Penyimpanan Player belum siap.")
+            val latest = s.getMacroById(macro.id) ?: macro
+            if (latest.isPassive) {
+                return RemoteHostOpResult(false, "Macro '${latest.name}' adalah Sub-Macro Pasif.")
+            }
+            if ((_engineState.value == PlayerEngineState.RUNNING || _engineState.value == PlayerEngineState.PAUSED) &&
+                _activeMacro.value?.id == latest.id
+            ) {
+                return RemoteHostOpResult(true, "Macro Aktif '${latest.name}' sudah berjalan (ON).")
+            }
+            val parentSet = if (latest.setId.isNotBlank()) s.getMacroSetById(latest.setId) else null
+            MacroSecurity.checkDirectRun(latest, s.effectiveNowMs(), parentSet)?.let { denial ->
+                return RemoteHostOpResult(false, MacroSecurity.denialMessage(latest, denial, parentSet))
+            }
+            if (!PlayerAccessibilityService.isConnected.value) {
+                return RemoteHostOpResult(false, "Aksesibilitas Wjust Player belum aktif di HP.")
+            }
+            val (sw, sh) = liveScreenSize(1080, 2400)
+            runMacro(latest, sw, sh)
+            return RemoteHostOpResult(true, "Macro Aktif '${latest.name}' (`${latest.remoteId}`) dinyalakan (ON).")
+        }
+
+        override fun stopActiveMacro(macro: Macro): RemoteHostOpResult {
+            val runningId = runningMacroId()
+            return if (runningId == macro.id) {
+                stop()
+                RemoteHostOpResult(true, "Macro Aktif '${macro.name}' (`${macro.remoteId}`) dihentikan (OFF).")
+            } else {
+                RemoteHostOpResult(true, "Macro Aktif '${macro.name}' (`${macro.remoteId}`) sudah berhenti (OFF).")
+            }
+        }
+
+        override fun setPassiveMacroEnabled(macro: Macro, enabled: Boolean): RemoteHostOpResult {
+            val s = store ?: return RemoteHostOpResult(false, "Penyimpanan Player belum siap.")
+            val updated = s.setPassiveEnabled(macro.id, enabled)
+                ?: return RemoteHostOpResult(false, "Gagal mengubah Sub-Macro Pasif '${macro.name}'.")
+            if (_activeMacro.value?.id == updated.id) _activeMacro.value = updated
+            PlayerSafeLogBus.info("🤖 Bot mengubah Sub-Macro '${updated.name}' → ${if (enabled) "ON" else "OFF"}.")
+            return RemoteHostOpResult(
+                true,
+                "Sub-Macro Pasif '${updated.name}' (`${updated.remoteId}`) → ${if (enabled) "ON (Dapat Ditarik)" else "OFF (Dilewati)"}."
+            )
+        }
+
+        override fun setActionRemoteActive(macro: Macro, actionId: String, active: Boolean): RemoteHostOpResult {
+            val s = store ?: return RemoteHostOpResult(false, "Penyimpanan Player belum siap.")
+            val latest = s.getMacroById(macro.id) ?: macro
+            val ctrl = latest.actionRemoteControls[actionId]
+                ?: return RemoteHostOpResult(false, "Pengaturan bot aksi tidak ditemukan.")
+            val updated = s.setRemoteActionActive(latest.id, actionId, active)
+                ?: return RemoteHostOpResult(false, "Aksi ini tidak dapat diubah via bot.")
+            if (_activeMacro.value?.id == updated.id) _activeMacro.value = updated
+            val label = ctrl.displayName(ctrl.remoteId)
+            val statusTxt = when {
+                ctrl.mode == RemoteActionMode.ONE_SHOT && active -> "SIAP DIPICU 1× (otomatis kembali OFF)"
+                ctrl.mode == RemoteActionMode.ONE_SHOT -> "OFF (Dibatalkan)"
+                active -> "ON (Aktif)"
+                else -> "OFF (Pasif / Dilewati)"
+            }
+            PlayerSafeLogBus.info("🤖 Bot mengubah aksi '$label' → $statusTxt.")
+            return RemoteHostOpResult(true, "Aksi '$label' (`${ctrl.remoteId}`) → $statusTxt.")
+        }
+
+        override fun setAfkBlackScreen(enabled: Boolean): RemoteHostOpResult {
+            setAfkBlackScreenActive(enabled)
+            return RemoteHostOpResult(
+                true,
+                if (enabled) "Mode Layar Hitam AFK dinyalakan (ON)." else "Mode Layar Hitam AFK dimatikan (OFF)."
+            )
+        }
+
+        override fun captureScreenshotJpeg(): ByteArray? {
+            val bmp = runCatching { PlayerScreenCaptureService.captureBitmapCopy() }.getOrNull() ?: return null
+            return try {
+                PlayerNotifyManager.encodeScreenshotJpeg(bmp)
+            } finally {
+                runCatching { bmp.recycle() }
+            }
+        }
+    }
+
     fun attach(context: Context) {
         if (appCtx == null) appCtx = context.applicationContext
         if (accountStore == null) {
@@ -195,6 +321,7 @@ object PlayerCoordinator {
         }
         _deviceHealth.value = PlayerDeviceHealthReader.read(appCtx)
         PlayerSchedulerManager.syncAlarms(context)
+        syncRemoteBotListener()
     }
 
     fun setOverlayActive(active: Boolean) {
@@ -794,6 +921,20 @@ object PlayerCoordinator {
                 override fun onActionExecuted() {
                     _actionsExecuted.value = counter.incrementAndGet()
                     publishLiveStats()
+                }
+
+                override fun resolveRemoteActionControl(
+                    macro: Macro,
+                    actionId: String
+                ): ActionRemoteControl? =
+                    localStore?.getMacroById(macro.id)?.actionRemoteControls?.get(actionId)
+                        ?: macro.actionRemoteControls[actionId]
+
+                override fun onOneShotRemoteActionConsumed(macroId: String, actionId: String) {
+                    val updated = localStore?.setRemoteActionActive(macroId, actionId, false)
+                    if (updated != null && _activeMacro.value?.id == updated.id) {
+                        _activeMacro.value = updated
+                    }
                 }
 
                 override fun log(level: LogLevel, message: String) {

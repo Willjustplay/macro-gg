@@ -168,7 +168,7 @@ object PlayerNotifyManager {
         }
     }
 
-    private fun encodeScreenshotJpeg(bitmap: Bitmap?, maxDimPx: Int = 960, quality: Int = 72): ByteArray? {
+    fun encodeScreenshotJpeg(bitmap: Bitmap?, maxDimPx: Int = 960, quality: Int = 72): ByteArray? {
         if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return null
         return runCatching {
             val longest = maxOf(bitmap.width, bitmap.height)

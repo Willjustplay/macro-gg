@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +58,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,9 +67,15 @@ import com.example.automation.RemoteNotifier
 import com.example.data.FarmingSessionRecord
 import com.example.data.FarmingStatsCalculator
 import com.example.data.LiveSessionStats
+import com.example.data.Macro
 import com.example.data.NotificationConfig
 import com.example.data.NotifyLevel
+import com.example.data.RemoteBotConfig
+import com.example.data.RemoteIdSanitizer
+import com.example.data.enabledRemoteActions
 import com.willjustplay.wjustplayer.data.PlayerNotificationStore
+import com.willjustplay.wjustplayer.data.PlayerStore
+import com.willjustplay.wjustplayer.runtime.PlayerCoordinator
 import com.willjustplay.wjustplayer.runtime.PlayerNotifyManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -82,8 +91,11 @@ fun PlayerStatsAndNotifySheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val ctx = LocalContext.current
+    val playerStore = remember(ctx) { PlayerStore.get(ctx) }
     val savedConfig by notifyStore.notificationConfig.collectAsStateWithLifecycle()
     val sessions by notifyStore.farmingStats.collectAsStateWithLifecycle()
+    val macros by playerStore.macros.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableIntStateOf(0) }
 
     ModalBottomSheet(
@@ -108,12 +120,20 @@ fun PlayerStatsAndNotifySheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = if (selectedTab == 0) Icons.Filled.QueryStats else Icons.Filled.NotificationsActive,
+                        imageVector = when (selectedTab) {
+                            0 -> Icons.Filled.QueryStats
+                            1 -> Icons.Filled.NotificationsActive
+                            else -> Icons.Filled.SmartToy
+                        },
                         contentDescription = null,
-                        tint = Color(0xFFF59E0B)
+                        tint = if (selectedTab == 2) Color(0xFF38BDF8) else Color(0xFFF59E0B)
                     )
                     Text(
-                        text = if (selectedTab == 0) "Statistik Farming" else "Notifikasi & Alarm HP",
+                        text = when (selectedTab) {
+                            0 -> "Statistik Farming"
+                            1 -> "Notifikasi & Alarm HP"
+                            else -> "Kontrol Bot Telegram / Discord"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -125,12 +145,17 @@ fun PlayerStatsAndNotifySheet(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("📊 Statistik") }
+                    text = { Text("📊 Statistik", maxLines = 1) }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("🔔 Notifikasi & Alarm") }
+                    text = { Text("🔔 Notifikasi", maxLines = 1) }
+                )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = { Text("🤖 Bot Kontrol", maxLines = 1) }
                 )
             }
 
@@ -141,16 +166,29 @@ fun PlayerStatsAndNotifySheet(
                     .padding(horizontal = 18.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (selectedTab == 0) {
-                    PlayerStatsTab(
+                when (selectedTab) {
+                    0 -> PlayerStatsTab(
                         liveStats = liveStats,
                         sessions = sessions,
                         onClear = { notifyStore.clearFarmingStats() }
                     )
-                } else {
-                    PlayerNotifyTab(
+                    1 -> PlayerNotifyTab(
                         savedConfig = savedConfig,
-                        onSave = { notifyStore.saveNotificationConfig(it) }
+                        onSave = {
+                            notifyStore.saveNotificationConfig(it)
+                            PlayerCoordinator.syncRemoteBotListener()
+                        }
+                    )
+                    else -> PlayerRemoteBotTab(
+                        savedConfig = savedConfig,
+                        macros = macros,
+                        onSaveConfig = {
+                            notifyStore.saveNotificationConfig(it)
+                            PlayerCoordinator.syncRemoteBotListener()
+                        },
+                        onUpdateMacroRemote = { macroId, enabled, remoteId ->
+                            playerStore.updateMacroRemoteControl(macroId, enabled, remoteId)
+                        }
                     )
                 }
                 Spacer(Modifier.height(12.dp))
@@ -553,3 +591,270 @@ private fun PlayerSwitchRow(label: String, checked: Boolean, onChange: (Boolean)
         Switch(checked = checked, onCheckedChange = onChange)
     }
 }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlayerRemoteBotTab(
+    savedConfig: NotificationConfig,
+    macros: List<Macro>,
+    onSaveConfig: (NotificationConfig) -> Unit,
+    onUpdateMacroRemote: (macroId: String, enabled: Boolean, remoteId: String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val botStatus by PlayerCoordinator.remoteBotStatus.collectAsStateWithLifecycle()
+
+    val savedRb = savedConfig.remoteBot
+    var listenerEnabled by remember(savedRb) { mutableStateOf(savedRb.listenerEnabled) }
+    var deviceTag by remember(savedRb) { mutableStateOf(savedRb.deviceTag) }
+    var telegramRemoteEnabled by remember(savedRb) { mutableStateOf(savedRb.telegramRemoteEnabled) }
+    var telegramAllowedIds by remember(savedRb) { mutableStateOf(savedRb.telegramAllowedIds) }
+    var discordRemoteEnabled by remember(savedRb) { mutableStateOf(savedRb.discordRemoteEnabled) }
+    var discordBotToken by remember(savedRb) { mutableStateOf(savedRb.discordBotToken) }
+    var discordChannelId by remember(savedRb) { mutableStateOf(savedRb.discordChannelId) }
+    var discordAllowedUserIds by remember(savedRb) { mutableStateOf(savedRb.discordAllowedUserIds) }
+    var discordPollSec by remember(savedRb) { mutableIntStateOf(savedRb.discordPollIntervalSec.coerceIn(3, 30)) }
+    var showDiscordToken by remember { mutableStateOf(false) }
+
+    var sendingPanel by remember { mutableStateOf(false) }
+    var feedbackMsg by remember { mutableStateOf<String?>(null) }
+    var editingMacroForId by remember { mutableStateOf<Macro?>(null) }
+
+    fun currentMergedConfig(): NotificationConfig = savedConfig.copy(
+        remoteBot = RemoteBotConfig(
+            listenerEnabled = listenerEnabled,
+            deviceTag = RemoteIdSanitizer.sanitize(deviceTag),
+            telegramRemoteEnabled = telegramRemoteEnabled,
+            telegramAllowedIds = telegramAllowedIds.trim(),
+            discordRemoteEnabled = discordRemoteEnabled,
+            discordBotToken = discordBotToken.trim(),
+            discordChannelId = discordChannelId.trim(),
+            discordAllowedUserIds = discordAllowedUserIds.trim(),
+            discordPollIntervalSec = discordPollSec.coerceIn(3, 30)
+        )
+    )
+
+    val statusColor = when {
+        botStatus.running -> Color(0xFF10B981)
+        botStatus.lastError.isNotBlank() -> Color(0xFFEF4444)
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = statusColor.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.4f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = if (botStatus.running) "🟢 Listener Bot 2-Arah AKTIF" else "⚪ Listener Bot 2-Arah Nonaktif",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = statusColor
+            )
+            val channels = buildList {
+                if (botStatus.telegramListening) add("Telegram")
+                if (botStatus.discordListening) add("Discord")
+            }.joinToString(" + ").ifBlank { "Belum aktif" }
+            Text(
+                "Kanal: $channels • Perintah diproses: ${botStatus.commandsHandled}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (botStatus.lastCommandSummary.isNotBlank()) {
+                Text("Terakhir: ${botStatus.lastCommandSummary}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
+            if (botStatus.lastError.isNotBlank()) {
+                Text("⚠️ ${botStatus.lastError}", style = MaterialTheme.typography.labelSmall, color = Color(0xFFEF4444))
+            }
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            PlayerSwitchRow("Aktifkan Kontrol Bot 2-Arah (Telegram / Discord)", listenerEnabled) { listenerEnabled = it }
+            OutlinedTextField(
+                value = deviceTag,
+                onValueChange = { deviceTag = it.take(20) },
+                label = { Text("Tag Nama HP (opsional multi-HP, mis. hp1)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            HorizontalDivider()
+            PlayerSwitchRow("Telegram Bot 2-Arah (pakai Token & Chat ID di tab Notifikasi)", telegramRemoteEnabled) {
+                telegramRemoteEnabled = it
+            }
+            if (telegramRemoteEnabled) {
+                OutlinedTextField(
+                    value = telegramAllowedIds,
+                    onValueChange = { telegramAllowedIds = it.take(200) },
+                    label = { Text("Whitelist Telegram Chat/User ID Tambahan (pisah koma)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            HorizontalDivider()
+            PlayerSwitchRow("Discord Bot 2-Arah (via Bot Token + Channel ID)", discordRemoteEnabled) {
+                discordRemoteEnabled = it
+            }
+            if (discordRemoteEnabled) {
+                OutlinedTextField(
+                    value = discordBotToken,
+                    onValueChange = { discordBotToken = it.take(160) },
+                    label = { Text("Discord Bot Token") },
+                    visualTransformation = if (showDiscordToken) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        TextButton(onClick = { showDiscordToken = !showDiscordToken }) {
+                            Text(if (showDiscordToken) "Tutup" else "Lihat")
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = discordChannelId,
+                    onValueChange = { discordChannelId = it.filter { c -> c.isDigit() }.take(30) },
+                    label = { Text("Discord Channel ID Kontrol") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = discordAllowedUserIds,
+                    onValueChange = { discordAllowedUserIds = it.take(200) },
+                    label = { Text("Whitelist Discord User ID (opsional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(3, 4, 6, 10).forEach { sec ->
+                        FilterChip(
+                            selected = discordPollSec == sec,
+                            onClick = { discordPollSec = sec },
+                            label = { Text("Poll ${sec}d") }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            onClick = {
+                val merged = currentMergedConfig()
+                onSaveConfig(merged)
+                feedbackMsg = if (merged.remoteBot.hasAnyListenerReady(merged)) "✅ Disimpan — Listener Bot 2-Arah aktif!" else "✅ Disimpan."
+            },
+            modifier = Modifier.weight(1f)
+        ) { Text("Simpan & Aktifkan") }
+
+        FilledTonalButton(
+            enabled = !sendingPanel,
+            onClick = {
+                val merged = currentMergedConfig()
+                onSaveConfig(merged)
+                sendingPanel = true
+                feedbackMsg = null
+                scope.launch {
+                    val res = PlayerCoordinator.sendRemoteBotPanelNow(merged)
+                    feedbackMsg = res.message
+                    sendingPanel = false
+                }
+            },
+            modifier = Modifier.weight(1f)
+        ) {
+            if (sendingPanel) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            else Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Kirim Panel")
+        }
+    }
+
+    feedbackMsg?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+    }
+
+    // Per-macro ID assignment list (works safely even for locked imported macros without exposing steps!)
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("ID Makro untuk Kontrol Bot (${macros.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            Text(
+                "Atur ID Makro Aktif & Sub-Macro Pasif di sini (aman untuk makro terkunci).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            macros.forEach { m ->
+                val rid = RemoteIdSanitizer.sanitize(m.remoteId)
+                val hasId = m.remoteControlEnabled && rid.isNotEmpty()
+                val actCount = m.enabledRemoteActions().size
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = "${m.name} [${if (m.isPassive) "Pasif" else "Aktif"}]",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (hasId) "🤖 ID: $rid" + if (actCount > 0) " • $actCount aksi bot" else "" else "Belum diberi ID Bot",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (hasId) Color(0xFF38BDF8) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    OutlinedButton(onClick = { editingMacroForId = m }) {
+                        Text(if (hasId) "Ubah ID" else "Atur ID", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+
+    editingMacroForId?.let { target ->
+        val otherIds = macros.filter { it.id != target.id && it.remoteControlEnabled }
+            .map { RemoteIdSanitizer.sanitize(it.remoteId) }.filter { it.isNotEmpty() }.toSet()
+        var en by remember(target.id) { mutableStateOf(target.remoteControlEnabled) }
+        var rid by remember(target.id) {
+            mutableStateOf(target.remoteId.ifBlank { RemoteIdSanitizer.suggestMacroId(target.name, otherIds) })
+        }
+        AlertDialog(
+            onDismissRequest = { editingMacroForId = null },
+            title = { Text("🤖 ID Kontrol Bot — ${target.name}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    PlayerSwitchRow("Izinkan kontrol via Bot Telegram/Discord", en) { en = it }
+                    if (en) {
+                        OutlinedTextField(
+                            value = rid,
+                            onValueChange = { raw -> rid = raw.lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '-' }.take(24) },
+                            label = { Text("ID Makro (mis. farm1)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    onUpdateMacroRemote(target.id, en, rid)
+                    editingMacroForId = null
+                }) { Text("Simpan") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingMacroForId = null }) { Text("Batal") }
+            }
+        )
+    }
+}
+

@@ -25,7 +25,9 @@ data class NotificationConfig(
     val alarmSoundEnabled: Boolean = true,
     val alarmVibrateEnabled: Boolean = true,
     val alarmOnError: Boolean = true,
-    val alarmOnComplete: Boolean = false
+    val alarmOnComplete: Boolean = false,
+    /** Device-only 2-way Telegram/Discord remote command listener configuration (never exported). */
+    val remoteBot: RemoteBotConfig = RemoteBotConfig()
 ) {
     fun hasAnyRemoteConfigured(): Boolean =
         (telegramEnabled && telegramBotToken.isNotBlank() && telegramChatId.isNotBlank()) ||

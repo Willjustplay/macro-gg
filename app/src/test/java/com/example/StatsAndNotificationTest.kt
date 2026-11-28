@@ -316,6 +316,7 @@ class StatsAndNotificationTest {
             loopDelayMs = 0L,
             humanizer = HumanizerConfig(
                 preset = HumanizerPreset.CUSTOM,
+                delayVariancePercent = 0,
                 humanBreakEnabled = true,
                 breakEveryMinMinutes = 1,
                 breakEveryMaxMinutes = 1,

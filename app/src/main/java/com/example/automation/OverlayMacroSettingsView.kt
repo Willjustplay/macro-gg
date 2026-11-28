@@ -83,6 +83,8 @@ import com.example.data.moveActionToBranch
 import com.example.data.newId
 import com.example.data.slots
 import com.example.data.summary
+import com.example.data.updateAnyAction
+import com.example.data.withActionRemoteControl
 import kotlin.math.roundToInt
 
 /**
@@ -735,6 +737,24 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(hRow)
         bodyContainer.addView(hInfoTv)
 
+        // Kontrol Bot Telegram / Discord (ID Makro ON/OFF)
+        bodyContainer.addView(dividerLine())
+        bodyContainer.addView(sectionLabel("🤖 Kontrol Bot Telegram / Discord"))
+        val remoteIdField = addTextRow(bodyContainer, "ID Makro (mis. farm1)", macro.remoteId)
+        val remoteEnableCheck = CheckBox(context).apply {
+            text = if (macro.isPassive) "Izinkan Bot ON/OFF Makro Pasif ini" else "Izinkan Bot ON/OFF Makro Aktif ini"
+            isChecked = macro.remoteControlEnabled
+            setTextColor(Color.parseColor("#38BDF8"))
+            textSize = 11.5f
+            setOnCheckedChangeListener { _, checked ->
+                if (checked && com.example.data.RemoteIdSanitizer.sanitize(remoteIdField.text.toString()).isEmpty()) {
+                    val existing = store.macros.value.filter { it.id != macro.id }.map { it.remoteId }.toSet()
+                    remoteIdField.setText(com.example.data.RemoteIdSanitizer.suggestMacroId(macro.name, existing))
+                }
+            }
+        }
+        bodyContainer.addView(remoteEnableCheck)
+
         // Auto-Scale Resolusi Layar (All Devices)
         val scaleHolders = buildAutoScaleControls(standaloneSave = false)
 
@@ -788,6 +808,7 @@ class OverlayMacroSettingsView(
             }
         }
         saveRow.addView(makeBtn("Simpan Setelan", "#0D9488") {
+            val cleanRemoteId = com.example.data.RemoteIdSanitizer.sanitize(remoteIdField.text.toString())
             val updated = macro.copy(
                 name = nameField.text.toString().trim().ifBlank { "Macro Baru" },
                 loopCount = if (infiniteCheck.isChecked) 0 else (loopCountField.text.toString().toIntOrNull() ?: 1).coerceAtLeast(1),
@@ -801,7 +822,9 @@ class OverlayMacroSettingsView(
                 sourceHeight = (scaleHolders.srcHField.text.toString().toIntOrNull() ?: 0).coerceIn(0, 10000),
                 autoScaleResolution = scaleHolders.autoScaleCheck.isChecked,
                 scaleMode = scaleHolders.getMode(),
-                humanizer = chosenHumanizer
+                humanizer = chosenHumanizer,
+                remoteControlEnabled = remoteEnableCheck.isChecked && cleanRemoteId.isNotEmpty(),
+                remoteId = cleanRemoteId
             )
             macro = updated
             onUpdateMacro(updated)
@@ -2094,10 +2117,115 @@ class OverlayMacroSettingsView(
         bodyContainer.addView(nav)
 
         val chanceF = addNumberRow(bodyContainer, "Peluang Random Event (0-100%)", action.chancePercent.toString())
+
+        val existingCtrl = macro.actionRemoteControls[action.id] ?: com.example.data.ActionRemoteControl()
+        var botMode = existingCtrl.mode
+        var botActive = existingCtrl.active
+        val botBox = LinearLayout(context).apply {
+            orientation = VERTICAL
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1E1B4B"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#6D28D9"))
+            }
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(6)
+            }
+        }
+        val botIdField = EditText(context).apply {
+            hint = "ID Aksi Bot (mis. auto_sell)"
+            setText(existingCtrl.remoteId)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#94A3B8"))
+            textSize = 11.5f
+            isSingleLine = true
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0F172A"))
+                cornerRadius = dp(6).toFloat()
+            }
+        }
+        val botDetailCol = LinearLayout(context).apply {
+            orientation = VERTICAL
+            visibility = if (existingCtrl.enabled) View.VISIBLE else View.GONE
+        }
+        val botEnableCheck = CheckBox(context).apply {
+            text = "🤖 Kontrol Aksi via Bot Telegram / Discord"
+            isChecked = existingCtrl.enabled
+            setTextColor(Color.parseColor("#C4B5FD"))
+            textSize = 11.5f
+            setOnCheckedChangeListener { _, checked ->
+                botDetailCol.visibility = if (checked) View.VISIBLE else View.GONE
+                if (checked && com.example.data.RemoteIdSanitizer.sanitize(botIdField.text.toString()).isEmpty()) {
+                    val otherIds = macro.actionRemoteControls
+                        .filterKeys { it != action.id }
+                        .values.map { it.normalizedId() }.toSet()
+                    botIdField.setText(com.example.data.RemoteIdSanitizer.suggestActionId(action.kind.label, otherIds))
+                }
+            }
+        }
+        botBox.addView(botEnableCheck)
+        botDetailCol.addView(botIdField, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) })
+        val botModeRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+        var modeBtnRef: TextView? = null
+        var activeBtnRef: TextView? = null
+        fun refreshBotBtns() {
+            modeBtnRef?.text = if (botMode == com.example.data.RemoteActionMode.TOGGLE) "Mode: Saklar ON/OFF" else "Mode: Pemicu 1×"
+            (modeBtnRef?.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (botMode == com.example.data.RemoteActionMode.TOGGLE) "#4F46E5" else "#7C3AED")
+            )
+            activeBtnRef?.text = when {
+                botMode == com.example.data.RemoteActionMode.ONE_SHOT && botActive -> "⚡ Siap 1×"
+                botMode == com.example.data.RemoteActionMode.ONE_SHOT -> "⚪ OFF"
+                botActive -> "🟢 ON"
+                else -> "⚪ OFF"
+            }
+            (activeBtnRef?.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (botActive) "#059669" else "#475569")
+            )
+        }
+        val modeBtn = makeBtn("Mode: Saklar ON/OFF", "#4F46E5", marginEndDp = 4) {
+            botMode = if (botMode == com.example.data.RemoteActionMode.TOGGLE) {
+                botActive = false
+                com.example.data.RemoteActionMode.ONE_SHOT
+            } else {
+                com.example.data.RemoteActionMode.TOGGLE
+            }
+            refreshBotBtns()
+        }
+        val activeBtn = makeBtn("🟢 ON", "#059669", marginEndDp = 0) {
+            botActive = !botActive
+            refreshBotBtns()
+        }
+        modeBtnRef = modeBtn
+        activeBtnRef = activeBtn
+        refreshBotBtns()
+        botModeRow.addView(modeBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.4f).apply { marginEnd = dp(4) })
+        botModeRow.addView(activeBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        botDetailCol.addView(botModeRow)
+        botBox.addView(botDetailCol)
+        bodyContainer.addView(botBox)
+
         fun saveEdited(transform: (Action) -> Action) {
             val pct = (chanceF.text.toString().toIntOrNull() ?: action.chancePercent).coerceIn(0, 100)
-            onUpdateAction(action.id) { cur -> transform(cur).withChancePercent(pct) }
+            val cleanBotId = com.example.data.RemoteIdSanitizer.sanitize(botIdField.text.toString())
+            val nextRemoteCtrl = if (botEnableCheck.isChecked && cleanBotId.isNotEmpty()) {
+                existingCtrl.copy(
+                    enabled = true,
+                    remoteId = cleanBotId,
+                    mode = botMode,
+                    active = botActive
+                )
+            } else null
+            val updatedMacro = macro
+                .updateAnyAction(action.id) { cur -> transform(cur).withChancePercent(pct) }
+                .withActionRemoteControl(action.id, nextRemoteCtrl)
+            macro = updatedMacro
+            onUpdateMacro(updatedMacro)
             editingActionId = null
+            rebuildBody()
         }
 
         when (action) {

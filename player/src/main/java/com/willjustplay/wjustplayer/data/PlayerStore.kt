@@ -170,6 +170,29 @@ class PlayerStore private constructor(context: Context) {
         return persistMacro(toggled)
     }
 
+    fun setPassiveEnabled(macroId: String, enabled: Boolean): Macro? {
+        val existing = getMacroById(macroId) ?: return null
+        if (!existing.isPassive || MacroSecurity.isTampered(existing)) return null
+        val updated = MacroSecurity.togglePassiveEnabled(existing, enabled)
+        return persistMacro(updated)
+    }
+
+    fun updateMacroRemoteControl(macroId: String, enabled: Boolean, remoteId: String): Macro? {
+        val existing = getMacroById(macroId) ?: return null
+        if (MacroSecurity.isTampered(existing)) return null
+        val cleanId = com.example.data.RemoteIdSanitizer.sanitize(remoteId)
+        val updated = MacroSecurity.updateMacroRemoteControl(existing, enabled && cleanId.isNotEmpty(), cleanId)
+        return persistMacro(updated)
+    }
+
+    fun setRemoteActionActive(macroId: String, actionId: String, active: Boolean): Macro? {
+        val existing = getMacroById(macroId) ?: return null
+        if (MacroSecurity.isTampered(existing)) return null
+        val updated = MacroSecurity.setRemoteActionActive(existing, actionId, active)
+        if (updated === existing) return null
+        return persistMacro(updated)
+    }
+
     fun deleteMacro(id: String) {
         val existing = getMacroById(id)
         File(macrosDir, "${sanitizeFileName(id)}.json").delete()
