@@ -47,6 +47,7 @@ import com.example.vision.PreparedTemplate
 import com.example.vision.ScreenTextRecognizer
 import com.example.vision.TemplateMatcher
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -62,6 +63,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 enum class EngineState(val label: String) {
@@ -93,7 +95,11 @@ data class MatchHighlight(
  */
 object AutomationCoordinator {
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val botScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, _ -> }
+    )
     private var activeJob: Job? = null
+    private val runGeneration = AtomicLong(0L)
     private val stopRequested = AtomicBoolean(false)
     private val pausedFlag = AtomicBoolean(false)
     private val skipAccountRequested = AtomicBoolean(false)
@@ -282,7 +288,7 @@ object AutomationCoordinator {
         val cfg = store?.notificationConfig?.value ?: com.example.data.NotificationConfig()
         val effectiveAllowed = allowed && com.example.billing.PremiumStateHolder.isPremium.value
         remoteBotListener.sync(
-            scope = engineScope,
+            scope = botScope,
             config = cfg,
             allowed = effectiveAllowed,
             hostProvider = { buildRemoteControlHost() }
@@ -403,12 +409,13 @@ object AutomationCoordinator {
         }
 
         override fun captureScreenshotJpeg(): ByteArray? {
-            val bmp = runCatching { ScreenCaptureService.captureBitmapCopy() }.getOrNull() ?: return null
-            return try {
-                PhoneAlarmAndNotifyManager.encodeScreenshotJpeg(bmp)
-            } finally {
-                runCatching { bmp.recycle() }
-            }
+            if (!ScreenCaptureService.isCapturing.value) return null
+            val first = ScreenCaptureService.captureScaledJpeg(maxDimPx = 960, quality = 70)
+            if (first != null && first.isNotEmpty()) return first
+            runCatching { Thread.sleep(120L) }
+            return if (ScreenCaptureService.isCapturing.value) {
+                ScreenCaptureService.captureScaledJpeg(maxDimPx = 960, quality = 70)
+            } else null
         }
     }
 
@@ -1004,6 +1011,7 @@ object AutomationCoordinator {
         }
         publishLiveStats()
 
+        val myRunId = runGeneration.incrementAndGet()
         activeJob = engineScope.launch {
             ExecutionLogBus.info(
                 "Memulai '${macro.name}' (${macro.actions.size} aksi, loop=${if (macro.loopCount <= 0) "∞" else macro.loopCount})."
@@ -1037,7 +1045,7 @@ object AutomationCoordinator {
                             sendRemote = true,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = false,
-                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { ScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
@@ -1392,7 +1400,7 @@ object AutomationCoordinator {
                             sendRemote = true,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = false,
-                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { ScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
@@ -1439,7 +1447,7 @@ object AutomationCoordinator {
                         sendRemote = sendRemote && com.example.billing.PremiumStateHolder.isPremium.value,
                         includeScreenshot = includeScreenshot,
                         triggerPhoneAlarm = triggerPhoneAlarm,
-                        captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                        captureJpeg = { ScreenCaptureService.captureScaledJpeg() }
                     )
                 }
                 override fun onMatchFound(match: MatchResult, label: String) {
@@ -1489,15 +1497,15 @@ object AutomationCoordinator {
             } catch (t: Throwable) {
                 endReason = "Error"
                 errorDetail = t.message ?: t::class.java.simpleName
-                _engineState.value = EngineState.ERROR
+                if (runGeneration.get() == myRunId) {
+                    _engineState.value = EngineState.ERROR
+                }
                 ExecutionLogBus.error("Error: $errorDetail")
             } finally {
                 periodicReportJob.cancel()
                 deviceGuardJob.cancel()
                 autoBlackScreenJob.cancel()
                 localStore?.flushClockWatermark()
-                ScreenCaptureService.trackingCaptureMode = false
-                ScreenCaptureService.highFrequencyCapture = false
                 val endedAt = System.currentTimeMillis()
                 val elapsed = (endedAt - startedAt).coerceAtLeast(0L)
                 val finalLoops = _currentLoop.value
@@ -1536,7 +1544,7 @@ object AutomationCoordinator {
                             sendRemote = cfg.notifyOnError && isPro,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = cfg.alarmOnError,
-                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { ScreenCaptureService.captureScaledJpeg() }
                         )
                     } else if (endReason == "Selesai" && ((cfg.notifyOnComplete && isPro) || cfg.alarmOnComplete)) {
                         PhoneAlarmAndNotifyManager.dispatchAsync(
@@ -1549,19 +1557,23 @@ object AutomationCoordinator {
                             sendRemote = cfg.notifyOnComplete && isPro,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = cfg.alarmOnComplete,
-                            captureBitmap = { ScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { ScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
-                _liveVariables.value = emptyMap()
-                _humanBreakRemainingSec.value = 0
-                _liveSessionStats.value = null
-                _thermalPaused.value = false
-                _afkBlackScreenActive.value = false
-                if (_engineState.value != EngineState.ERROR) {
-                    _engineState.value = EngineState.IDLE
+                if (runGeneration.get() == myRunId) {
+                    ScreenCaptureService.trackingCaptureMode = false
+                    ScreenCaptureService.highFrequencyCapture = false
+                    _liveVariables.value = emptyMap()
+                    _humanBreakRemainingSec.value = 0
+                    _liveSessionStats.value = null
+                    _thermalPaused.value = false
+                    _afkBlackScreenActive.value = false
+                    if (_engineState.value != EngineState.ERROR) {
+                        _engineState.value = EngineState.IDLE
+                    }
+                    pausedFlag.set(false)
                 }
-                pausedFlag.set(false)
                 ExecutionLogBus.info("Selesai ($finalActions aksi dalam ${elapsed}ms).")
             }
         }

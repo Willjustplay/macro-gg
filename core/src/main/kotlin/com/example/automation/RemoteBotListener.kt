@@ -9,8 +9,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Live status snapshot exposed to the UI & overlay for the 2-way Telegram/Discord Bot Listener. */
 data class RemoteBotListenerStatus(
@@ -36,6 +39,7 @@ class RemoteBotListener(
 ) {
     private val _status = MutableStateFlow(RemoteBotListenerStatus())
     val status: StateFlow<RemoteBotListenerStatus> = _status.asStateFlow()
+    private val screenshotMutex = Mutex()
 
     @Volatile
     private var activeConfig: NotificationConfig = NotificationConfig()
@@ -78,14 +82,14 @@ class RemoteBotListener(
         if (wantTg && telegramJob == null) {
             telegramKey = nextTgKey
             telegramJob = scope.launch(Dispatchers.IO) {
-                runTelegramLoop(hostProvider)
+                runTelegramLoop(scope, hostProvider)
             }
             onLog("🤖 Listener Bot Telegram aktif (2-arah).")
         }
         if (wantDc && discordJob == null) {
             discordKey = nextDcKey
             discordJob = scope.launch(Dispatchers.IO) {
-                runDiscordLoop(hostProvider)
+                runDiscordLoop(scope, hostProvider)
             }
             onLog("🤖 Listener Bot Discord aktif (2-arah).")
         }
@@ -113,7 +117,7 @@ class RemoteBotListener(
         )
     }
 
-    private suspend fun runTelegramLoop(hostProvider: () -> RemoteControlHost) {
+    private suspend fun runTelegramLoop(scope: CoroutineScope, hostProvider: () -> RemoteControlHost) {
         var nextOffset = 0L
         var bootstrapped = false
         var backoffMs = 3_000L
@@ -181,6 +185,41 @@ class RemoteBotListener(
                         else -> null
                     } ?: continue
 
+                    val summary = ev.text ?: ev.callbackData.orEmpty()
+                    if (cmd is RemoteBotCommand.Screenshot) {
+                        // Run screenshot capture + multipart upload in an isolated supervisor coroutine so /ss
+                        // NEVER blocks polling, other bot commands, or the running macro engine, and serialize
+                        // rapid /ss taps so RAM never piles up.
+                        scope.launch(Dispatchers.IO) {
+                            screenshotMutex.withLock {
+                                runCatching {
+                                    val host = hostProvider()
+                                    val reply = RemoteBotCommandExecutor.execute(cmd, host) ?: return@runCatching
+                                    RemoteBotApiClient.sendTelegramReply(
+                                        token = token,
+                                        chatId = ev.chatId,
+                                        reply = reply,
+                                        callbackQueryId = ev.callbackQueryId,
+                                        editMessageId = ev.callbackMessageId,
+                                        transport = transport
+                                    )
+                                    _status.update {
+                                        it.copy(
+                                            commandsHandled = it.commandsHandled + 1,
+                                            lastCommandSummary = "Telegram: $summary"
+                                        )
+                                    }
+                                    onLog("🤖 Perintah Telegram diproses: $summary")
+                                }.onFailure { err ->
+                                    _status.update {
+                                        it.copy(lastError = "Telegram /ss: ${err.message?.take(60) ?: "Error"}")
+                                    }
+                                }
+                            }
+                        }
+                        continue
+                    }
+
                     val host = hostProvider()
                     val reply = runCatching { RemoteBotCommandExecutor.execute(cmd, host) }.getOrNull() ?: continue
 
@@ -193,11 +232,12 @@ class RemoteBotListener(
                         transport = transport
                     )
 
-                    val summary = ev.text ?: ev.callbackData.orEmpty()
-                    _status.value = _status.value.copy(
-                        commandsHandled = _status.value.commandsHandled + 1,
-                        lastCommandSummary = "Telegram: $summary"
-                    )
+                    _status.update {
+                        it.copy(
+                            commandsHandled = it.commandsHandled + 1,
+                            lastCommandSummary = "Telegram: $summary"
+                        )
+                    }
                     onLog("🤖 Perintah Telegram diproses: $summary")
                 }
             } catch (e: Throwable) {
@@ -209,7 +249,7 @@ class RemoteBotListener(
         }
     }
 
-    private suspend fun runDiscordLoop(hostProvider: () -> RemoteControlHost) {
+    private suspend fun runDiscordLoop(scope: CoroutineScope, hostProvider: () -> RemoteControlHost) {
         var lastMessageId: String? = null
         var bootstrapped = false
         var backoffMs = 4_000L
@@ -275,6 +315,35 @@ class RemoteBotListener(
                     }
 
                     val cmd = RemoteBotCommandParser.parseText(msg.content, requirePrefix = true) ?: continue
+                    if (cmd is RemoteBotCommand.Screenshot) {
+                        scope.launch(Dispatchers.IO) {
+                            screenshotMutex.withLock {
+                                runCatching {
+                                    val host = hostProvider()
+                                    val reply = RemoteBotCommandExecutor.execute(cmd, host) ?: return@runCatching
+                                    RemoteBotApiClient.sendDiscordReply(
+                                        botToken = token,
+                                        channelId = channelId,
+                                        reply = reply,
+                                        transport = transport
+                                    )
+                                    _status.update {
+                                        it.copy(
+                                            commandsHandled = it.commandsHandled + 1,
+                                            lastCommandSummary = "Discord: ${msg.content.take(40)}"
+                                        )
+                                    }
+                                    onLog("🤖 Perintah Discord diproses: ${msg.content.take(40)}")
+                                }.onFailure { err ->
+                                    _status.update {
+                                        it.copy(lastError = "Discord !ss: ${err.message?.take(60) ?: "Error"}")
+                                    }
+                                }
+                            }
+                        }
+                        continue
+                    }
+
                     val host = hostProvider()
                     val reply = runCatching { RemoteBotCommandExecutor.execute(cmd, host) }.getOrNull() ?: continue
 
@@ -285,10 +354,12 @@ class RemoteBotListener(
                         transport = transport
                     )
 
-                    _status.value = _status.value.copy(
-                        commandsHandled = _status.value.commandsHandled + 1,
-                        lastCommandSummary = "Discord: ${msg.content.take(40)}"
-                    )
+                    _status.update {
+                        it.copy(
+                            commandsHandled = it.commandsHandled + 1,
+                            lastCommandSummary = "Discord: ${msg.content.take(40)}"
+                        )
+                    }
                     onLog("🤖 Perintah Discord diproses: ${msg.content.take(40)}")
                 }
 

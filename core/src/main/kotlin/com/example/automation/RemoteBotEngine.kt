@@ -248,8 +248,10 @@ object RemoteBotCommandParser {
             "status", "info", "stats" ->
                 RemoteBotCommand.Status(targetDevice = targetDevice)
 
-            "ss", "screenshot", "screen", "foto" ->
-                RemoteBotCommand.Screenshot(targetDevice = targetDevice)
+            "ss", "screenshot", "screen", "foto" -> {
+                val devArg = targetDevice ?: args.firstOrNull()?.let { RemoteIdSanitizer.sanitize(it).ifBlank { null } }
+                RemoteBotCommand.Screenshot(targetDevice = devArg)
+            }
 
             "afk", "blackscreen", "layarhitam" ->
                 RemoteBotCommand.AfkSwitch(parseToggleOp(args.firstOrNull()), targetDevice)
