@@ -109,6 +109,11 @@ interface MacroRuntime {
         forceStopBackground: Boolean
     ): Boolean = exitApp(mode, packageName, recentsSwipeDirection)
     suspend fun launchApp(packageName: String, freshStart: Boolean = false): Boolean = true
+    /** Returns true when [packageName] is a PRISM Root delegation stub (`app.prism.c.*`) handled via PRISM Cloner. */
+    fun isPrismRootPackage(packageName: String): Boolean = PrismProtocol.isPrismStubPackageName(packageName)
+    /** Dispatches a direct anti-BAL PRISM Cloner Root account switch (`SWITCH_ACCOUNT` or `SWITCH_NEXT`). */
+    suspend fun switchPrismAccount(request: PrismSwitchRequest): Boolean =
+        if (request.stubPackage.isNotBlank()) launchApp(request.stubPackage, freshStart = false) else false
     fun setTrackingBoost(enabled: Boolean) {}
     fun captureFrame(): Frame?
     fun samplePixelArgb(x: Int, y: Int): Int?
@@ -291,7 +296,22 @@ class MacroRunner(
         if (depth == 0 && macro.accountSwitch.enabled) {
             val enabledAccounts = macro.accountSwitch.accounts.filter { it.enabled }
             if (enabledAccounts.isEmpty()) {
-                runtime.log(LogLevel.WARN, "👥 Multi-Akun aktif tetapi belum ada profil akun yang aktif. Lanjut tanpa rotasi akun.")
+                if (macro.accountSwitch.method == AccountSwitchMethod.PRISM_ROOT) {
+                    accountLoopCounter = 0
+                    accountStartedAtMs = startedAt
+                    visitedAccountIdsInCycle.clear()
+                    runtime.log(
+                        LogLevel.INFO,
+                        "🔀 PRISM Root Cloner (Switch Next) aktif — urutan rotasi akun mengikuti daftar di PRISM Cloner."
+                    )
+                    if (macro.accountSwitch.switchOnStart) {
+                        val virtualTarget = AccountProfile(id = PRISM_VIRTUAL_NEXT_ID, label = "PRISM Next")
+                        val startSwitchFlow = executeAccountSwitchSequence(macro, virtualTarget, startedAt, maxDurationMs, depth)
+                        if (startSwitchFlow == FlowControl.STOP_MACRO) return FlowControl.STOP_MACRO
+                    }
+                } else {
+                    runtime.log(LogLevel.WARN, "👥 Multi-Akun aktif tetapi belum ada profil akun yang aktif. Lanjut tanpa rotasi akun.")
+                }
             } else {
                 val initial = pickInitialAccount(macro, enabledAccounts, startedAt)
                 currentAccount = initial
@@ -413,7 +433,8 @@ class MacroRunner(
                 FlowControl.NEXT, FlowControl.JUMP, FlowControl.SWITCH_BRANCH -> {
                     if (depth == 0 && !runtime.isStopped() && macro.accountSwitch.enabled && !inAccountSwitchFlow) {
                         val accCfg = macro.accountSwitch
-                        val hasMultipleAccounts = accCfg.accounts.count { it.enabled } > 0
+                        val hasMultipleAccounts = accCfg.accounts.count { it.enabled } > 0 ||
+                            accCfg.method == AccountSwitchMethod.PRISM_ROOT
                         val loopTrigger = accCfg.triggerMode == AccountTriggerMode.AFTER_LOOPS ||
                             accCfg.triggerMode == AccountTriggerMode.LOOPS_OR_MINUTES
                         val minuteTrigger = accCfg.triggerMode == AccountTriggerMode.AFTER_MINUTES ||
@@ -3058,6 +3079,30 @@ class MacroRunner(
         val cfg = macro.accountSwitch
         val enabledAccounts = cfg.accounts.filter { it.enabled }
         if (enabledAccounts.isEmpty()) {
+            if (cfg.method == AccountSwitchMethod.PRISM_ROOT) {
+                accountLoopCounter = 0
+                accountStartedAtMs = runtime.nowMs()
+                lastAccountSelectFailed = false
+                val virtualTarget = AccountProfile(id = PRISM_VIRTUAL_NEXT_ID, label = "PRISM Next")
+                runtime.log(LogLevel.INFO, "🔀 PRISM Root: beralih ke akun berikutnya (SWITCH_NEXT)...")
+                val switchFlow = executeAccountSwitchSequence(macro, virtualTarget, startedAt, maxDurationMs, depth)
+                if (switchFlow == FlowControl.STOP_MACRO || runtime.isStopped()) return FlowControl.STOP_MACRO
+                if (!lastAccountSelectFailed) {
+                    runtime.onAccountSwitched("PRISM Next")
+                    markProgress()
+                    return if (restartAfterSwitch) FlowControl.RESTART_ROOT else FlowControl.NEXT
+                }
+                return when (cfg.onFail) {
+                    AccountFailBehavior.STOP_MACRO -> {
+                        runtime.log(LogLevel.ERROR, "⛔ Gagal PRISM Switch Next — macro dihentikan sesuai aturan gagal.")
+                        FlowControl.STOP_MACRO
+                    }
+                    AccountFailBehavior.CONTINUE_CURRENT, AccountFailBehavior.SKIP_TO_NEXT -> {
+                        runtime.log(LogLevel.WARN, "⚠️ Gagal PRISM Switch Next — tetap melanjutkan macro.")
+                        FlowControl.NEXT
+                    }
+                }
+            }
             runtime.log(LogLevel.WARN, "👥 Ganti Akun dilewati: belum ada profil akun yang aktif di Tab Akun.")
             return FlowControl.NEXT
         }
@@ -3214,7 +3259,67 @@ class MacroRunner(
         maxDurationMs: Long,
         depth: Int
     ): FlowControl {
+        val effectiveMethod = action.methodOverride ?: macro.accountSwitch.method
         val target = currentAccount ?: macro.accountSwitch.accounts.firstOrNull { it.enabled }
+
+        // Direct PRISM Root Cloner mode (supports both targeted slot/stub switching and zero-config SWITCH_NEXT)
+        if (effectiveMethod == AccountSwitchMethod.PRISM_ROOT) {
+            val stubPkg = target?.packageName?.trim().orEmpty()
+            val targetGamePkg = target?.prismTargetPackage?.trim().orEmpty()
+                .ifBlank { action.prismTargetPackage.trim() }
+            val slotOrder = target?.prismSlotOrder?.takeIf { it in 1..99 }
+                ?: PrismProtocol.parseSlotNumberFromPackage(stubPkg)
+            val profileId = target?.prismProfileId?.trim().orEmpty()
+            val useSwitchNext = action.prismUseSwitchNext ||
+                target == null ||
+                target.id == PRISM_VIRTUAL_NEXT_ID ||
+                (stubPkg.isBlank() && slotOrder <= 0 && profileId.isBlank())
+
+            val displayLabel = target?.appLabel?.ifBlank { target.label }.orEmpty().ifBlank { "PRISM Next" }
+            val req = PrismSwitchRequest(
+                targetPackage = targetGamePkg,
+                slotOrder = if (useSwitchNext) 0 else slotOrder,
+                profileId = if (useSwitchNext) "" else profileId,
+                displayLabel = displayLabel,
+                stubPackage = if (useSwitchNext) "" else stubPkg,
+                switchNext = useSwitchNext
+            )
+            if (runtime.isStopped()) return FlowControl.STOP_MACRO
+            runtime.log(
+                LogLevel.ACTION,
+                if (useSwitchNext) {
+                    "🔀 PRISM Root: pindah akun berikutnya (SWITCH_NEXT)${if (targetGamePkg.isNotBlank()) " [$targetGamePkg]" else ""}..."
+                } else {
+                    "🔀 PRISM Root: pindah ke '$displayLabel'${if (slotOrder > 0) " (slot #$slotOrder)" else ""}${if (stubPkg.isNotBlank()) " [$stubPkg]" else ""}..."
+                }
+            )
+            val switched = runtime.switchPrismAccount(req)
+            if (!switched) {
+                runtime.log(LogLevel.WARN, "⚠️ Gagal berpindah akun lewat PRISM Root untuk '$displayLabel'.")
+                lastAccountSelectFailed = true
+                return handleBranch(
+                    action.elseActions, action.notFound, macro, startedAt, maxDurationMs, depth,
+                    targetBranchId = action.notFoundBranchId
+                )
+            }
+            if (stubPkg.isNotBlank()) {
+                previousAccountPackage = stubPkg
+            } else if (targetGamePkg.isNotBlank()) {
+                previousAccountPackage = targetGamePkg
+            }
+            runtime.onActionExecuted()
+            markProgress()
+            if (action.launchWaitMs > 0L && !runtime.isStopped()) {
+                val wFlow = sleepWatchingStuck(action.launchWaitMs, macro, startedAt, maxDurationMs, depth)
+                if (wFlow != FlowControl.NEXT) return wFlow
+            }
+            return if (action.thenActions.isNotEmpty()) {
+                executeList(action.thenActions, macro, startedAt, maxDurationMs, depth, isBranch = true)
+            } else {
+                FlowControl.NEXT
+            }
+        }
+
         if (target == null) {
             runtime.log(LogLevel.WARN, "Pilih Akun dilewati: belum ada profil akun aktif di Tab Akun.")
             lastAccountSelectFailed = true
@@ -3224,7 +3329,6 @@ class MacroRunner(
             )
         }
 
-        val effectiveMethod = action.methodOverride ?: macro.accountSwitch.method
         val liveW = runtime.screenWidth.coerceAtLeast(4)
         val liveH = runtime.screenHeight.coerceAtLeast(4)
         val transform = ResolutionScaler.forMacro(macro, liveW, liveH)
@@ -3234,6 +3338,7 @@ class MacroRunner(
             AccountSwitchMethod.CLONE_APP -> true
             AccountSwitchMethod.HYBRID -> target.packageName.isNotBlank() && target.packageName != previousAccountPackage
             AccountSwitchMethod.OCR_LIST -> false
+            AccountSwitchMethod.PRISM_ROOT -> false
         }
 
         if (shouldSwitchPackage) {
@@ -3246,21 +3351,54 @@ class MacroRunner(
                     targetBranchId = action.notFoundBranchId
                 )
             }
+            val isPrismRootTarget = runtime.isPrismRootPackage(pkg)
             if (action.exitPreviousApp) {
-                runtime.log(LogLevel.ACTION, "🚪 Menutup aplikasi sebelumnya sebelum membuka '${target.appLabel.ifBlank { pkg }}'...")
-                runtime.exitApp(
-                    mode = action.exitMode,
-                    packageName = previousAccountPackage,
-                    recentsSwipeDirection = action.recentsSwipeDirection,
-                    forceStopBackground = action.exitMode == ExitAppMode.CLOSE_RECENT_AND_HOME
-                )
-                if (action.exitWaitMs > 0L && !runtime.isStopped()) {
-                    runtime.sleep(action.exitWaitMs)
+                val prevIsPrismOrSameGame = previousAccountPackage.isBlank() ||
+                    runtime.isPrismRootPackage(previousAccountPackage)
+                if (isPrismRootTarget && prevIsPrismOrSameGame) {
+                    // PRISM's Root engine cleanly force-stops the real target game (am force-stop + pidof + sync)
+                    // before swapping vaults; running Recents/Settings force-stop on a headless stub package
+                    // opens the wrong App Info screen and causes account switches to fail.
+                    runtime.log(
+                        LogLevel.INFO,
+                        "🔀 Paket PRISM Root terdeteksi ('$pkg') — penutupan & pemindahan sesi game ditangani langsung oleh PRISM Root."
+                    )
+                } else {
+                    runtime.log(LogLevel.ACTION, "🚪 Menutup aplikasi sebelumnya sebelum membuka '${target.appLabel.ifBlank { pkg }}'...")
+                    runtime.exitApp(
+                        mode = action.exitMode,
+                        packageName = previousAccountPackage,
+                        recentsSwipeDirection = action.recentsSwipeDirection,
+                        forceStopBackground = action.exitMode == ExitAppMode.CLOSE_RECENT_AND_HOME
+                    )
+                    if (action.exitWaitMs > 0L && !runtime.isStopped()) {
+                        runtime.sleep(action.exitWaitMs)
+                    }
                 }
             }
             if (runtime.isStopped()) return FlowControl.STOP_MACRO
-            runtime.log(LogLevel.ACTION, "🚀 Membuka Clone App akun '${target.label}': ${target.appLabel.ifBlank { pkg }}")
-            val opened = runtime.launchApp(pkg, freshStart = false)
+            val opened = if (isPrismRootTarget) {
+                val slotOrder = target.prismSlotOrder.takeIf { it in 1..99 }
+                    ?: PrismProtocol.parseSlotNumberFromPackage(pkg)
+                val targetGamePkg = target.prismTargetPackage.trim().ifBlank { action.prismTargetPackage.trim() }
+                runtime.log(
+                    LogLevel.ACTION,
+                    "🔀 Membuka akun PRISM Root '${target.label}': ${target.appLabel.ifBlank { pkg }} (Anti-BAL Broadcast)..."
+                )
+                runtime.switchPrismAccount(
+                    PrismSwitchRequest(
+                        targetPackage = targetGamePkg,
+                        slotOrder = slotOrder,
+                        profileId = target.prismProfileId.trim(),
+                        displayLabel = target.appLabel.ifBlank { target.label },
+                        stubPackage = pkg,
+                        switchNext = false
+                    )
+                )
+            } else {
+                runtime.log(LogLevel.ACTION, "🚀 Membuka Clone App akun '${target.label}': ${target.appLabel.ifBlank { pkg }}")
+                runtime.launchApp(pkg, freshStart = false)
+            }
             if (!opened) {
                 runtime.log(LogLevel.WARN, "⚠️ Gagal membuka aplikasi Clone '$pkg' untuk akun '${target.label}'.")
                 lastAccountSelectFailed = true
@@ -3570,5 +3708,6 @@ class MacroRunner(
         private const val MAX_CHAIN_DEPTH = 5
         private const val MAX_BRANCH_CALL_DEPTH = 16
         private const val MAX_BRANCH_SWITCHES_PER_LOOP = 64
+        private const val PRISM_VIRTUAL_NEXT_ID = "__prism_next__"
     }
 }

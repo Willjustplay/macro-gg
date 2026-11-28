@@ -225,11 +225,16 @@ object AutomationCoordinator {
             val pkg = schedule.launchAppPackage.trim()
             if (pkg.isNotBlank()) {
                 val ctx = appCtx
-                val launchIntent = runCatching { ctx?.packageManager?.getLaunchIntentForPackage(pkg) }.getOrNull()
-                if (launchIntent != null && ctx != null) {
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                    val launched = MacroAccessibilityService.launchActivityIntent(launchIntent) ||
-                        runCatching { ctx.startActivity(launchIntent); true }.getOrDefault(false)
+                if (ctx != null) {
+                    val launched = PrismClonerBridge.launchPackageRobust(
+                        context = ctx,
+                        packageName = pkg,
+                        freshStart = false,
+                        launchActivity = { intent -> MacroAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { ExecutionLogBus.info(it) },
+                        logWarn = { ExecutionLogBus.warn(it) },
+                        logError = { ExecutionLogBus.error(it) }
+                    )
                     if (launched) {
                         ExecutionLogBus.info("⏰ Membuka '${schedule.launchAppLabel.ifBlank { pkg }}', menunggu ${schedule.launchWaitSec}d...")
                         delay(schedule.launchWaitSec.coerceIn(1, 60) * 1000L)
@@ -866,11 +871,18 @@ object AutomationCoordinator {
         fun check(m: Macro): Boolean {
             if (!visited.add(m.id)) return false
             if (m.bannedGuardEnabled && m.bannedImages.any { it.isNotBlank() }) return true
-            if (m.accountSwitch.enabled && m.accountSwitch.method != com.example.data.AccountSwitchMethod.CLONE_APP && m.accountSwitch.accounts.any { it.enabled }) return true
+            val isNoOcrAccountMethod = m.accountSwitch.method == com.example.data.AccountSwitchMethod.CLONE_APP ||
+                m.accountSwitch.method == com.example.data.AccountSwitchMethod.PRISM_ROOT
+            if (m.accountSwitch.enabled && !isNoOcrAccountMethod && m.accountSwitch.accounts.any { it.enabled }) return true
             for (a in m.allActionsSequence()) {
+                val selectUsesOcr = a is com.example.data.SelectAccountAction &&
+                    (a.methodOverride ?: m.accountSwitch.method).let {
+                        it != com.example.data.AccountSwitchMethod.CLONE_APP &&
+                            it != com.example.data.AccountSwitchMethod.PRISM_ROOT
+                    }
                 if (a is ImageAction || a is TrackObjectAction || a is TextAction || a is ColorAction || a is com.example.data.BranchRouterAction ||
                     (a is com.example.data.VariableAction && a.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
-                    (a is com.example.data.SelectAccountAction && a.methodOverride != com.example.data.AccountSwitchMethod.CLONE_APP) ||
+                    selectUsesOcr ||
                     (a is com.example.data.NotifyAction && a.includeScreenshot)
                 ) return true
                 if (a is RunMacroAction && a.targetMacroId.isNotBlank()) {
@@ -1149,7 +1161,10 @@ object AutomationCoordinator {
                     forceStopBackground: Boolean
                 ): Boolean {
                     val cleanPkg = packageName.trim()
-                    val effectivePkg = cleanPkg.ifBlank { MacroAccessibilityService.lastForegroundPackage }
+                    val resolvedPkg = appCtx?.let { ctx ->
+                        if (cleanPkg.isNotBlank()) PrismClonerBridge.resolveUnderlyingTargetPackage(ctx, cleanPkg) else ""
+                    }.orEmpty().ifBlank { cleanPkg }
+                    val effectivePkg = resolvedPkg.ifBlank { MacroAccessibilityService.lastForegroundPackage }
                     val resolvedAppLabel = if (effectivePkg.isNotBlank()) {
                         runCatching {
                             val pm = appCtx?.packageManager
@@ -1235,28 +1250,33 @@ object AutomationCoordinator {
                 }
 
                 override suspend fun launchApp(packageName: String, freshStart: Boolean): Boolean {
-                    val cleanPkg = packageName.trim()
-                    if (cleanPkg.isBlank()) return false
                     val ctx = appCtx ?: return false
-                    val launchIntent = runCatching {
-                        ctx.packageManager.getLaunchIntentForPackage(cleanPkg)
-                    }.getOrNull()
-                    if (launchIntent == null) {
-                        ExecutionLogBus.error("Masuk Aplikasi gagal: paket '$cleanPkg' tidak ditemukan di perangkat.")
-                        return false
-                    }
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                    if (freshStart) {
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    }
-                    val startedByAcc = MacroAccessibilityService.launchActivityIntent(launchIntent)
-                    if (startedByAcc) return true
-                    return runCatching {
-                        ctx.startActivity(launchIntent)
-                        true
-                    }.onFailure { err ->
-                        ExecutionLogBus.error("Gagal membuka '$cleanPkg': ${err.message}")
-                    }.getOrDefault(false)
+                    return PrismClonerBridge.launchPackageRobust(
+                        context = ctx,
+                        packageName = packageName,
+                        freshStart = freshStart,
+                        launchActivity = { intent -> MacroAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { ExecutionLogBus.action(it) },
+                        logWarn = { ExecutionLogBus.warn(it) },
+                        logError = { ExecutionLogBus.error(it) }
+                    )
+                }
+
+                override fun isPrismRootPackage(packageName: String): Boolean {
+                    val ctx = appCtx ?: return PrismProtocol.isPrismStubPackageName(packageName)
+                    return PrismClonerBridge.isRootDelegationPackage(ctx, packageName)
+                }
+
+                override suspend fun switchPrismAccount(request: PrismSwitchRequest): Boolean {
+                    val ctx = appCtx ?: return false
+                    return PrismClonerBridge.triggerPrismSwitch(
+                        context = ctx,
+                        request = request,
+                        launchActivity = { intent -> MacroAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { ExecutionLogBus.action(it) },
+                        logWarn = { ExecutionLogBus.warn(it) },
+                        logError = { ExecutionLogBus.error(it) }
+                    )
                 }
 
                 override fun setTrackingBoost(enabled: Boolean) {
@@ -1683,6 +1703,66 @@ object AutomationCoordinator {
                     } else {
                         TemplateMatcher.findAll(frame, tpl, threshold, maxResults)
                     }
+                }
+
+                override fun launchApp(packageName: String, freshStart: Boolean): Boolean {
+                    val ctx = appCtx ?: return false
+                    val ok = runBlocking {
+                        PrismClonerBridge.launchPackageRobust(
+                            context = ctx,
+                            packageName = packageName,
+                            freshStart = freshStart,
+                            launchActivity = { intent -> MacroAccessibilityService.launchActivityIntent(intent) },
+                            logInfo = { ExecutionLogBus.lua(it) },
+                            logWarn = { ExecutionLogBus.warn(it) },
+                            logError = { ExecutionLogBus.error(it) }
+                        )
+                    }
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
+                    return ok
+                }
+
+                override fun exitApp(packageName: String, mode: String): Boolean {
+                    val ctx = appCtx
+                    val clean = packageName.trim()
+                    val resolved = if (ctx != null && clean.isNotBlank()) {
+                        PrismClonerBridge.resolveUnderlyingTargetPackage(ctx, clean)
+                    } else clean
+                    val effectivePkg = resolved.ifBlank { MacroAccessibilityService.lastForegroundPackage }
+                    val ok = runBlocking {
+                        when (mode.lowercase()) {
+                            "home" -> MacroAccessibilityService.dispatchGlobalHome()
+                            "force_stop" -> {
+                                val s = if (effectivePkg.isNotBlank()) {
+                                    MacroAccessibilityService.forceStopPackageViaSettings(effectivePkg)
+                                } else false
+                                MacroAccessibilityService.dispatchGlobalHome() || s
+                            }
+                            else -> {
+                                val rec = MacroAccessibilityService.dispatchGlobalRecents()
+                                if (rec) delay(600L)
+                                MacroAccessibilityService.dispatchGlobalHome() || rec
+                            }
+                        }
+                    }
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
+                    return ok
+                }
+
+                override fun switchPrismAccount(request: PrismSwitchRequest): Boolean {
+                    val ctx = appCtx ?: return false
+                    val ok = runBlocking {
+                        PrismClonerBridge.triggerPrismSwitch(
+                            context = ctx,
+                            request = request,
+                            launchActivity = { intent -> MacroAccessibilityService.launchActivityIntent(intent) },
+                            logInfo = { ExecutionLogBus.lua(it) },
+                            logWarn = { ExecutionLogBus.warn(it) },
+                            logError = { ExecutionLogBus.error(it) }
+                        )
+                    }
+                    if (ok) _actionsExecuted.value = counter.incrementAndGet()
+                    return ok
                 }
 
                 override fun log(message: String) = ExecutionLogBus.lua(message)

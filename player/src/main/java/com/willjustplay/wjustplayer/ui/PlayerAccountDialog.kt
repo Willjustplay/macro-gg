@@ -2,6 +2,8 @@ package com.willjustplay.wjustplayer.ui
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -57,31 +59,72 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.automation.PrismProtocol
+import com.example.automation.PrismSlotInfo
 import com.example.data.AccountProfile
 import com.example.data.AccountSwitchMethod
 import com.example.data.AccountTriggerMode
 import com.example.data.Macro
+import com.willjustplay.wjustplayer.runtime.PlayerPrismClonerBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 private data class PlayerInstalledApp(
     val packageName: String,
-    val label: String
+    val label: String,
+    val isPrismRoot: Boolean = false,
+    val prismTargetPackage: String = "",
+    val prismSlotOrder: Int = 0,
+    val prismProfileId: String = ""
 )
 
 private fun loadPlayerLaunchableApps(context: Context): List<PlayerInstalledApp> {
     val pm = context.packageManager
     val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    val activities = runCatching { pm.queryIntentActivities(query, 0) }.getOrDefault(emptyList())
+    val activities = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(query, PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(query, PackageManager.MATCH_ALL)
+        }
+    }.getOrDefault(emptyList())
+    val prismByPkg = PlayerPrismClonerBridge.discoverInstalledPrismRootSlots(context).associateBy { it.stubPackage }
     val seen = LinkedHashMap<String, PlayerInstalledApp>()
     for (ri in activities) {
         val pkg = ri.activityInfo?.packageName?.trim().orEmpty()
         if (pkg.isBlank() || pkg == context.packageName) continue
         if (pkg in seen) continue
         val label = runCatching { ri.loadLabel(pm).toString().trim() }.getOrDefault("").ifBlank { pkg }
-        seen[pkg] = PlayerInstalledApp(packageName = pkg, label = label)
+        val prism = prismByPkg[pkg]
+        seen[pkg] = PlayerInstalledApp(
+            packageName = pkg,
+            label = label,
+            isPrismRoot = prism?.isRootDelegation == true,
+            prismTargetPackage = prism?.sourcePackage.orEmpty(),
+            prismSlotOrder = prism?.slotOrder ?: 0,
+            prismProfileId = prism?.profileId.orEmpty()
+        )
     }
-    return seen.values.sortedBy { it.label.lowercase() }
+    for ((pkg, prism) in prismByPkg) {
+        if (pkg == context.packageName || pkg in seen) continue
+        val label = prism.displayLabel.ifBlank {
+            if (prism.slotOrder > 0) "PRISM Slot #%02d".format(prism.slotOrder) else pkg
+        }
+        seen[pkg] = PlayerInstalledApp(
+            packageName = pkg,
+            label = label,
+            isPrismRoot = true,
+            prismTargetPackage = prism.sourcePackage,
+            prismSlotOrder = prism.slotOrder,
+            prismProfileId = prism.profileId
+        )
+    }
+    return seen.values.sortedWith(
+        compareByDescending<PlayerInstalledApp> { it.isPrismRoot }
+            .thenBy { if (it.isPrismRoot && it.prismSlotOrder > 0) it.prismSlotOrder else Int.MAX_VALUE }
+            .thenBy { it.label.lowercase() }
+    )
 }
 
 /**
@@ -96,11 +139,20 @@ fun PlayerAccountManagerDialog(
     onSave: (List<AccountProfile>) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     var accounts by remember(macro.id, initialAccounts) { mutableStateOf(initialAccounts) }
     var editingProfile by remember { mutableStateOf<AccountProfile?>(null) }
     var isCreatingNew by remember { mutableStateOf(false) }
+    var detectedPrismSlots by remember { mutableStateOf<List<PrismSlotInfo>>(emptyList()) }
 
     val cfg = macro.accountSwitch
+    LaunchedEffect(cfg.method) {
+        if (cfg.method != AccountSwitchMethod.OCR_LIST) {
+            detectedPrismSlots = withContext(Dispatchers.IO) {
+                PlayerPrismClonerBridge.discoverInstalledPrismRootSlots(context)
+            }
+        }
+    }
     val triggerSummary = when (cfg.triggerMode) {
         AccountTriggerMode.AFTER_LOOPS -> "Pindah tiap ${cfg.loopsPerAccount} loop"
         AccountTriggerMode.AFTER_MINUTES -> "Pindah tiap ${cfg.minutesPerAccount} menit"
@@ -177,6 +229,34 @@ fun PlayerAccountManagerDialog(
                     }
                 }
 
+                if (cfg.method != AccountSwitchMethod.OCR_LIST && detectedPrismSlots.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = {
+                            val existing = accounts.map { it.packageName }.toHashSet()
+                            val toAdd = detectedPrismSlots
+                                .filter { it.stubPackage !in existing }
+                                .mapIndexed { idx, slot ->
+                                    val num = slot.slotOrder.takeIf { it > 0 } ?: (accounts.size + idx + 1)
+                                    val lbl = slot.displayLabel.ifBlank { "PRISM #$num" }
+                                    AccountProfile(
+                                        label = lbl,
+                                        packageName = slot.stubPackage,
+                                        appLabel = lbl,
+                                        prismTargetPackage = slot.sourcePackage,
+                                        prismSlotOrder = slot.slotOrder,
+                                        prismProfileId = slot.profileId,
+                                        enabled = true
+                                    )
+                                }
+                            if (toAdd.isNotEmpty()) accounts = accounts + toAdd
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("🔗 Impor ${detectedPrismSlots.size} Slot PRISM Root", fontWeight = FontWeight.Bold)
+                    }
+                }
+
                 if (accounts.isEmpty()) {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -188,9 +268,11 @@ fun PlayerAccountManagerDialog(
                                 AccountSwitchMethod.OCR_LIST ->
                                     "Belum ada akun. Ketuk '+ Tambah Akun' lalu isi nama/email/server akun yang muncul di daftar ganti akun game Anda."
                                 AccountSwitchMethod.CLONE_APP ->
-                                    "Belum ada akun. Ketuk '+ Tambah Akun' lalu pilih aplikasi clone / dual app untuk masing-masing akun."
+                                    "Belum ada akun. Ketuk '+ Tambah Akun' lalu pilih aplikasi clone / PRISM Root untuk masing-masing akun."
                                 AccountSwitchMethod.HYBRID ->
-                                    "Belum ada akun. Ketuk '+ Tambah Akun' lalu isi kata kunci OCR dan/atau pilih Clone App untuk setiap akun."
+                                    "Belum ada akun. Ketuk '+ Tambah Akun' lalu isi kata kunci OCR dan/atau pilih Clone / PRISM App untuk setiap akun."
+                                AccountSwitchMethod.PRISM_ROOT ->
+                                    "Mode PRISM Root otomatis mengirim SWITCH_NEXT sesuai urutan PRISM Cloner walau daftar ini kosong, atau impor/tambah slot spesifik di sini."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -357,11 +439,14 @@ private fun PlayerSingleAccountEditorDialog(
     var ocrKeyword by remember(initial.id) { mutableStateOf(initial.ocrKeyword) }
     var packageName by remember(initial.id) { mutableStateOf(initial.packageName) }
     var appLabel by remember(initial.id) { mutableStateOf(initial.appLabel) }
+    var prismTargetPackage by remember(initial.id) { mutableStateOf(initial.prismTargetPackage) }
+    var prismSlotOrder by remember(initial.id) { mutableStateOf(initial.prismSlotOrder) }
+    var prismProfileId by remember(initial.id) { mutableStateOf(initial.prismProfileId) }
     var cooldownStr by remember(initial.id) { mutableStateOf(initial.cooldownMinutes.toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
     var showAppPicker by remember { mutableStateOf(false) }
 
-    val showOcr = method != AccountSwitchMethod.CLONE_APP
+    val showOcr = method != AccountSwitchMethod.CLONE_APP && method != AccountSwitchMethod.PRISM_ROOT
     val showClone = method != AccountSwitchMethod.OCR_LIST
 
     AlertDialog(
@@ -400,7 +485,7 @@ private fun PlayerSingleAccountEditorDialog(
                 if (showClone) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Text(
-                        text = "Aplikasi Clone / Dual App",
+                        text = if (method == AccountSwitchMethod.PRISM_ROOT) "Package PRISM Root / Clone" else "Aplikasi Clone / PRISM Root",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF7DD3FC)
@@ -425,8 +510,8 @@ private fun PlayerSingleAccountEditorDialog(
                             packageName = it.trim()
                             if (packageName != initial.packageName) appLabel = ""
                         },
-                        label = { Text("Package Name Clone App") },
-                        placeholder = { Text("com.example.game.clone") },
+                        label = { Text("Package Name Clone / PRISM") },
+                        placeholder = { Text("app.prism.c.p123456.u01") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -454,14 +539,20 @@ private fun PlayerSingleAccountEditorDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    val cleanPkg = packageName.trim()
                     val cleanLabel = label.trim().ifBlank { initial.label.ifBlank { "Akun" } }
                     val cd = (cooldownStr.toIntOrNull() ?: 0).coerceIn(0, 1440)
+                    val resolvedSlot = prismSlotOrder.takeIf { it in 1..99 }
+                        ?: PrismProtocol.parseSlotNumberFromPackage(cleanPkg)
                     onSave(
                         initial.copy(
                             label = cleanLabel,
                             ocrKeyword = ocrKeyword.trim(),
-                            packageName = packageName.trim(),
+                            packageName = cleanPkg,
                             appLabel = appLabel.trim(),
+                            prismTargetPackage = prismTargetPackage.trim(),
+                            prismSlotOrder = resolvedSlot,
+                            prismProfileId = prismProfileId.trim(),
                             cooldownMinutes = cd,
                             enabled = enabled
                         )
@@ -479,6 +570,15 @@ private fun PlayerSingleAccountEditorDialog(
             onSelect = { info ->
                 packageName = info.packageName
                 appLabel = info.label
+                if (info.isPrismRoot) {
+                    prismTargetPackage = info.prismTargetPackage
+                    prismSlotOrder = info.prismSlotOrder
+                    prismProfileId = info.prismProfileId
+                } else {
+                    prismTargetPackage = ""
+                    prismSlotOrder = 0
+                    prismProfileId = ""
+                }
                 if (label.isBlank() || label.startsWith("Akun ")) {
                     label = info.label.take(32)
                 }
@@ -507,13 +607,15 @@ private fun PlayerInstalledAppPickerDialog(
     val filtered = remember(apps, query) {
         val q = query.trim().lowercase()
         if (q.isEmpty()) apps else apps.filter {
-            it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q)
+            it.label.lowercase().contains(q) ||
+                it.packageName.lowercase().contains(q) ||
+                it.prismTargetPackage.lowercase().contains(q)
         }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pilih Game / Clone App", fontWeight = FontWeight.Bold) },
+        title = { Text("Pilih Game / Clone / PRISM", fontWeight = FontWeight.Bold) },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -547,21 +649,41 @@ private fun PlayerInstalledAppPickerDialog(
                         itemsIndexed(filtered.take(80), key = { _, app -> app.packageName }) { _, app ->
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                color = if (app.isPrismRoot) {
+                                    Color(0xFF0E7490).copy(alpha = 0.22f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { onSelect(app) }
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = app.label,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        if (app.isPrismRoot) {
+                                            Text(
+                                                text = if (app.prismSlotOrder > 0) "PRISM #%02d".format(app.prismSlotOrder) else "PRISM",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF38BDF8)
+                                            )
+                                        }
+                                    }
                                     Text(
-                                        text = app.label,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = app.packageName,
+                                        text = if (app.isPrismRoot && app.prismTargetPackage.isNotBlank()) {
+                                            "${app.packageName} → ${app.prismTargetPackage}"
+                                        } else app.packageName,
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,

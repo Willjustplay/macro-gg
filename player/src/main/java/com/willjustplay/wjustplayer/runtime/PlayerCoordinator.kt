@@ -10,6 +10,8 @@ import android.view.WindowManager
 import com.example.automation.LogLevel
 import com.example.automation.MacroRunner
 import com.example.automation.MacroRuntime
+import com.example.automation.PrismProtocol
+import com.example.automation.PrismSwitchRequest
 import com.example.automation.RecentsDismissGeometry
 import com.example.automation.RemoteBotApiClient
 import com.example.automation.RemoteBotListener
@@ -174,11 +176,16 @@ object PlayerCoordinator {
             val pkg = schedule.launchAppPackage.trim()
             if (pkg.isNotBlank()) {
                 val ctx = appCtx
-                val launchIntent = runCatching { ctx?.packageManager?.getLaunchIntentForPackage(pkg) }.getOrNull()
-                if (launchIntent != null && ctx != null) {
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                    val launched = PlayerAccessibilityService.launchActivityIntent(launchIntent) ||
-                        runCatching { ctx.startActivity(launchIntent); true }.getOrDefault(false)
+                if (ctx != null) {
+                    val launched = PlayerPrismClonerBridge.launchPackageRobust(
+                        context = ctx,
+                        packageName = pkg,
+                        freshStart = false,
+                        launchActivity = { intent -> PlayerAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { PlayerSafeLogBus.info(it) },
+                        logWarn = { PlayerSafeLogBus.warn(it) },
+                        logError = { PlayerSafeLogBus.error(it) }
+                    )
                     if (launched) {
                         delay(schedule.launchWaitSec.coerceIn(1, 60) * 1000L)
                     }
@@ -360,15 +367,20 @@ object PlayerCoordinator {
 
     fun macroNeedsScreenCapture(macro: Macro): Boolean =
         (macro.bannedGuardEnabled && macro.bannedImages.any { it.isNotBlank() }) ||
-            (macro.accountSwitch.enabled && macro.accountSwitch.method != AccountSwitchMethod.CLONE_APP) ||
+            (macro.accountSwitch.enabled &&
+                macro.accountSwitch.method != AccountSwitchMethod.CLONE_APP &&
+                macro.accountSwitch.method != AccountSwitchMethod.PRISM_ROOT) ||
             macro.allActionsSequence().any {
+                val effSelectMethod = if (it is SelectAccountAction) (it.methodOverride ?: macro.accountSwitch.method) else null
                 it is ImageAction ||
                     it is TrackObjectAction ||
                     it is TextAction ||
                     it is ColorAction ||
                     it is com.example.data.BranchRouterAction ||
                     (it is com.example.data.VariableAction && it.operation == com.example.data.VariableOperation.READ_OCR_NUMBER) ||
-                    (it is SelectAccountAction && (it.methodOverride ?: macro.accountSwitch.method) != AccountSwitchMethod.CLONE_APP) ||
+                    (effSelectMethod != null &&
+                        effSelectMethod != AccountSwitchMethod.CLONE_APP &&
+                        effSelectMethod != AccountSwitchMethod.PRISM_ROOT) ||
                     (it is com.example.data.NotifyAction && it.includeScreenshot)
             }
 
@@ -661,7 +673,10 @@ object PlayerCoordinator {
                     forceStopBackground: Boolean
                 ): Boolean {
                     val cleanPkg = packageName.trim()
-                    val effectivePkg = cleanPkg.ifBlank { PlayerAccessibilityService.lastForegroundPackage }
+                    val resolvedPkg = appCtx?.let { ctx ->
+                        if (cleanPkg.isNotBlank()) PlayerPrismClonerBridge.resolveUnderlyingTargetPackage(ctx, cleanPkg) else ""
+                    }.orEmpty().ifBlank { cleanPkg }
+                    val effectivePkg = resolvedPkg.ifBlank { PlayerAccessibilityService.lastForegroundPackage }
                     val resolvedAppLabel = if (effectivePkg.isNotBlank()) {
                         runCatching {
                             val pm = appCtx?.packageManager
@@ -738,21 +753,33 @@ object PlayerCoordinator {
                 }
 
                 override suspend fun launchApp(packageName: String, freshStart: Boolean): Boolean {
-                    val cleanPkg = packageName.trim()
-                    if (cleanPkg.isBlank()) return false
                     val ctx = appCtx ?: return false
-                    val launchIntent = runCatching {
-                        ctx.packageManager.getLaunchIntentForPackage(cleanPkg)
-                    }.getOrNull() ?: return false
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                    if (freshStart) {
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    }
-                    if (PlayerAccessibilityService.launchActivityIntent(launchIntent)) return true
-                    return runCatching {
-                        ctx.startActivity(launchIntent)
-                        true
-                    }.getOrDefault(false)
+                    return PlayerPrismClonerBridge.launchPackageRobust(
+                        context = ctx,
+                        packageName = packageName,
+                        freshStart = freshStart,
+                        launchActivity = { intent -> PlayerAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { PlayerSafeLogBus.info(it) },
+                        logWarn = { PlayerSafeLogBus.warn(it) },
+                        logError = { PlayerSafeLogBus.error(it) }
+                    )
+                }
+
+                override fun isPrismRootPackage(packageName: String): Boolean {
+                    val ctx = appCtx ?: return PrismProtocol.isPrismStubPackageName(packageName)
+                    return PlayerPrismClonerBridge.isRootDelegationPackage(ctx, packageName)
+                }
+
+                override suspend fun switchPrismAccount(request: PrismSwitchRequest): Boolean {
+                    val ctx = appCtx ?: return false
+                    return PlayerPrismClonerBridge.triggerPrismSwitch(
+                        context = ctx,
+                        request = request,
+                        launchActivity = { intent -> PlayerAccessibilityService.launchActivityIntent(intent) },
+                        logInfo = { PlayerSafeLogBus.info(it) },
+                        logWarn = { PlayerSafeLogBus.warn(it) },
+                        logError = { PlayerSafeLogBus.error(it) }
+                    )
                 }
 
                 override fun setTrackingBoost(enabled: Boolean) {

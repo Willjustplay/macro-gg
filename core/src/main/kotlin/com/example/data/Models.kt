@@ -165,6 +165,11 @@ enum class AccountSwitchMethod(val label: String, val shortLabel: String, val de
         "Hybrid (Clone App + OCR)",
         "Hybrid",
         "Otomatis pindah clone app jika paket berbeda, lalu pilih akun di dalam game via OCR + Auto-Scroll."
+    ),
+    PRISM_ROOT(
+        "PRISM Root Cloner (Anti-BAL)",
+        "PRISM Root",
+        "Terhubung langsung ke PRISM Cloner (clone-app) via Broadcast Anti-BAL Root — ganti akun via slot #01/#02, package buatan app.prism.c.*, atau Switch Next siklik."
     )
 }
 
@@ -988,6 +993,10 @@ data class SelectAccountAction(
     val recentsSwipeDirection: RecentsSwipeDirection = RecentsSwipeDirection.AUTO,
     val exitWaitMs: Long = 1200L,
     val launchWaitMs: Long = 5000L,
+    /** For PRISM_ROOT mode: send app.prism.action.SWITCH_NEXT directly so PRISM cycles accounts in drag-and-drop order. */
+    val prismUseSwitchNext: Boolean = false,
+    /** Optional default game package (e.g. com.supercell.clashofclans) for PRISM_ROOT switching. */
+    val prismTargetPackage: String = "",
     val thenActions: List<Action> = emptyList(),
     val elseActions: List<Action> = emptyList(),
     val notFound: NotFoundMode = NotFoundMode.CONTINUE,
@@ -1169,6 +1178,12 @@ data class AccountProfile(
     /** Optional cloned/dual app package name for Clone App or Hybrid switching. */
     val packageName: String = "",
     val appLabel: String = "",
+    /** Optional real target game package (e.g. com.supercell.clashofclans) for PRISM Root Intent switching. */
+    val prismTargetPackage: String = "",
+    /** Optional PRISM dynamic slot order (1..99, 0 = auto from stub package suffix or Switch Next). */
+    val prismSlotOrder: Int = 0,
+    /** Optional PRISM profile ID for fixed-slot routing when dynamic routing is disabled in PRISM. */
+    val prismProfileId: String = "",
     val enabled: Boolean = true,
     /** Cooldown in minutes after finishing this account before rotating back to it (0 = none). */
     val cooldownMinutes: Int = 0,
@@ -1455,11 +1470,14 @@ fun Action.summary(): String {
         }
         is SelectAccountAction -> {
             val methodLabel = methodOverride?.shortLabel ?: "Ikuti Setelan Akun"
-            val scrollPart = if (methodOverride != AccountSwitchMethod.CLONE_APP) {
-                " • ${scrollDirection.shortLabel} maks ${maxScrolls}×"
-            } else ""
-            val area = if (region != null && methodOverride != AccountSwitchMethod.CLONE_APP) " • area" else ""
-            "$methodLabel$scrollPart$area"
+            val isPackageOnly = methodOverride == AccountSwitchMethod.CLONE_APP || methodOverride == AccountSwitchMethod.PRISM_ROOT
+            val detail = when {
+                methodOverride == AccountSwitchMethod.PRISM_ROOT && prismUseSwitchNext -> " • Switch Next"
+                !isPackageOnly -> " • ${scrollDirection.shortLabel} maks ${maxScrolls}×"
+                else -> ""
+            }
+            val area = if (region != null && !isPackageOnly) " • area" else ""
+            "$methodLabel$detail$area"
         }
         is VariableAction -> {
             val vName = variableName.trim().ifBlank { "hitung" }

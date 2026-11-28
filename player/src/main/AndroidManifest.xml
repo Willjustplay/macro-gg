@@ -16,6 +16,13 @@
         android:maxSdkVersion="32" />
 
     <queries>
+        <package android:name="app.prism.cloner" />
+        <intent>
+            <action android:name="app.prism.action.SWITCH_ACCOUNT" />
+        </intent>
+        <intent>
+            <action android:name="app.prism.action.SWITCH_NEXT" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

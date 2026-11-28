@@ -42,6 +42,10 @@ interface LuaBridge {
     fun getColorArgb(x: Int, y: Int): Int?
     fun findImage(name: String, threshold: Double, region: Region?): MatchResult? = null
     fun findAllImages(name: String, threshold: Double, maxResults: Int, region: Region?): List<MatchResult> = emptyList()
+    fun launchApp(packageName: String, freshStart: Boolean = false): Boolean = false
+    fun exitApp(packageName: String = "", mode: String = "close_recent"): Boolean = false
+    fun switchPrismAccount(request: PrismSwitchRequest): Boolean =
+        if (request.stubPackage.isNotBlank()) launchApp(request.stubPackage, freshStart = false) else false
     fun log(message: String)
 }
 
@@ -354,6 +358,80 @@ object SandboxedLuaEngine {
                     if (System.currentTimeMillis() >= deadline) return LuaValue.FALSE
                     bridge.sleepCooperative(100L)
                 }
+            }
+        })
+
+        // ---- App & PRISM Root Cloner APIs ----
+
+        // launchApp(packageName, [freshStart=false]) -> boolean
+        globals.set("launchApp", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val pkg = args.checkjstring(1).trim()
+                val freshStart = args.optboolean(2, false)
+                return LuaBoolean.valueOf(bridge.launchApp(pkg, freshStart))
+            }
+        })
+
+        // exitApp([packageName=""], [mode="close_recent"]) -> boolean
+        globals.set("exitApp", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val pkg = args.optjstring(1, "").trim()
+                val mode = args.optjstring(2, "close_recent").trim()
+                return LuaBoolean.valueOf(bridge.exitApp(pkg, mode))
+            }
+        })
+
+        // prismSwitchAccount(targetPackage, slotOrder, [profileId=""], [label=""]) -> boolean
+        globals.set("prismSwitchAccount", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val targetPkg = args.checkjstring(1).trim()
+                val slotOrder = args.checkint(2).coerceIn(0, 99)
+                val profileId = args.optjstring(3, "").trim()
+                val label = args.optjstring(4, "").trim()
+                val ok = bridge.switchPrismAccount(
+                    PrismSwitchRequest(
+                        targetPackage = targetPkg,
+                        slotOrder = slotOrder,
+                        profileId = profileId,
+                        displayLabel = label,
+                        switchNext = false
+                    )
+                )
+                return LuaBoolean.valueOf(ok)
+            }
+        })
+
+        // prismSwitchNext([targetPackage=""]) -> boolean
+        globals.set("prismSwitchNext", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val targetPkg = args.optjstring(1, "").trim()
+                val ok = bridge.switchPrismAccount(
+                    PrismSwitchRequest(
+                        targetPackage = targetPkg,
+                        switchNext = true
+                    )
+                )
+                return LuaBoolean.valueOf(ok)
+            }
+        })
+
+        // prismSwitchStub(stubPackage) -> boolean
+        globals.set("prismSwitchStub", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                checkState(bridge)
+                val stubPkg = args.checkjstring(1).trim()
+                val ok = bridge.switchPrismAccount(
+                    PrismSwitchRequest(
+                        stubPackage = stubPkg,
+                        slotOrder = PrismProtocol.parseSlotNumberFromPackage(stubPkg),
+                        switchNext = false
+                    )
+                )
+                return LuaBoolean.valueOf(ok)
             }
         })
 

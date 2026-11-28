@@ -70,6 +70,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.automation.InstalledAppInfo
+import com.example.automation.InstalledAppsHelper
+import com.example.automation.PrismClonerBridge
+import com.example.automation.PrismProtocol
+import com.example.automation.PrismSlotInfo
 import com.example.data.AccountFailBehavior
 import com.example.data.AccountProfile
 import com.example.data.AccountRotationMode
@@ -97,11 +102,23 @@ internal fun MacroAccountSwitchCard(
     isPremium: Boolean = true,
     onRequirePremium: (() -> Unit)? = null
 ) {
+    val context = LocalContext.current
     val cfg = macro.accountSwitch
     var loopsText by remember(macro.id, cfg.loopsPerAccount) { mutableStateOf(cfg.loopsPerAccount.toString()) }
     var minutesText by remember(macro.id, cfg.minutesPerAccount) { mutableStateOf(cfg.minutesPerAccount.toString()) }
     var editingAccount by remember { mutableStateOf<AccountProfile?>(null) }
     var showCreateAccount by remember { mutableStateOf(false) }
+    var prismInstalled by remember { mutableStateOf(false) }
+    var detectedPrismSlots by remember { mutableStateOf<List<PrismSlotInfo>>(emptyList()) }
+    var prismScanTick by remember { mutableStateOf(0) }
+
+    LaunchedEffect(prismScanTick, cfg.method) {
+        val (installed, slots) = withContext(Dispatchers.IO) {
+            PrismClonerBridge.isPrismInstalled(context) to PrismClonerBridge.discoverInstalledPrismRootSlots(context)
+        }
+        prismInstalled = installed
+        detectedPrismSlots = slots
+    }
 
     fun updateCfg(block: (AccountSwitchConfig) -> AccountSwitchConfig) {
         onUpdateMacro(macro.copy(accountSwitch = block(macro.accountSwitch)))
@@ -148,7 +165,7 @@ internal fun MacroAccountSwitchCard(
                                 color = ACCOUNT_CYAN
                             )
                             Text(
-                                "Rotasi banyak akun otomatis via OCR Daftar Akun + Auto-Scroll atau Ganti Clone App. Daftar akun pribadi TIDAK ikut diekspor ke .zip/.wjm.",
+                                "Rotasi banyak akun otomatis via OCR Daftar Akun + Auto-Scroll, Ganti Clone App, atau PRISM Root Cloner (Anti-BAL). Daftar akun pribadi TIDAK ikut diekspor ke .zip/.wjm.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -176,6 +193,104 @@ internal fun MacroAccountSwitchCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                // Live PRISM Cloner (clone-app) Connection Panel
+                if (cfg.method != AccountSwitchMethod.OCR_LIST || prismInstalled) {
+                    val statusColor = if (prismInstalled) Color(0xFF10B981) else Color(0xFFF59E0B)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = statusColor.copy(alpha = 0.10f),
+                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (prismInstalled) {
+                                            "🔗 PRISM Cloner Terhubung ✓ (${detectedPrismSlots.size} slot Root terdeteksi)"
+                                        } else {
+                                            "🔗 PRISM Cloner (${PrismProtocol.PRISM_HOST_PACKAGE}) belum terpasang"
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = statusColor
+                                    )
+                                    Text(
+                                        text = if (prismInstalled) {
+                                            "Package buatan app.prism.c.* otomatis dipicu via Broadcast Anti-BAL Root (tanpa error Force Stop / BAL)."
+                                        } else {
+                                            "Pasang PRISM Cloner (clone-app) untuk ganti akun Root instan tanpa duplikasi data."
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            if (prismInstalled) {
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (detectedPrismSlots.isNotEmpty()) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                val existingPkgs = cfg.accounts.map { it.packageName }.toHashSet()
+                                                val candidates = detectedPrismSlots.filter { it.stubPackage !in existingPkgs }
+                                                val remainingSlots = if (maxFreeAccounts != null && !isPremium) {
+                                                    (maxFreeAccounts - cfg.accounts.size).coerceAtLeast(0)
+                                                } else {
+                                                    candidates.size
+                                                }
+                                                if (remainingSlots == 0 && candidates.isNotEmpty()) {
+                                                    onRequirePremium?.invoke()
+                                                } else {
+                                                    val toAdd = candidates.take(remainingSlots).mapIndexed { idx, slot ->
+                                                        val orderNum = slot.slotOrder.takeIf { it > 0 } ?: (cfg.accounts.size + idx + 1)
+                                                        val cleanLbl = slot.displayLabel.ifBlank { "PRISM #$orderNum" }
+                                                        AccountProfile(
+                                                            id = newId(),
+                                                            label = cleanLbl,
+                                                            packageName = slot.stubPackage,
+                                                            appLabel = cleanLbl,
+                                                            prismTargetPackage = slot.sourcePackage,
+                                                            prismSlotOrder = slot.slotOrder,
+                                                            prismProfileId = slot.profileId,
+                                                            enabled = true
+                                                        )
+                                                    }
+                                                    updateCfg {
+                                                        it.copy(
+                                                            enabled = true,
+                                                            method = if (it.method == AccountSwitchMethod.OCR_LIST) AccountSwitchMethod.PRISM_ROOT else it.method,
+                                                            accounts = it.accounts + toAdd
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text("Impor ${detectedPrismSlots.size} Slot PRISM", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                    OutlinedButton(
+                                        onClick = { prismScanTick++ },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Segarkan Deteksi", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Trigger mode
                 Text("Kapan Otomatis Pindah Akun?", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
@@ -349,7 +464,11 @@ internal fun MacroAccountSwitchCard(
 
                 if (cfg.accounts.isEmpty()) {
                     Text(
-                        "Belum ada profil akun. Ketuk '+ Akun' untuk menambahkan nama/email OCR atau pilih Clone App.",
+                        if (cfg.method == AccountSwitchMethod.PRISM_ROOT) {
+                            "Mode PRISM Root sudah bisa langsung jalan (Switch Next otomatis mengikuti urutan di PRISM Cloner), atau ketuk 'Impor Slot PRISM' / '+ Akun' untuk kontrol slot spesifik."
+                        } else {
+                            "Belum ada profil akun. Ketuk '+ Akun' untuk menambahkan nama/email OCR atau pilih Clone App / package PRISM."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -382,7 +501,13 @@ internal fun MacroAccountSwitchCard(
                                     )
                                     val sub = buildList {
                                         if (acc.ocrKeyword.isNotBlank()) add("OCR: \"${acc.ocrKeyword}\"")
+                                        val isPrismPkg = PrismProtocol.isPrismStubPackageName(acc.packageName) || acc.prismSlotOrder > 0
+                                        if (isPrismPkg) {
+                                            val slotNum = acc.prismSlotOrder.takeIf { it > 0 } ?: PrismProtocol.parseSlotNumberFromPackage(acc.packageName)
+                                            add(if (slotNum > 0) "🔀 PRISM #%02d".format(slotNum) else "🔀 PRISM Root")
+                                        }
                                         if (acc.packageName.isNotBlank()) add("App: ${acc.appLabel.ifBlank { acc.packageName }}")
+                                        else if (acc.prismTargetPackage.isNotBlank()) add("Game: ${acc.prismTargetPackage}")
                                         if (acc.fallbackImageName.isNotBlank()) add("🖼 Fallback")
                                         if (acc.cooldownMinutes > 0) add("⏳ ${acc.cooldownMinutes}m")
                                     }.joinToString(" • ").ifBlank { "Ketuk untuk lengkapi kata kunci OCR / Clone App" }
@@ -489,6 +614,27 @@ internal fun MacroAccountSwitchCard(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilledTonalButton(
                         onClick = {
+                            val sel = SelectAccountAction(
+                                methodOverride = AccountSwitchMethod.PRISM_ROOT,
+                                exitPreviousApp = false,
+                                launchWaitMs = 6000L,
+                                prismUseSwitchNext = cfg.accounts.isEmpty(),
+                                prismTargetPackage = detectedPrismSlots.firstOrNull()?.sourcePackage.orEmpty(),
+                                delayAfterMs = 1500L
+                            )
+                            val tpl = listOf(sel)
+                            updateCfg { it.copy(enabled = true, method = AccountSwitchMethod.PRISM_ROOT, switchActions = it.switchActions + tpl) }
+                            onEditCreatedAction(sel)
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Filled.Bolt, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Template PRISM Root", style = MaterialTheme.typography.labelSmall)
+                    }
+                    FilledTonalButton(
+                        onClick = {
                             val sel = SelectAccountAction(methodOverride = AccountSwitchMethod.OCR_LIST, delayAfterMs = 1500L)
                             val tpl = listOf(sel, WaitAction(durationMs = 6000L, delayAfterMs = 0L))
                             updateCfg { it.copy(enabled = true, method = AccountSwitchMethod.OCR_LIST, switchActions = it.switchActions + tpl) }
@@ -575,9 +721,17 @@ internal fun AccountProfileEditorDialog(
     var fallbackImg by remember(initial.id) { mutableStateOf(initial.fallbackImageName) }
     var packageName by remember(initial.id) { mutableStateOf(initial.packageName) }
     var appLabel by remember(initial.id) { mutableStateOf(initial.appLabel) }
+    var prismTargetPackage by remember(initial.id) { mutableStateOf(initial.prismTargetPackage) }
+    var prismSlotText by remember(initial.id) {
+        mutableStateOf(if (initial.prismSlotOrder > 0) initial.prismSlotOrder.toString() else "")
+    }
+    var prismProfileId by remember(initial.id) { mutableStateOf(initial.prismProfileId) }
     var cooldownText by remember(initial.id) { mutableStateOf(initial.cooldownMinutes.toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
     var showAppPicker by remember { mutableStateOf(false) }
+
+    val usesOcr = method != AccountSwitchMethod.CLONE_APP && method != AccountSwitchMethod.PRISM_ROOT
+    val showPrismFields = method == AccountSwitchMethod.PRISM_ROOT || PrismProtocol.isPrismStubPackageName(packageName)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -604,7 +758,7 @@ internal fun AccountProfileEditorDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                if (method != AccountSwitchMethod.CLONE_APP) {
+                if (usesOcr) {
                     OutlinedTextField(
                         value = ocrKeyword,
                         onValueChange = { ocrKeyword = it.take(80) },
@@ -635,7 +789,12 @@ internal fun AccountProfileEditorDialog(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("Aplikasi Clone / Game", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    if (method == AccountSwitchMethod.PRISM_ROOT) "Package PRISM / Aplikasi Target"
+                                    else "Aplikasi Clone / PRISM / Game",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                                 Text(
                                     if (packageName.isBlank()) "Belum dipilih — ketuk untuk pilih"
                                     else "${appLabel.ifBlank { packageName }} ($packageName)",
@@ -658,14 +817,48 @@ internal fun AccountProfileEditorDialog(
                     OutlinedTextField(
                         value = packageName,
                         onValueChange = { packageName = it.trim() },
-                        label = { Text("Package Name (opsional isi manual)") },
-                        placeholder = { Text("mis. com.supercell.clashofclans") },
+                        label = { Text("Package Name / Stub PRISM (opsional)") },
+                        placeholder = { Text("mis. app.prism.c.p123456.u01") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
 
-                if (method != AccountSwitchMethod.CLONE_APP && images.isNotEmpty()) {
+                if (showPrismFields) {
+                    OutlinedTextField(
+                        value = prismTargetPackage,
+                        onValueChange = { prismTargetPackage = it.trim() },
+                        label = { Text("Package Game Asli PRISM (opsional)") },
+                        placeholder = { Text("mis. com.supercell.clashofclans") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = prismSlotText,
+                            onValueChange = { prismSlotText = it.filter(Char::isDigit).take(2) },
+                            label = { Text("Urutan Slot #") },
+                            placeholder = { Text("1..99") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = prismProfileId,
+                            onValueChange = { prismProfileId = it.trim().take(80) },
+                            label = { Text("Profile ID (opsional)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1.4f)
+                        )
+                    }
+                    Text(
+                        "Package PRISM (app.prism.c.*) atau Nomor Slot #01..#99 otomatis dikirim via Broadcast Anti-BAL ke PRISM Cloner.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF38BDF8)
+                    )
+                }
+
+                if (usesOcr && images.isNotEmpty()) {
                     Text("Gambar Cadangan (Opsional jika font game sulit dibaca OCR)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         item(key = "fb_none") {
@@ -735,14 +928,26 @@ internal fun AccountProfileEditorDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val cleanLabel = label.trim().ifBlank { ocrKeyword.trim().ifBlank { appLabel.trim().ifBlank { "Akun" } } }
+                    val cleanPkg = packageName.trim()
+                    val parsedSlot = (prismSlotText.toIntOrNull() ?: 0).coerceIn(0, 99)
+                        .takeIf { it > 0 } ?: PrismProtocol.parseSlotNumberFromPackage(cleanPkg)
+                    val cleanLabel = label.trim().ifBlank {
+                        ocrKeyword.trim().ifBlank {
+                            appLabel.trim().ifBlank {
+                                if (parsedSlot > 0) "PRISM #$parsedSlot" else "Akun"
+                            }
+                        }
+                    }
                     onConfirm(
                         initial.copy(
                             label = cleanLabel,
                             ocrKeyword = ocrKeyword.trim(),
                             fallbackImageName = fallbackImg.trim(),
-                            packageName = packageName.trim(),
+                            packageName = cleanPkg,
                             appLabel = appLabel.trim(),
+                            prismTargetPackage = prismTargetPackage.trim(),
+                            prismSlotOrder = parsedSlot,
+                            prismProfileId = prismProfileId.trim(),
                             cooldownMinutes = (cooldownText.toIntOrNull() ?: 0).coerceIn(0, 10080),
                             enabled = enabled
                         )
@@ -758,10 +963,15 @@ internal fun AccountProfileEditorDialog(
     if (showAppPicker) {
         InstalledCloneAppPickerDialog(
             currentPackage = packageName,
-            onSelect = { pkg, lbl ->
-                packageName = pkg
-                appLabel = lbl
-                if (label.startsWith("Akun ")) label = lbl
+            onSelect = { info ->
+                packageName = info.packageName
+                appLabel = info.label
+                if (info.isPrismRoot) {
+                    if (info.prismTargetPackage.isNotBlank()) prismTargetPackage = info.prismTargetPackage
+                    if (info.prismSlotOrder in 1..99) prismSlotText = info.prismSlotOrder.toString()
+                    if (info.prismProfileId.isNotBlank()) prismProfileId = info.prismProfileId
+                }
+                if (label.startsWith("Akun ")) label = info.label
                 showAppPicker = false
             },
             onDismiss = { showAppPicker = false }
@@ -772,40 +982,31 @@ internal fun AccountProfileEditorDialog(
 @Composable
 internal fun InstalledCloneAppPickerDialog(
     currentPackage: String,
-    onSelect: (packageName: String, appLabel: String) -> Unit,
+    onSelect: (InstalledAppInfo) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
-    var apps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var apps by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.IO) {
-            runCatching {
-                val pm = context.packageManager
-                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-                    .map { ri ->
-                        val pkg = ri.activityInfo.packageName
-                        val lbl = runCatching { ri.loadLabel(pm).toString() }.getOrDefault(pkg)
-                        pkg to lbl
-                    }
-                    .distinctBy { it.first }
-                    .sortedBy { it.second.lowercase() }
-            }.getOrDefault(emptyList())
+            InstalledAppsHelper.loadLaunchableApps(context, forceRefresh = true)
         }
     }
 
     val filtered = remember(apps, search) {
         val q = search.trim().lowercase()
-        if (q.isEmpty()) apps else apps.filter { (pkg, lbl) ->
-            lbl.lowercase().contains(q) || pkg.lowercase().contains(q)
+        if (q.isEmpty()) apps else apps.filter { info ->
+            info.label.lowercase().contains(q) ||
+                info.packageName.lowercase().contains(q) ||
+                info.prismTargetPackage.lowercase().contains(q)
         }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pilih Aplikasi Game / Clone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
+        title = { Text("Pilih Aplikasi Game / Clone / PRISM", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -821,19 +1022,53 @@ internal fun InstalledCloneAppPickerDialog(
                         .heightIn(max = 320.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(filtered, key = { it.first }) { (pkg, lbl) ->
-                        val isSel = pkg == currentPackage
+                    items(filtered, key = { it.packageName }) { info ->
+                        val isSel = info.packageName == currentPackage
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable { onSelect(pkg, lbl) },
+                                .clickable { onSelect(info) },
                             shape = RoundedCornerShape(8.dp),
-                            color = if (isSel) ACCOUNT_CYAN.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                            color = when {
+                                isSel -> ACCOUNT_CYAN.copy(alpha = 0.20f)
+                                info.isPrismRoot -> Color(0xFF0E7490).copy(alpha = 0.16f)
+                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                            }
                         ) {
                             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-                                Text(lbl, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(pkg, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        info.label,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (info.isPrismRoot) {
+                                        Text(
+                                            if (info.prismSlotOrder > 0) "PRISM #%02d".format(info.prismSlotOrder) else "PRISM Root",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    if (info.isPrismRoot && info.prismTargetPackage.isNotBlank()) {
+                                        "${info.packageName} → ${info.prismTargetPackage}"
+                                    } else {
+                                        info.packageName
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }

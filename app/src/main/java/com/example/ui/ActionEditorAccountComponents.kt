@@ -157,7 +157,7 @@ internal fun SelectAccountActionEditor(
         }
     }
 
-    if (effectiveMethod != AccountSwitchMethod.CLONE_APP) {
+    if (effectiveMethod != AccountSwitchMethod.CLONE_APP && effectiveMethod != AccountSwitchMethod.PRISM_ROOT) {
         HorizontalDivider()
         Text("Pengaturan OCR Daftar Akun + Auto-Scroll", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = accent)
 
@@ -250,7 +250,39 @@ internal fun SelectAccountActionEditor(
         }
     }
 
-    if (effectiveMethod != AccountSwitchMethod.OCR_LIST) {
+    if (effectiveMethod == AccountSwitchMethod.PRISM_ROOT) {
+        HorizontalDivider()
+        Text("Pengaturan PRISM Root Cloner (Anti-BAL)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = accent)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "Gunakan Switch Next siklik PRISM (otomatis ikut urutan drag & drop PRISM)",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = action.prismUseSwitchNext,
+                onCheckedChange = { onUpdate(action.copy(prismUseSwitchNext = it)) }
+            )
+        }
+
+        OutlinedTextField(
+            value = action.prismTargetPackage,
+            onValueChange = { onUpdate(action.copy(prismTargetPackage = it.trim())) },
+            label = { Text("Package Game Target PRISM (opsional)") },
+            placeholder = { Text("mis. com.supercell.clashofclans") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        AccountNumberInput("Tunggu loading game setelah switch (ms)", action.launchWaitMs.toString()) {
+            onUpdate(action.copy(launchWaitMs = (it.toLongOrNull() ?: action.launchWaitMs).coerceIn(0L, 60000L)))
+        }
+    } else if (effectiveMethod != AccountSwitchMethod.OCR_LIST) {
         HorizontalDivider()
         Text("Pengaturan Ganti Clone App", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = accent)
 

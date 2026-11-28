@@ -1358,24 +1358,26 @@ class OverlayMacroSettingsView(
         // Method selector
         var chosenMethod = cfg.method
         bodyContainer.addView(sectionLabel("Metode Ganti Akun"))
-        val methodRow = LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
-        }
         val methodBtns = mutableListOf<Pair<AccountSwitchMethod, TextView>>()
-        AccountSwitchMethod.entries.forEachIndexed { idx, m ->
-            val tv = makeBtn(m.shortLabel, if (m == chosenMethod) "#0284C7" else "#1E293B", marginEndDp = 0) {
-                chosenMethod = m
-                methodBtns.forEach { (item, v) ->
-                    (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == chosenMethod) "#0284C7" else "#1E293B"))
-                }
+        AccountSwitchMethod.entries.chunked(2).forEach { pair ->
+            val r = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
             }
-            methodBtns += m to tv
-            methodRow.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = if (idx < AccountSwitchMethod.entries.lastIndex) dp(4) else 0
-            })
+            pair.forEachIndexed { idx, m ->
+                val tv = makeBtn(m.shortLabel, if (m == chosenMethod) "#0284C7" else "#1E293B", marginEndDp = 0) {
+                    chosenMethod = m
+                    methodBtns.forEach { (item, v) ->
+                        (v.background as? GradientDrawable)?.setColor(Color.parseColor(if (item == chosenMethod) "#0284C7" else "#1E293B"))
+                    }
+                }
+                methodBtns += m to tv
+                r.addView(tv, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = if (idx < pair.lastIndex) dp(4) else 0
+                })
+            }
+            bodyContainer.addView(r)
         }
-        bodyContainer.addView(methodRow)
 
         // Trigger selector
         var chosenTrigger = cfg.triggerMode
@@ -1433,10 +1435,57 @@ class OverlayMacroSettingsView(
             }
         })
 
-        // Account Profiles List + Quick Add
+        // Account Profiles List + Quick Add + PRISM Auto-Import
         bodyContainer.addView(dividerLine())
         val freeLimitNote = if (maxFreeAccounts != null && !isPremium) " (Gratis maks $maxFreeAccounts)" else ""
         bodyContainer.addView(sectionLabel("Daftar Akun (${cfg.accounts.size})$freeLimitNote"))
+
+        val detectedPrism = PrismClonerBridge.discoverInstalledPrismRootSlots(context)
+        if (detectedPrism.isNotEmpty()) {
+            bodyContainer.addView(makeBtn("🔗 Impor ${detectedPrism.size} Slot PRISM Root", "#0E7490", marginEndDp = 0) {
+                val existingPkgs = macro.accountSwitch.accounts.map { it.packageName }.toHashSet()
+                val candidates = detectedPrism.filter { it.stubPackage !in existingPkgs }
+                val allowed = if (maxFreeAccounts != null && !isPremium) {
+                    (maxFreeAccounts - macro.accountSwitch.accounts.size).coerceAtLeast(0)
+                } else candidates.size
+                if (allowed == 0 && candidates.isNotEmpty()) {
+                    Toast.makeText(
+                        context,
+                        "Versi gratis mendukung hingga $maxFreeAccounts akun. Upgrade ke PRO di aplikasi utama.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@makeBtn
+                }
+                val toAdd = candidates.take(allowed).mapIndexed { idx, slot ->
+                    val num = slot.slotOrder.takeIf { it > 0 } ?: (macro.accountSwitch.accounts.size + idx + 1)
+                    val lbl = slot.displayLabel.ifBlank { "PRISM #$num" }
+                    AccountProfile(
+                        label = lbl,
+                        packageName = slot.stubPackage,
+                        appLabel = lbl,
+                        prismTargetPackage = slot.sourcePackage,
+                        prismSlotOrder = slot.slotOrder,
+                        prismProfileId = slot.profileId,
+                        enabled = true
+                    )
+                }
+                val updated = macro.copy(
+                    accountSwitch = macro.accountSwitch.copy(
+                        enabled = true,
+                        method = if (macro.accountSwitch.method == AccountSwitchMethod.OCR_LIST) AccountSwitchMethod.PRISM_ROOT else macro.accountSwitch.method,
+                        accounts = macro.accountSwitch.accounts + toAdd
+                    )
+                )
+                macro = updated
+                onUpdateMacro(updated)
+                Toast.makeText(context, "${toAdd.size} slot PRISM Root ditambahkan.", Toast.LENGTH_SHORT).show()
+                rebuildBody()
+            }.apply {
+                layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(6)
+                }
+            })
+        }
 
         val quickLabelEt = addTextRow(bodyContainer, "Nama akun baru (mis. Farm 1)", "")
         val quickKwEt = addTextRow(bodyContainer, "Kata kunci OCR di layar (nama/email/server)", "")
@@ -1470,7 +1519,11 @@ class OverlayMacroSettingsView(
 
         if (cfg.accounts.isEmpty()) {
             bodyContainer.addView(TextView(context).apply {
-                text = "Belum ada akun. Tambahkan minimal 2 akun di atas (atau kelola lengkap dengan gambar fallback & cooldown di Editor Aplikasi)."
+                text = if (cfg.method == AccountSwitchMethod.PRISM_ROOT) {
+                    "Mode PRISM Root otomatis mengirim SWITCH_NEXT ke PRISM Cloner walau daftar akun kosong, atau ketuk 'Impor Slot PRISM Root' di atas."
+                } else {
+                    "Belum ada akun. Tambahkan minimal 2 akun di atas (atau kelola lengkap dengan gambar fallback & cooldown di Editor Aplikasi)."
+                }
                 setTextColor(Color.parseColor("#94A3B8"))
                 textSize = 10.5f
                 setPadding(dp(2), dp(2), dp(2), dp(6))
@@ -1505,9 +1558,13 @@ class OverlayMacroSettingsView(
                 })
                 val sub = buildList {
                     if (acc.ocrKeyword.isNotBlank()) add("OCR: \"${acc.ocrKeyword}\"")
+                    if (PrismProtocol.isPrismStubPackageName(acc.packageName) || acc.prismSlotOrder > 0) {
+                        val sNum = acc.prismSlotOrder.takeIf { it > 0 } ?: PrismProtocol.parseSlotNumberFromPackage(acc.packageName)
+                        add(if (sNum > 0) "🔀 PRISM #%02d".format(sNum) else "🔀 PRISM")
+                    }
                     if (acc.packageName.isNotBlank()) add("App: ${acc.appLabel.ifBlank { acc.packageName }}")
                     if (acc.cooldownMinutes > 0) add("CD ${acc.cooldownMinutes}m")
-                }.joinToString(" • ").ifBlank { "Ketuk 📱 untuk pilih Clone App" }
+                }.joinToString(" • ").ifBlank { "Ketuk 📱 untuk pilih Clone / PRISM App" }
                 infoCol.addView(TextView(context).apply {
                     text = sub
                     setTextColor(Color.parseColor("#94A3B8"))
@@ -1543,6 +1600,30 @@ class OverlayMacroSettingsView(
         // Switch Actions Steps + Templates
         bodyContainer.addView(dividerLine())
         bodyContainer.addView(sectionLabel("Urutan Aksi Ganti Akun (${cfg.switchActions.size})"))
+
+        bodyContainer.addView(makeBtn("⚡ Template PRISM Root (Anti-BAL)", "#0284C7", marginEndDp = 0) {
+            val selectAct = SelectAccountAction(
+                methodOverride = AccountSwitchMethod.PRISM_ROOT,
+                exitPreviousApp = false,
+                launchWaitMs = 6000L,
+                prismUseSwitchNext = macro.accountSwitch.accounts.isEmpty(),
+                prismTargetPackage = detectedPrism.firstOrNull()?.sourcePackage.orEmpty(),
+                delayAfterMs = 1000L
+            )
+            val updated = macro.copy(
+                accountSwitch = macro.accountSwitch.copy(
+                    enabled = true,
+                    method = AccountSwitchMethod.PRISM_ROOT,
+                    switchActions = macro.accountSwitch.switchActions + listOf(selectAct)
+                )
+            )
+            macro = updated
+            onUpdateMacro(updated)
+            editingActionId = selectAct.id
+            rebuildBody()
+        }.apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+        })
 
         val tplRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
@@ -1648,7 +1729,7 @@ class OverlayMacroSettingsView(
         val listHolder = LinearLayout(context).apply { orientation = VERTICAL }
         bodyContainer.addView(listHolder)
 
-        val allApps = InstalledAppsHelper.loadLaunchableApps(context)
+        val allApps = InstalledAppsHelper.loadLaunchableApps(context, forceRefresh = true)
 
         fun renderFiltered(queryRaw: String) {
             listHolder.removeAllViews()
@@ -1656,7 +1737,15 @@ class OverlayMacroSettingsView(
             if (account.packageName.isNotBlank()) {
                 listHolder.addView(makeBtn("Kosongkan Clone App (hanya pakai OCR)", "#475569", marginEndDp = 0) {
                     val updatedList = macro.accountSwitch.accounts.map {
-                        if (it.id == account.id) it.copy(packageName = "", appLabel = "") else it
+                        if (it.id == account.id) {
+                            it.copy(
+                                packageName = "",
+                                appLabel = "",
+                                prismTargetPackage = "",
+                                prismSlotOrder = 0,
+                                prismProfileId = ""
+                            )
+                        } else it
                     }
                     val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
                     macro = updated
@@ -1668,7 +1757,9 @@ class OverlayMacroSettingsView(
                 })
             }
             val matched = if (q.isEmpty()) allApps else allApps.filter {
-                it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q)
+                it.label.lowercase().contains(q) ||
+                    it.packageName.lowercase().contains(q) ||
+                    it.prismTargetPackage.lowercase().contains(q)
             }
             if (matched.isEmpty()) {
                 listHolder.addView(TextView(context).apply {
@@ -1684,13 +1775,21 @@ class OverlayMacroSettingsView(
                     orientation = VERTICAL
                     setPadding(dp(10), dp(6), dp(10), dp(6))
                     background = GradientDrawable().apply {
-                        setColor(Color.parseColor("#1E293B"))
+                        setColor(Color.parseColor(if (info.isPrismRoot) "#0F2942" else "#1E293B"))
                         cornerRadius = dp(9).toFloat()
                     }
                     layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
                     setOnClickListener {
                         val updatedList = macro.accountSwitch.accounts.map {
-                            if (it.id == account.id) it.copy(packageName = info.packageName, appLabel = info.label) else it
+                            if (it.id == account.id) {
+                                it.copy(
+                                    packageName = info.packageName,
+                                    appLabel = info.label,
+                                    prismTargetPackage = if (info.isPrismRoot) info.prismTargetPackage else "",
+                                    prismSlotOrder = if (info.isPrismRoot) info.prismSlotOrder else 0,
+                                    prismProfileId = if (info.isPrismRoot) info.prismProfileId else ""
+                                )
+                            } else it
                         }
                         val updated = macro.copy(accountSwitch = macro.accountSwitch.copy(accounts = updatedList))
                         macro = updated
@@ -1699,16 +1798,22 @@ class OverlayMacroSettingsView(
                         rebuildBody()
                     }
                 }
+                val titleText = if (info.isPrismRoot) {
+                    val tag = if (info.prismSlotOrder > 0) " [PRISM #%02d]".format(info.prismSlotOrder) else " [PRISM Root]"
+                    "${info.label}$tag"
+                } else info.label
                 item.addView(TextView(context).apply {
-                    text = info.label
-                    setTextColor(Color.WHITE)
+                    text = titleText
+                    setTextColor(if (info.isPrismRoot) Color.parseColor("#38BDF8") else Color.WHITE)
                     textSize = 11.5f
                     typeface = Typeface.DEFAULT_BOLD
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 })
                 item.addView(TextView(context).apply {
-                    text = info.packageName
+                    text = if (info.isPrismRoot && info.prismTargetPackage.isNotBlank()) {
+                        "${info.packageName} → ${info.prismTargetPackage}"
+                    } else info.packageName
                     setTextColor(Color.parseColor("#94A3B8"))
                     textSize = 9.5f
                     maxLines = 1
@@ -3591,6 +3696,7 @@ class OverlayMacroSettingsView(
                 bodyContainer.addView(sectionLabel("Metode Pilih Akun"))
                 val methodOptions = listOf<Pair<AccountSwitchMethod?, String>>(
                     null to "Ikuti Macro (${macro.accountSwitch.method.shortLabel})",
+                    AccountSwitchMethod.PRISM_ROOT to AccountSwitchMethod.PRISM_ROOT.shortLabel,
                     AccountSwitchMethod.OCR_LIST to AccountSwitchMethod.OCR_LIST.shortLabel,
                     AccountSwitchMethod.CLONE_APP to AccountSwitchMethod.CLONE_APP.shortLabel,
                     AccountSwitchMethod.HYBRID to AccountSwitchMethod.HYBRID.shortLabel
@@ -3615,6 +3721,17 @@ class OverlayMacroSettingsView(
                     }
                     bodyContainer.addView(r)
                 }
+
+                bodyContainer.addView(dividerLine())
+                bodyContainer.addView(sectionLabel("PRISM Root Cloner (Anti-BAL)"))
+                val prismNextCheck = CheckBox(context).apply {
+                    text = "Gunakan PRISM Switch Next otomatis (SWITCH_NEXT)"
+                    isChecked = action.prismUseSwitchNext
+                    setTextColor(Color.parseColor("#38BDF8"))
+                    textSize = 11f
+                }
+                bodyContainer.addView(prismNextCheck)
+                val prismTargetF = addTextRow(bodyContainer, "Package Game Target PRISM (opsional)", action.prismTargetPackage)
 
                 bodyContainer.addView(dividerLine())
                 bodyContainer.addView(sectionLabel("OCR Daftar Akun + Auto-Scroll"))
@@ -3727,6 +3844,8 @@ class OverlayMacroSettingsView(
                             exitPreviousApp = exitPrevCheck.isChecked,
                             exitWaitMs = (exitWaitF.text.toString().toLongOrNull() ?: sa.exitWaitMs).coerceIn(0L, 15_000L),
                             launchWaitMs = (launchWaitF.text.toString().toLongOrNull() ?: sa.launchWaitMs).coerceIn(0L, 60_000L),
+                            prismUseSwitchNext = prismNextCheck.isChecked,
+                            prismTargetPackage = prismTargetF.text.toString().trim(),
                             notFound = notFoundMode,
                             delayAfterMs = (delF.text.toString().toLongOrNull() ?: sa.delayAfterMs).coerceAtLeast(0L)
                         )

@@ -94,6 +94,9 @@ fun LuaStudioScreen(
             "zoomIn" to "\nzoomIn(540, 1000, 260, 400)",
             "zoomOut" to "\nzoomOut(540, 1000, 260, 400)",
             "matchColor" to "\nif matchColor(540, 1200, \"#2DD4BF\", 15) then click(540, 1200) end",
+            "prismNext" to "\nprismSwitchNext(\"com.supercell.clashofclans\")\nsleep(6000)",
+            "prismSlot" to "\nprismSwitchAccount(\"com.supercell.clashofclans\", 1)\nsleep(6000)",
+            "launchApp" to "\nlaunchApp(\"app.prism.c.p123456.u01\")\nsleep(6000)",
             "sleep" to "\nsleep(500)",
             "log" to "\nlog(\"Pesan log\")"
         )
