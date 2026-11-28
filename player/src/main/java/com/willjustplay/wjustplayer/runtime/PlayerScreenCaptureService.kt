@@ -519,6 +519,42 @@ class PlayerScreenCaptureService : Service() {
             }
         }
 
+        /**
+         * Non-intrusive, ultra-low-RAM JPEG snapshot for Telegram / Discord `/ss` and notifications:
+         * never triggers rotation resizes or full-res Bitmap copies while a macro is running.
+         */
+        fun captureScaledJpeg(maxDimPx: Int = 960, quality: Int = 70): ByteArray? {
+            if (!_isCapturing.value) return null
+            val scaled: Bitmap = synchronized(frameLock) {
+                val bmp = latestBitmap ?: return null
+                if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return null
+                val srcW = bmp.width
+                val srcH = bmp.height
+                val longest = maxOf(srcW, srcH)
+                val ratio = if (longest > maxDimPx) maxDimPx.toFloat() / longest.toFloat() else 1f
+                val dstW = (srcW * ratio).toInt().coerceAtLeast(1)
+                val dstH = (srcH * ratio).toInt().coerceAtLeast(1)
+                try {
+                    val outBmp = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.RGB_565)
+                    val canvas = android.graphics.Canvas(outBmp)
+                    val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+                    canvas.drawBitmap(bmp, null, android.graphics.Rect(0, 0, dstW, dstH), paint)
+                    outBmp
+                } catch (_: Throwable) {
+                    return null
+                }
+            }
+            return try {
+                val out = java.io.ByteArrayOutputStream(40 * 1024)
+                scaled.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(40, 90), out)
+                out.toByteArray()
+            } catch (_: Throwable) {
+                null
+            } finally {
+                runCatching { scaled.recycle() }
+            }
+        }
+
         fun samplePixelArgb(x: Int, y: Int): Int? {
             synchronized(frameLock) {
                 val bmp = latestBitmap ?: return null

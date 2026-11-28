@@ -40,6 +40,7 @@ import com.example.vision.PreparedTemplate
 import com.willjustplay.wjustplayer.data.PlayerAccountStore
 import com.willjustplay.wjustplayer.data.PlayerStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 enum class PlayerEngineState { IDLE, RUNNING, PAUSED, ERROR }
 
@@ -64,6 +66,9 @@ enum class PlayerEngineState { IDLE, RUNNING, PAUSED, ERROR }
 object PlayerCoordinator {
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val botScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, _ -> }
+    )
 
     @Volatile private var store: PlayerStore? = null
     @Volatile private var accountStore: PlayerAccountStore? = null
@@ -71,6 +76,7 @@ object PlayerCoordinator {
     @Volatile private var appCtx: Context? = null
     @Volatile private var activeJob: Job? = null
 
+    private val runGeneration = AtomicLong(0L)
     private val stopRequested = AtomicBoolean(false)
     private val pausedFlag = AtomicBoolean(false)
     private val skipAccountRequested = AtomicBoolean(false)
@@ -192,7 +198,7 @@ object PlayerCoordinator {
     fun syncRemoteBotListener() {
         val cfg = notifyStore?.notificationConfig?.value ?: com.example.data.NotificationConfig()
         remoteBotListener.sync(
-            scope = engineScope,
+            scope = botScope,
             config = cfg,
             allowed = true,
             hostProvider = { buildRemoteControlHost() }
@@ -295,12 +301,13 @@ object PlayerCoordinator {
         }
 
         override fun captureScreenshotJpeg(): ByteArray? {
-            val bmp = runCatching { PlayerScreenCaptureService.captureBitmapCopy() }.getOrNull() ?: return null
-            return try {
-                PlayerNotifyManager.encodeScreenshotJpeg(bmp)
-            } finally {
-                runCatching { bmp.recycle() }
-            }
+            if (!PlayerScreenCaptureService.isCapturing.value) return null
+            val first = PlayerScreenCaptureService.captureScaledJpeg(maxDimPx = 960, quality = 70)
+            if (first != null && first.isNotEmpty()) return first
+            runCatching { Thread.sleep(120L) }
+            return if (PlayerScreenCaptureService.isCapturing.value) {
+                PlayerScreenCaptureService.captureScaledJpeg(maxDimPx = 960, quality = 70)
+            } else null
         }
     }
 
@@ -485,6 +492,7 @@ object PlayerCoordinator {
         }
         publishLiveStats()
 
+        val myRunId = runGeneration.incrementAndGet()
         activeJob = engineScope.launch {
             val loopText = if (effectiveMacro.loopCount <= 0) "∞" else "${effectiveMacro.loopCount}×"
             PlayerSafeLogBus.info("Memulai '${effectiveMacro.name}' (Loop: $loopText).")
@@ -517,7 +525,7 @@ object PlayerCoordinator {
                             sendRemote = true,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = false,
-                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { PlayerScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
@@ -850,7 +858,7 @@ object PlayerCoordinator {
                             sendRemote = true,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = false,
-                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { PlayerScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
@@ -902,7 +910,7 @@ object PlayerCoordinator {
                         sendRemote = sendRemote,
                         includeScreenshot = includeScreenshot,
                         triggerPhoneAlarm = triggerPhoneAlarm,
-                        captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                        captureJpeg = { PlayerScreenCaptureService.captureScaledJpeg() }
                     )
                 }
 
@@ -956,15 +964,15 @@ object PlayerCoordinator {
                 PlayerSafeLogBus.info("Macro dihentikan.")
             } catch (t: Throwable) {
                 endReason = "Error"
-                _engineState.value = PlayerEngineState.ERROR
+                if (runGeneration.get() == myRunId) {
+                    _engineState.value = PlayerEngineState.ERROR
+                }
                 PlayerSafeLogBus.error("Terjadi kesalahan saat menjalankan macro.")
             } finally {
                 periodicReportJob.cancel()
                 deviceGuardJob.cancel()
                 autoBlackScreenJob.cancel()
                 localStore?.flushClockWatermark()
-                PlayerScreenCaptureService.trackingCaptureMode = false
-                PlayerScreenCaptureService.highFrequencyCapture = false
                 val endedAt = System.currentTimeMillis()
                 val elapsed = (endedAt - startedAt).coerceAtLeast(0L)
                 val finalLoops = _currentLoop.value
@@ -1002,7 +1010,7 @@ object PlayerCoordinator {
                             sendRemote = cfg.notifyOnError,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = cfg.alarmOnError,
-                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { PlayerScreenCaptureService.captureScaledJpeg() }
                         )
                     } else if (endReason == "Selesai" && (cfg.notifyOnComplete || cfg.alarmOnComplete)) {
                         PlayerNotifyManager.dispatchAsync(
@@ -1015,21 +1023,25 @@ object PlayerCoordinator {
                             sendRemote = cfg.notifyOnComplete,
                             includeScreenshot = cfg.attachScreenshotOnEvents,
                             triggerPhoneAlarm = cfg.alarmOnComplete,
-                            captureBitmap = { PlayerScreenCaptureService.captureBitmapCopy() }
+                            captureJpeg = { PlayerScreenCaptureService.captureScaledJpeg() }
                         )
                     }
                 }
-                _activeAccountLabel.value = ""
-                _humanBreakRemainingSec.value = 0
-                _liveSessionStats.value = null
-                _thermalPaused.value = false
-                _afkBlackScreenActive.value = false
-                skipAccountRequested.set(false)
-                val elapsedSec = elapsed / 1000.0
-                if (_engineState.value != PlayerEngineState.ERROR) {
-                    _engineState.value = PlayerEngineState.IDLE
+                if (runGeneration.get() == myRunId) {
+                    PlayerScreenCaptureService.trackingCaptureMode = false
+                    PlayerScreenCaptureService.highFrequencyCapture = false
+                    _activeAccountLabel.value = ""
+                    _humanBreakRemainingSec.value = 0
+                    _liveSessionStats.value = null
+                    _thermalPaused.value = false
+                    _afkBlackScreenActive.value = false
+                    skipAccountRequested.set(false)
+                    if (_engineState.value != PlayerEngineState.ERROR) {
+                        _engineState.value = PlayerEngineState.IDLE
+                    }
+                    pausedFlag.set(false)
                 }
-                pausedFlag.set(false)
+                val elapsedSec = elapsed / 1000.0
                 PlayerSafeLogBus.info(String.format("Selesai (%.1f detik).", elapsedSec))
             }
         }

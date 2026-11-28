@@ -44,19 +44,26 @@ object PlayerNotifyManager {
         sendRemote: Boolean = true,
         includeScreenshot: Boolean = false,
         triggerPhoneAlarm: Boolean = false,
-        captureBitmap: (() -> Bitmap?)? = null
+        captureBitmap: (() -> Bitmap?)? = null,
+        captureJpeg: (() -> ByteArray?)? = null
     ) {
         val appCtx = context?.applicationContext
         if (triggerPhoneAlarm && appCtx != null) {
             triggerLocalAlarm(appCtx, config, title, message, level)
         }
         if (sendRemote && config.hasAnyRemoteConfigured()) {
-            val bitmapCopy = if (includeScreenshot) runCatching { captureBitmap?.invoke() }.getOrNull() else null
+            val preBitmapCopy = if (includeScreenshot && captureJpeg == null) {
+                runCatching { captureBitmap?.invoke() }.getOrNull()
+            } else null
             ioScope.launch {
                 val jpeg = try {
-                    encodeScreenshotJpeg(bitmapCopy)
+                    if (includeScreenshot && captureJpeg != null) {
+                        runCatching { captureJpeg.invoke() }.getOrNull()
+                    } else {
+                        encodeScreenshotJpeg(preBitmapCopy)
+                    }
                 } finally {
-                    runCatching { bitmapCopy?.recycle() }
+                    runCatching { preBitmapCopy?.recycle() }
                 }
                 val res = RemoteNotifier.send(
                     config = config,

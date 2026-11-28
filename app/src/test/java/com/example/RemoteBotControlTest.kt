@@ -68,6 +68,10 @@ class RemoteBotControlTest {
             RemoteBotCommandParser.parseText("/ss @hp2")
         )
         assertEquals(
+            RemoteBotCommand.Screenshot(targetDevice = "hp1"),
+            RemoteBotCommandParser.parseText("/ss hp1")
+        )
+        assertEquals(
             RemoteBotCommand.AfkSwitch(ToggleOp.ON),
             RemoteBotCommandParser.parseText("!afk on")
         )
@@ -375,5 +379,142 @@ class RemoteBotControlTest {
         assertTrue(sent)
         assertEquals("Bot tok123", recorded.first().headers["Authorization"])
         assertTrue(recorded.first().contentType!!.startsWith("multipart/form-data"))
+    }
+
+    @Test
+    fun listenerRunsScreenshotAsynchronouslyWithoutStoppingRunningMacroOrFailingLoop() = runBlocking {
+        val ssStarted = java.util.concurrent.CountDownLatch(1)
+        val allowSsFinish = java.util.concurrent.CountDownLatch(1)
+        val statusSent = java.util.concurrent.CountDownLatch(1)
+        val photoOrFallbackSent = java.util.concurrent.CountDownLatch(2)
+        val pollCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val stopCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val captureCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        var runningId: String? = "m_running"
+
+        val mockTransport = RemoteBotHttpTransport { req ->
+            when {
+                req.url.contains("/getUpdates") -> {
+                    when (pollCalls.getAndIncrement()) {
+                        // Bootstrap drain
+                        0 -> BotHttpResponse(200, """{"ok":true,"result":[]}""")
+                        // Batch 1: /ss (blocks briefly) followed by /status in same poll batch
+                        1 -> BotHttpResponse(
+                            200,
+                            """{"ok":true,"result":[
+                                {"update_id":10,"message":{"message_id":1,"from":{"id":555},"chat":{"id":555},"text":"/ss"}},
+                                {"update_id":11,"message":{"message_id":2,"from":{"id":555},"chat":{"id":555},"text":"/status"}}
+                            ]}"""
+                        )
+                        // Batch 2: /ss when capture throws an Error — must NEVER stop macro or kill listener
+                        2 -> BotHttpResponse(
+                            200,
+                            """{"ok":true,"result":[
+                                {"update_id":12,"message":{"message_id":3,"from":{"id":555},"chat":{"id":555},"text":"/ss"}}
+                            ]}"""
+                        )
+                        // Batch 3: /ss when capture returns null — sends polite fallback text, macro stays running
+                        3 -> BotHttpResponse(
+                            200,
+                            """{"ok":true,"result":[
+                                {"update_id":13,"message":{"message_id":4,"from":{"id":555},"chat":{"id":555},"text":"/ss"}}
+                            ]}"""
+                        )
+                        else -> {
+                            Thread.sleep(60L)
+                            BotHttpResponse(200, """{"ok":true,"result":[]}""")
+                        }
+                    }
+                }
+                req.url.contains("/sendPhoto") -> {
+                    photoOrFallbackSent.countDown()
+                    BotHttpResponse(200, """{"ok":true}""")
+                }
+                req.url.contains("/sendMessage") -> {
+                    val bodyStr = req.body?.toString(Charsets.UTF_8).orEmpty()
+                    if (bodyStr.contains("Status Wjust macro")) {
+                        statusSent.countDown()
+                    } else if (bodyStr.contains("Gagal mengambil screenshot")) {
+                        photoOrFallbackSent.countDown()
+                    }
+                    BotHttpResponse(200, """{"ok":true}""")
+                }
+                else -> BotHttpResponse(200, """{"ok":true}""")
+            }
+        }
+
+        val runningMacro = Macro(
+            id = "m_running",
+            name = "Farm Aktif",
+            remoteControlEnabled = true,
+            remoteId = "farm1"
+        )
+        val host = object : RemoteControlHost {
+            override val appDisplayName = "Wjust macro"
+            override val deviceTag = ""
+            override fun listMacros(): List<Macro> = listOf(runningMacro)
+            override fun runningMacroId(): String? = runningId
+            override fun liveStats(): LiveSessionStats =
+                LiveSessionStats("Farm Aktif", System.currentTimeMillis() - 10_000L, 4, 40, 0, 0, 0, 0)
+            override fun deviceHealth(): DeviceHealthSnapshot = DeviceHealthSnapshot(90, false, 35.0f)
+            override fun isAfkBlackScreenActive(): Boolean = false
+            override fun startActiveMacro(macro: Macro) = RemoteHostOpResult(true, "OK")
+            override fun stopActiveMacro(macro: Macro): RemoteHostOpResult {
+                stopCalls.incrementAndGet()
+                runningId = null
+                return RemoteHostOpResult(true, "Stopped")
+            }
+            override fun setPassiveMacroEnabled(macro: Macro, enabled: Boolean) = RemoteHostOpResult(true, "OK")
+            override fun setActionRemoteActive(macro: Macro, actionId: String, active: Boolean) = RemoteHostOpResult(true, "OK")
+            override fun setAfkBlackScreen(enabled: Boolean) = RemoteHostOpResult(true, "OK")
+            override fun captureScreenshotJpeg(): ByteArray? {
+                return when (captureCalls.getAndIncrement()) {
+                    0 -> {
+                        ssStarted.countDown()
+                        allowSsFinish.await(3, java.util.concurrent.TimeUnit.SECONDS)
+                        byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x11, 0x22)
+                    }
+                    1 -> throw OutOfMemoryError("Simulated heavy game heap pressure")
+                    else -> null
+                }
+            }
+        }
+
+        val botScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() +
+                kotlinx.coroutines.Dispatchers.IO +
+                kotlinx.coroutines.CoroutineExceptionHandler { _, _ -> }
+        )
+        val listener = com.example.automation.RemoteBotListener(transport = mockTransport)
+        try {
+            val cfg = com.example.data.NotificationConfig(
+                telegramBotToken = "tg_tok",
+                telegramChatId = "555",
+                remoteBot = com.example.data.RemoteBotConfig(
+                    listenerEnabled = true,
+                    telegramRemoteEnabled = true
+                )
+            )
+            listener.sync(scope = botScope, config = cfg, allowed = true, hostProvider = { host })
+
+            // /status MUST complete even while /ss #1 is still blocked inside captureScreenshotJpeg()!
+            assertTrue("Expected /ss #1 to start", ssStarted.await(3, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue("Expected /status not to be blocked by /ss", statusSent.await(3, java.util.concurrent.TimeUnit.SECONDS))
+
+            // Now let /ss #1 finish, then let /ss #2 (OOM) and /ss #3 (null fallback) complete
+            allowSsFinish.countDown()
+            assertTrue(
+                "Expected /ss #1 photo and /ss #3 fallback reply",
+                photoOrFallbackSent.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            )
+
+            // Running macro must NEVER be stopped or touched by any /ss outcome
+            assertEquals("m_running", runningId)
+            assertEquals(0, stopCalls.get())
+            assertTrue(listener.status.value.telegramListening)
+        } finally {
+            listener.stop()
+            botScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
     }
 }
